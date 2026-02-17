@@ -1,0 +1,235 @@
+import sys
+import os
+import subprocess
+import random
+import string
+import smtplib
+
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
+from datetime import datetime
+
+def generate_random_string(length=8):
+    characters = string.ascii_letters + string.digits
+    return ''.join(random.choice(characters) for _ in range(length))
+
+def read_smtp_config(log_file_name):
+    try:
+        with open("smtp.txt", "r") as f:
+            smtp_server = f.readline().strip()
+            dest_email = f.readline().strip()
+            source_email = f.readline().strip()
+            base_work_path = f.readline().strip()
+    except FileNotFoundError:
+        print(f"Error: smtp.txt not found")
+        with open(log_file_name, "a") as log:
+            log.write(f"Error: smtp.txt not found\n")
+        exit(1)
+
+    return smtp_server, dest_email, source_email, base_work_path
+
+def send_email(smtp_server, source_email, dest_email, log_file_name, subject, body):
+    msg = MIMEMultipart()
+    msg['From'] = source_email
+    msg['To'] = dest_email
+    msg['Subject'] = subject
+
+    msg.attach(MIMEText(body, 'plain'))
+
+    if log_file_name:
+        with open(log_file_name, 'rb') as attachment:
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload((attachment).read())
+            encoders.encode_base64(part)
+            part.add_header('Content-Disposition', "attachment; filename= %s" % os.path.basename(log_file_name))
+            msg.attach(part)
+
+    try:
+        server = smtplib.SMTP(smtp_server)
+        server.sendmail(source_email, dest_email, msg.as_string())
+        server.quit()
+        print(f"Email sent successfully to {dest_email}")
+    except Exception as e:
+        print(f"Failed to send email. Error: {e}")
+        with open(log_file_name, "a") as log:
+            log.write(f"Failed to send email. Error: {e}\n")
+
+def send_success_email(smtp_server, source_email, dest_email):
+    subject = "Script Completed Successfully"
+    body = "The script completed successfully without any errors."
+
+    send_email(smtp_server, source_email, dest_email, None, subject, body)
+
+def process_commands( base_command="startup", source_host="127.0.0.1", source_path="/tmp", destination_archive="startup", vm_number="0", temp_folder_name="/tmp", log_file_name="/tmp/process_commands.log"):
+    current_datetime = datetime.now()
+    syncz = os.path.join(temp_folder_name, ".syncz")
+    incz = os.path.join(os.path.dirname(destination_archive), current_datetime.strftime("%Y-%m-%d_%H-%M-%S") + "_" + os.path.basename(destination_archive))
+
+    command_sequence = {
+        "incz" : [
+            f'sshfs "{source_host}:{source_path}" "{temp_folder_name}" -o idmap=user',
+            f'if [ ! -f "{syncz}" ]; then date +"%Y%m%d%H%M.%S" > "{syncz}"; fi',
+            f'find "{temp_folder_name}" -newermt "$(cat "{syncz}")" -type f -print0 | tar --null --use-compress-program=zstd -cvf "{incz}" -T -',
+            f'if [ $(stat -c%s "{incz}") -eq 22 ]; then rm "{incz}"; else date +"%Y%m%d%H%M.%S" > "{syncz}"; fi;'
+            f'fusermount -u "{temp_folder_name}"' ],
+        "syncz" : [
+            f"sshfs {source_host}:{source_path} {temp_folder_name} -o idmap=user",
+            f"tar --zstd -cf {destination_archive} -C {temp_folder_name} .",
+            f"fusermount -u {temp_folder_name}" ],
+        "iterate" : [
+            f'ssh root@{source_host} "vim-cmd vmsvc/snapshot.create {vm_number} BackupSnapshot SnapshotBackup 0 1"',
+            f"sshfs -o idmap=user root@{source_host}:{source_path} {temp_folder_name}",
+            f'find {temp_folder_name} -type f \( -name "*.vmdk" -o -name "*.vmx" -o -name "*.vmxf" -o -name "*.vmsd" \) -not \( -name "*00000*" -o -name "*sesparse*" \) -print | tar --use-compress-program=zstd -cvf {destination_archive} -T -',
+            f"fusermount -u {temp_folder_name}",
+            f'ssh root@{source_host} "vim-cmd vmsvc/snapshot.removeall {vm_number}"' ],
+        "tapez" : [
+            f"cp {source_path} {destination_archive}" ],
+        "remotez" : [
+            f"rsync {source_path} {source_host}:{destination_archive}" ],
+        "testz" : [
+            f"zstd -t {source_path}", f"zstd -d --stdout {source_path} | tar tf -" ],
+        "startup" : [
+            f"echo {temp_folder_name}", f"figlet -f slant {sys.argv[0]}", f"mkdir {temp_folder_name}" ]
+    }
+
+    lockfile = f"/tmp/{os.path.basename(destination_archive)}.lock"
+
+    try:
+        if os.path.exists(lockfile):
+            print(f"Lockfile {lockfile} already exists. Skipping.")
+            with open(log_file_name, "a") as log:
+                log.write(f"Lockfile {lockfile} already exists. Skipping.\n")
+            return -1
+        else:
+            with open(lockfile, "w") as lock:
+                lock.write(str(os.getpid()))
+
+        for command_exec in command_sequence[base_command]:
+            print(f"{command_exec}")
+            result = subprocess.run(command_exec, shell=True, capture_output=True, text=True)
+            print(f"{result.returncode},{result.stdout},{result.stderr}")
+            if result.returncode != 0:
+                raise Exception(f"{result.returncode},{result.stdout},{result.stderr}")
+    except Exception as e:
+        subprocess.run("fusermount -u {temp_folder_name}")
+        os.remove(lockfile)
+
+        print(f"{e}")
+        with open(log_file_name, "a") as log:
+            log.write(f"{e}\n")
+
+        return -1
+    else:
+        os.remove(lockfile)
+
+def main():
+    # Define a dictionary to map commands to their argument requirements
+    commands = {
+        "syncz": [],
+        "incz" : [],
+        "iterate": ["base_dest_path"],
+        "tapez": ["base_dest_path"],
+        "remotez": ["base_dest_host", "base_dest_path"],
+        "testz": []
+    }
+
+    # Check if the correct number of arguments is provided
+    if len(sys.argv) < 2:
+        print("No command provided. Please provide a valid command.")
+        sys.exit(1)
+
+    # Get the command (always the first argument)
+    base_command = sys.argv[1]
+
+    # Check if the command is valid
+    if base_command not in commands:
+        print(f"Unknown command: {base_command}")
+        sys.exit(1)
+
+    # Check if the correct number of arguments is provided for the command
+    if len(sys.argv) != len(commands[base_command]) + 3:
+        print(f"{len(sys.argv)} {len(commands[base_command])}\nIncorrect number of arguments for '{base_command}' command.")
+        sys.exit(1)
+
+    # Get the arguments based on the command
+    base_source_path = sys.argv[2]
+    args = sys.argv[3:] if base_command != "syncz" else []
+
+    # Process the command
+
+    if base_command == "tapez":
+        base_dest_path = args[0]
+
+    elif base_command == "remotez":
+        base_dest_host = args[0]
+        base_dest_path = args[1]
+
+    elif base_command == "iterate":
+        base_dest_path = args[0]
+
+    log_file_name = f"/tmp/{os.path.basename(__file__)[:-3]}_{generate_random_string()}.log"
+    smtp_server, dest_email, source_email, base_work_path = read_smtp_config(log_file_name)
+    temp_folder_name = f"{base_work_path}/{os.path.basename(__file__)[:-3]}_{generate_random_string()}"
+
+    source_host = "127.0.0.1"
+    vm_number = "0"
+    source_path = "/tmp"
+    destination_archive = "/tmp/archive.tar.zst"
+
+    process_commands( base_command="startup", temp_folder_name=temp_folder_name )
+
+    try:
+        for sync_file in os.listdir(base_source_path):
+            if sync_file.endswith(".syncz") and (base_command == "syncz" or base_command == "incz"):
+                with open(os.path.join(base_source_path,sync_file), "r") as f:
+                    source_path_with_host = f.readline().strip()
+                    dest_archive = f.readline().strip()
+
+                source_parts = source_path_with_host.split(":")
+                source_host = source_parts[0]
+                source_path = source_parts[1]
+
+                if process_commands( base_command=base_command, source_host=source_host, source_path=source_path, destination_archive=dest_archive, temp_folder_name=temp_folder_name, log_file_name=log_file_name ) == -1:
+                    raise Exception(f"Error creating {dest_archive}")
+
+            if sync_file.endswith(".backup") and base_command == "iterate":
+                with open(os.path.join(base_source_path,sync_file), "r") as f:
+                    source_host = f.readline().strip()
+                    source_path = f.readline().strip()
+                    dest_archive = f.readline().strip()
+                    vm_number = f.readline().strip()
+
+                if process_commands( base_command=base_command, source_host=source_host, source_path=source_path, vm_number=vm_number, destination_archive=os.path.join(base_dest_path,dest_archive), temp_folder_name=temp_folder_name, log_file_name=log_file_name ) == -1:
+                    raise Exception(f"Error on {source_host}:{source_path}")
+
+            if sync_file.endswith(".tape") and base_command == "tapez":
+                source_archive = os.path.join(base_source_path, sync_file[:-5])
+                destination_archive = os.path.join(base_dest_path, sync_file[:-5])
+
+                if process_commands( base_command=base_command, source_path=source_archive, destination_archive=destination_archive, log_file_name=log_file_name) == -1:
+                    raise Exception(f"Error copying {source_archive}")
+
+            if sync_file.endswith(".tar.zst") and base_command == "testz":
+                source_archive = os.path.join(base_source_path, sync_file)
+                if process_commands( base_command=base_command, source_path=source_archive, log_file_name=log_file_name ) == -1:
+                    raise Exception(f"Error testing {source_archive}")
+
+            if sync_file.endswith(".remote") and base_command == "remotez":
+                source_archive = os.path.join(base_source_path, sync_file[:-7])
+                destination_archive = os.path.join( base_dest_path, sync_file[:-7] )
+                if process_commands( base_command=base_command, source_host=base_dest_host, source_path=source_archive, destination_archive=destination_archive, log_file_name=log_file_name ) == -1:
+                    raise Exception(f"Error syncing {source_archive} to {base_dest_host}")
+    except Exception as e:
+        os.rmdir(temp_folder_name)
+        print(f"Error: {e}")
+        with open(log_file_name, "a") as log:
+            log.write(f"Error: {e}\n")
+        return -1
+    else:
+        os.rmdir(temp_folder_name)
+
+
+if __name__ == "__main__":
+    main()

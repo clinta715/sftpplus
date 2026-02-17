@@ -1,0 +1,26 @@
+{
+    "hostnames": {
+        "172.16.1.16": "172.16.1.16"
+    },
+    "usernames": {
+        "172.16.1.16": "dairy"
+    },
+    "passwords": {
+        "172.16.1.16": "gAAAAABphA1HLOTxutLHotNEQSDLUKkf8EnJKrxHH8l5ewCoHulf48nnFUF7TvYz6UnXC_U-6DJZ3RTAgT5YNFj3bBnYJZS7OA=="
+    },
+    "ports": {
+        "172.16.1.16": 22
+    },
+    "key": {
+        "172.16.1.16": ""
+    },
+    "initial_remote_dir": {
+        "172.16.1.16": "/mnt"
+    },
+    "initial_local_dir": {
+        "172.16.1.16": "/"
+    },
+    "show_manager_on_startup": true,
+    "bookmarks": {},
+    "encryption_key": "NFqPu-rskO2fz_y_ThywMOo4FJPH0wyeaJzr2auTG_w="
+}

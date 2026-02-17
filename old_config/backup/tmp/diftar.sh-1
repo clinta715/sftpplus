@@ -1,0 +1,55 @@
+#!/bin/bash
+
+# Function to display usage instructions
+usage() {
+    echo "Usage: $0 init <days>"
+    echo "       $0 <destination_directory>"
+    exit 1
+}
+
+# Function to create the init_date and init_days files
+create_init_files() {
+    echo "$(date +%Y-%m-%d)" > init_date
+    echo "$1" > init_days
+}
+
+# Function to remove the oldest archive in the destination directory
+remove_oldest_archive() {
+    oldest_file=$(ls -t "${destination_directory}"/*.tar.zst | tail -1)
+    rm "${oldest_file}"
+}
+
+# Check if the script is run without arguments
+if [[ $# -eq 0 ]]; then
+    usage
+fi
+
+# Check if the script is run with the init command
+if [[ $1 == "init" && $# -eq 2 && $2 =~ ^[0-9]+$ ]]; then
+    create_init_files "$2"
+    echo "Initialization completed. Please run the script again with the destination directory."
+    exit 0
+fi
+
+# Check if init_date and init_days files exist
+if [[ ! -f "init_date" || ! -f "init_days" ]]; then
+    echo "Error: Initialization files not found. Please run the script with the 'init' command and specify the number of days."
+    exit 1
+fi
+
+# Read init_date and init_days from files
+init_date=$(cat "init_date")
+init_days=$(cat "init_days")
+current_date=$(date +%Y-%m-%d)
+destination_directory="$1"
+days_passed=$(( ($(date -d "$current_date" +%s) - $(date -d "$init_date" +%s)) / 86400 ))
+
+# Check if the number of days passed equals init_days
+if [[ $days_passed -eq $init_days ]]; then
+    remove_oldest_archive
+    echo "$current_date" > init_date
+fi
+
+# Create the zstd compressed tar file with files created since the previous day
+tar_filename="${destination_directory}/$(date +%Y-%m-%d).tar.zst"
+find . -type f -newermt "$init_date" -print0 | tar --null --zstd -cvf "$tar_filename" --files-from=-

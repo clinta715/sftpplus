@@ -1,0 +1,43 @@
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
+import argparse
+
+def send_email(smtp_host, subject, body, from_address, to_address, attachment, tls=False, port=25):
+    msg = MIMEMultipart()
+    msg['From'] = from_address
+    msg['To'] = to_address
+    msg['Subject'] = subject
+
+    msg.attach(MIMEText(body, 'plain'))
+
+    with open(attachment, "rb") as attachment_file:
+        part = MIMEApplication(attachment_file.read(), Name=attachment)
+        part['Content-Disposition'] = f'attachment; filename="{attachment}"'
+        msg.attach(part)
+
+    try:
+        server = smtplib.SMTP(smtp_host, port)
+        if tls:
+            server.starttls()
+        server.sendmail(from_address, to_address, msg.as_string())
+        server.quit()
+        print("Email sent successfully.")
+    except Exception as e:
+        print(f"Error: {e}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Send an email with attachment using SMTP.")
+    parser.add_argument("-o", "--tls", action="store_true", help="Use TLS (default: no)")
+    parser.add_argument("-s", "--smtp_host", required=True, help="SMTP host IP address or name")
+    parser.add_argument("-p", "--port", default=25, type=int, help="SMTP port (default: 25)")
+    parser.add_argument("-m", "--subject", required=True, help="Email subject")
+    parser.add_argument("-b", "--body", required=True, help="Email body")
+    parser.add_argument("-f", "--from_address", required=True, help="Email from address")
+    parser.add_argument("-t", "--to_address", required=True, help="Email to address")
+    parser.add_argument("-a", "--attachment", required=False, help="Path to the attachment file")
+
+    args = parser.parse_args()
+
+    send_email(args.smtp_host, args.subject, args.body, args.from_address, args.to_address, args.attachment, args.tls, args.port)

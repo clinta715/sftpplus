@@ -1,0 +1,48 @@
+{
+    "command_sequence": {
+        "incz": [
+            "sshfs '{source_host}:{source_path}' '{temp_folder_name}' -o idmap=user",
+            "if [ ! -f '{syncz}' ]; then date +'%Y-%m-%d %H:%M:%S' > '{syncz}'; fi",
+            "find '{temp_folder_name}' -newermt \"$(cat '{syncz}')\" -type f -print0 | tar --null --use-compress-program=zstd -cvf '{incz}' -T - > {incz}.txt && if [ -f '{incz}.txt' ]; then if [ $(stat -c%s '{incz}.txt') -eq 0 ]; then rm '{incz}.txt'; fi; fi;",
+            "if [ $(stat -c%s '{incz}') -eq 22 ]; then rm '{incz}'; else date +'%Y-%m-%d %H:%M:%S' > '{syncz}'; fi;",
+            "fusermount -u '{temp_folder_name}'"
+        ],
+        "syncz": [
+            "sshfs {source_host}:{source_path} {temp_folder_name} -o idmap=user",
+            "tar --zstd -cf {destination_archive} -C {temp_folder_name} .",
+            "fusermount -u {temp_folder_name}"
+        ],
+        "iterate": [
+            "ssh root@{source_host} \"vim-cmd vmsvc/snapshot.create {vm_number} BackupSnapshot SnapshotBackup 0 1\"",
+            "sshfs -o idmap=user root@{source_host}:{source_path} {temp_folder_name}",
+            "find {temp_folder_name} -type f ( -name '*.vmdk' -o -name '*.vmx' -o -name '*.vmxf' -o -name '*.vmsd' -not ( -name '*00000*' -o -name '*sesparse*' ) -print | tar --use-compress-program=zstd -cvf {destination_archive} -T-)",
+            "fusermount -u {temp_folder_name}",
+            "ssh root@{source_host} 'vim-cmd vmsvc/snapshot.removeall {vm_number}'"
+        ],
+        "tapez": [
+            "cp {source_path} {destination_archive}"
+        ],
+        "remotez": [
+            "rsync {source_path} {source_host}:{destination_archive}"
+        ],
+        "testz": [
+            "zstd -t {source_path}",
+            "zstd -d --stdout {source_path} | tar tf -"
+        ],
+        "startup": [
+            "echo {temp_folder_name}",
+            "figlet -f slant {script_me}",
+            "mkdir {temp_folder_name}"
+        ]
+    }
+}
+{
+  "commands": {
+    "syncz": [],
+    "incz": [],
+    "iterate": ["base_dest_path"],
+    "tapez": ["base_dest_path"],
+    "remotez": ["base_dest_host", "base_dest_path"],
+    "testz": []
+  }
+}

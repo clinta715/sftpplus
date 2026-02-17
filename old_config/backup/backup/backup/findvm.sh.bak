@@ -1,0 +1,31 @@
+#!/bin/bash
+
+# Check if the required argument is provided
+if [ $# -eq 0 ]; then
+  echo "Usage: $0 <vm_name_to_compare>"
+  exit 1
+fi
+
+# The name of the VM to compare is the first command-line argument
+vm_name_to_compare="$1"
+
+# List of ESXi servers (replace with your own list)
+esxi_servers=("172.16.1.10" "172.16.1.11" "172.16.1.28")
+
+# Loop through the ESXi servers
+for server in "${esxi_servers[@]}"; do
+  echo "Connecting to $server..."
+  
+  # Use esxcli to list VMs on the ESXi server
+  # vm_list=$(esxcli --server "$server" vm process list)
+  vm_list=$(ssh root@$server 'vim-cmd vmsvc/getallvms' | grep -E '^\s+[0-9]+ ' | awk '{print $2}')
+
+  # Check if the VM name matches the provided argument
+  if echo "$vm_list" | grep -q "$vm_name_to_compare"; then
+    echo "VM '$vm_name_to_compare' found on $server"
+  else
+    echo "VM '$vm_name_to_compare' not found on $server"
+  fi
+
+  echo "=================================="
+done

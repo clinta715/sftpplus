@@ -1,0 +1,125 @@
+import os
+import sys
+import subprocess
+import paramiko
+import smtplib
+from email.mime.text import MIMEText
+import time
+from pyVim import connect
+from pyVmomi import vim
+
+# Function to perform backups
+def perform_backup(source_host, source_path, dest_filename, vm_number, dest_path, archive_dest):
+    print(f"Performing backup for VM {vm_number}...")
+    
+    start_time = time.time()  # Record start time
+    
+    # Establish SSH connection
+    try:
+        si = connect.SmartConnectNoSSL(
+            host='your_vcenter_server',
+            user='your_username',
+            pwd='your_password'
+        )
+    except Exception as e:
+        print(f"Failed to connect to vCenter server: {str(e)}")
+        return
+
+    # Find VM by VM number
+    content = si.RetrieveContent()
+    container = content.viewManager.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
+    vm = None
+
+    for item in container.view:
+        if item.summary.config.vmPathName == source_path:
+            vm = item
+            break
+
+    if not vm:
+        print(f"VM with path {source_path} not found.")
+        connect.Disconnect(si)
+        return
+
+    # Create a snapshot
+    snapshot_name = 'BackupSnapshot'
+    snapshot_description = 'SnapshotBackup'
+    task = vm.CreateSnapshot_Task(name=snapshot_name, description=snapshot_description, memory=False, quiesce=False)
+    task.WaitForCompletion()
+
+    if task.info.state == vim.TaskInfo.State.success:
+        print(f"Created snapshot for VM {vm_number} successfully.")
+    else:
+        print(f"Failed to create a snapshot for VM {vm_number}. Exiting.")
+        connect.Disconnect(si)
+        return
+
+    # ... (rest of the function remains the same)
+
+    # Remove the snapshot after backup is completed
+    snapshots = vm.snapshot.rootSnapshotList
+    for snapshot in snapshots:
+        if snapshot.name == snapshot_name:
+            snapshot.RemoveSnapshot_Task(removeChildren=False)
+            print(f"Removed snapshot for VM {vm_number}.")
+            break
+
+    # Disconnect from vCenter server
+    connect.Disconnect(si)
+
+    end_time = time.time()  # Record end time
+    elapsed_time = end_time - start_time
+    print(f"Time taken for backup: {elapsed_time:.2f} seconds")
+
+# Check if two arguments were provided for the directory path and archive destination
+if len(sys.argv) != 3:
+    print(f"Usage: {sys.argv[0]} <directory_path> <archive_dest>")
+    sys.exit(1)
+
+# Directory path provided as the first argument
+directory_path = sys.argv[1]
+
+# Archive destination provided as the second argument
+archive_dest = sys.argv[2]
+
+# Ensure the provided directory exists
+if not os.path.isdir(directory_path):
+    print(f"Directory not found: {directory_path}")
+    sys.exit(1)
+
+print("Backup Program Starting...")
+
+# Find all .backup files in the backups subfolder
+for root, dirs, files in os.walk(directory_path):
+    for file in files:
+        if file.endswith(".backup"):
+            with open(os.path.join(root, file), 'r') as backup_file:
+                lines = backup_file.readlines()
+                if len(lines) == 4:
+                    source_host, source_path, dest_filename, vm_number = lines
+                    perform_backup(source_host.strip(), source_path.strip(), dest_filename.strip(), vm_number.strip(), directory_path, archive_dest)
+
+# Send email and remove log file using smtplib
+def send_email():
+    sender = 'backup0@dairylandlabs.com'
+    receiver = 'DL_ITMonitor@dairylandlabs.com'
+    subject = 'System Backup CentOS'
+    message = 'backuppc status'
+
+    msg = MIMEText(message)
+    msg['Subject'] = subject
+    msg['From'] = sender
+    msg['To'] = receiver
+
+    try:
+        server = smtplib.SMTP('172.16.1.25')
+        server.sendmail(sender, [receiver], msg.as_string())
+        print('Email sent successfully.')
+    except Exception as e:
+        print(f'Failed to send email: {str(e)}')
+    finally:
+        server.quit()
+
+send_email()
+
+# Remove log file
+os.remove("/tmp/iterate.log")

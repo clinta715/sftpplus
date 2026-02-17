@@ -1,0 +1,91 @@
+# Basic configuration
+base_command: syncz
+source_host: 127.0.0.1
+source_path: /tmp/source
+destination_archive: /tmp/archive.tar.zst
+temp_folder_name: /tmp/syncz_temp
+vm_number: 0
+destination_path: /tmp/destination
+destination_file: archive.tar.zst
+
+# Command parameters
+commands:
+  syncz: []
+  incz: []
+  inczst: []
+  iterate: 
+    - base_dest_path
+  tapez: 
+    - base_dest_path
+  remotez: 
+    - base_dest_host
+    - base_dest_path
+  cleanz: []
+  cleanz7: []
+  b2z: 
+    - base_dest_path
+    - base_dest_host
+  testz: []
+
+# Command sequences
+command_sequence:
+  b2z:
+    - "b2 upload-file {destination_path} {source_path} {destination_file}"
+    - "find '{destination_path}' -type d -name 'livesyncz*' -exec rmdir {} +"
+  
+  cleanz:
+    - "find '{destination_path}' -type f -name '*.txt' -mtime +1 -delete"
+    - "find '{destination_path}' -type f -name '*.zip' -mtime +1 -delete"
+    - "find '{destination_path}' -type f -name '*.tar.zst' -mtime +1 -delete"
+    - "find '{destination_path}' -type d -name 'livesyncz*' -exec rmdir {} +"
+  
+  cleanz7:
+    - "find '{destination_path}' -type f -name '*.txt' -mtime +7 -delete"
+    - "find '{destination_path}' -type f -name '*.zip' -mtime +7 -delete"
+    - "find '{destination_path}' -type f -name '*.tar.zst' -mtime +7 -delete"
+    - "find '{destination_path}' -type d -name 'livesyncz*' -exec rmdir {} +"
+  
+  inczst:
+    - "sshfs '{source_host}:{source_path}' '{temp_folder_name}' -o idmap=user"
+    - "if [ ! -f '{syncz}' ]; then date +'%Y-%m-%d %H:%M:%S' > '{syncz}'; fi"
+    - "find '{temp_folder_name}' -newermt \"$(cat '{syncz}')\" -type f -print0 | tar --null --use-compress-program=zstd --ignore-failed-read -cvf '{incz}' -T - > {incz}.txt && if [ -f '{incz}.txt' ]; then if [ $(stat -c%s '{incz}.txt') -eq 0 ]; then rm '{incz}.txt'; fi; fi;"
+    - "if [ $(stat -c%s '{incz}') -eq 22 ]; then rm '{incz}'; else date +'%Y-%m-%d %H:%M:%S' > '{syncz}'; fi;"
+    - "fusermount -u '{temp_folder_name}'"
+    - "rmdir {temp_folder_name}"
+  
+  incz:
+    - "sshfs '{source_host}:{source_path}' '{temp_folder_name}' -o idmap=user"
+    - "if [ ! -f '{syncz}' ]; then date +'%Y-%m-%d %H:%M:%S' > '{syncz}'; fi"
+    - "find '{temp_folder_name}' -newermt \"$(cat '{syncz}')\" -type f -print0 | zip -r '{incz}' -@ && unzip -l {incz} | awk 'NR==4 {{ for (i=4; i<=NF; i++) printf \"%s%s\", $i, (i<NF ? \" \" : \"\"); print \"\" }}' > '{incz}.txt'"
+    - "date +'%Y-%m-%d %H:%M:%S' > '{syncz}'"
+    - "fusermount -u '{temp_folder_name}'"
+    - "rmdir {temp_folder_name}"
+  
+  syncz:
+    - "mkdir {temp_folder_name}"
+    - "sshfs {source_host}:{source_path} {temp_folder_name} -o idmap=user"
+    - "tar --zstd --ignore-failed-read -cf {destination_archive} -C {temp_folder_name} ."
+    - "fusermount -u {temp_folder_name}"
+    - "rmdir {temp_folder_name}"
+  
+  iterate:
+    - "ssh root@{source_host} \"vim-cmd vmsvc/snapshot.create {vm_number} BackupSnapshot SnapshotBackup 0 1\""
+    - "sshfs -o idmap=user root@{source_host}:{source_path} {temp_folder_name}"
+    - "find {temp_folder_name} -type f \\( -name '*.vmdk' -o -name '*.vmx' -o -name '*.vmxf' -o -name '*.vmsd' \\) -not \\( -name '*00000*' -o -name '*sesparse*' \\) -print | tar --ignore-failed-read --use-compress-program=zstd -cvf {destination_archive} -T -"
+    - "fusermount -u '{temp_folder_name}'"
+    - "ssh root@{source_host} 'vim-cmd vmsvc/snapshot.removeall {vm_number}'"
+  
+  tapez:
+    - "cp {source_path} {destination_archive}"
+  
+  remotez:
+    - "rsync {source_path} {source_host}:{destination_archive}"
+  
+  testz:
+    - "zstd -t {source_path}"
+    - "zstd -d --stdout {source_path} | tar tf -"
+  
+  startup:
+    - "echo {temp_folder_name}"
+    - "figlet -f slant {script_me}"
+    - "mkdir {temp_folder_name}"

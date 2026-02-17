@@ -1,0 +1,84 @@
+#!/bin/bash
+
+# Function to perform backups
+perform_backup() {
+    local source_host="$1"
+    local source_path="$2"
+    local dest_path="/mnt/backup/tmp"
+    local dest_filename="$3"
+    local vm_number="$4"
+    local archive_dest="/mnt/backup"
+
+    # Create a snapshot of the VM using its VMware ID
+    ssh root@$source_host "vim-cmd vmsvc/snapshot.create $vm_number BackupSnapshot SnapshotBackup 0 1" | tee -a /tmp/iterate.log
+
+    # Check if the snapshot creation was successful
+    if [ $? -eq 0 ]; then
+        echo "Created snapshot for VM $vm_number successfully." | tee -a /tmp/iterate.log
+    else
+        echo "Failed to create a snapshot for VM $vm_number. Exiting." | tee -a /tmp/iterate.log
+        return
+    fi
+
+    # Mount the VM host path using SSHFS
+    # sshfs "$source_host:$source_path" "$dest_path" -o IdentityFile=/path/to/your/ssh/key -o allow_other
+    sshfs "root@$source_host:$source_path" "$dest_path"
+
+    # Check if the mount was successful
+    if [ $? -eq 0 ]; then
+        echo "Mounted $source_host:$source_path to $dest_path successfully." | tee -a /tmp/iterate.log
+        # Create a backup using tar and zstd
+        # tar -c "$dest_path" | zstd -o "$archive_dest/$dest_filename.zst"
+        # find $dest_path -type f \( -name "*.vmdk" -o -name "*.vmx" -o -name "*.vmxf" -o -name "*.vmsd" \) -print | tar --use-compress-program=zstd -cvf $archive_dest/$dest_filename -T -
+
+	echo "removing old backup if it exists"
+	rm $archive_dest/$dest_filename
+
+        find $dest_path -type f \( -name "*.vmdk" -o -name "*.vmx" -o -name "*.vmxf" -o -name "*.vmsd" \) -not \( -name "*00000*" -o -name "*sesparse*" \) -print | tar --use-compress-program=zstd -cvf $archive_dest/$dest_filename -T - | tee -a /tmp/iterate.log
+
+        # Unmount the SSHFS mount point
+        fusermount -u "$dest_path"
+
+        echo "Backup completed for VM $vm_number." | tee -a /tmp/iterate.log
+    else
+        echo "Failed to mount $source_host:$source_path to $dest_path." | tee -a /tmp/iterate.log
+    fi
+
+    # Remove the snapshot after backup is completed
+    ssh root@$source_host "vim-cmd vmsvc/snapshot.removeall $vm_number" | tee -a /tmp/iterate.log
+    echo "Removed snapshot for VM $vm_number." | tee -a /tmp/iterate.log
+}
+
+# Check if an argument was provided for the directory path
+if [ $# -eq 0 ]; then
+  echo "Usage: $0 <directory_path> <archive path>"
+  exit 1
+fi
+
+# Directory path provided as the first argument
+directory_path="$1"
+
+# Ensure the provided directory exists
+if [ ! -d "$directory_path" ]; then
+  echo "Directory not found: $directory_path"
+  exit 1
+fi
+
+# Find all .backup files in the backups subfolder
+#find backups/ -type f -name "*.backup" | while read -r file; do
+find "$directory_path" -type f -name "*.backup" | while read -r file; do
+    # Read 4 lines from each .backup file
+    while IFS= read -r source_host &&
+          IFS= read -r source_path &&
+          IFS= read -r dest_filename &&
+          IFS= read -r vm_number; do
+
+        # Perform the backup
+        perform_backup "$source_host" "$source_path" "$dest_filename" "$vm_number"
+
+    done < "$file"
+
+sendEmail -o tls=no -s 172.16.1.25 -m 'backuppc status' -f 'backup0@dairylandlabs.com' -t DL_ITMonitor@dairylandlabs.com -u 'System Backup iterate.sh' -a /tmp/iterate.log
+
+rm /tmp/iterate.log
+done
