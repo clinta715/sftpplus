@@ -1,12 +1,13 @@
 import os
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QMessageBox, QHeaderView,
     QLineEdit, QLabel, QFormLayout, QGroupBox, QSplitter, QFrame,
-    QCheckBox
+    QCheckBox, QComboBox
 )
-from PyQt5.QtGui import QIntValidator
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QIntValidator
+from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
+from PyQt6.QtCore import pyqtSignal
 from icecream import ic
 
 from sftp_hostdataeditor import save_connection_data, load_connection_data
@@ -72,16 +73,17 @@ class ConnectionsWidget(QWidget):
         left_panel.setSpacing(5)
         
         self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Hostname", "Username", "Port"])
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Hostname", "Username", "Port", "Type"])
+        self.table.setSelectionBehavior(Qt.TableWidget_SelectRows)
+        self.table.setSelectionMode(Qt.TableWidget_SingleSelection)
         self.table.setMinimumHeight(150)
         
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(0, Qt.HeaderView_Stretch)
+        header.setSectionResizeMode(1, Qt.HeaderView_Stretch)
+        header.setSectionResizeMode(2, Qt.HeaderView_ResizeToContents)
+        header.setSectionResizeMode(3, Qt.HeaderView_ResizeToContents)
         
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
         self.table.cellDoubleClicked.connect(self.on_cell_double_clicked)
@@ -113,7 +115,7 @@ class ConnectionsWidget(QWidget):
         
         self.detail_password = QLineEdit()
         self.detail_password.setPlaceholderText("password")
-        self.detail_password.setEchoMode(QLineEdit.Password)
+        self.detail_password.setEchoMode(Qt.Password)
         self.detail_password.textChanged.connect(self.update_selected_row)
         
         self.detail_port = QLineEdit()
@@ -135,15 +137,21 @@ class ConnectionsWidget(QWidget):
         self.detail_local_dir.setPlaceholderText("/path/to/local (optional)")
         self.detail_local_dir.textChanged.connect(self.update_selected_row)
         
+        self.detail_connection_type = QComboBox()
+        self.detail_connection_type.addItems(["SFTP Browser", "SSH Terminal"])
+        self.detail_connection_type.setCurrentIndex(0)
+        self.detail_connection_type.currentIndexChanged.connect(self.update_selected_row)
+        
         details_layout.addRow("Hostname:", self.detail_hostname)
         details_layout.addRow("Username:", self.detail_username)
         details_layout.addRow("Password:", self.detail_password)
         details_layout.addRow("Port:", self.detail_port)
         details_layout.addRow("SSH Key:", self.detail_key)
+        details_layout.addRow("Connection Type:", self.detail_connection_type)
         
         line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setFrameShadow(QFrame.Sunken)
+        line.setFrameShape(Qt.Frame_HLine)
+        line.setFrameShadow(Qt.Frame_Sunken)
         details_layout.addRow(line)
         
         details_layout.addRow("Initial Remote Dir:", self.detail_remote_dir)
@@ -190,7 +198,7 @@ class ConnectionsWidget(QWidget):
         try:
             self.host_data = load_connection_data()
             self._update_table()
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             QMessageBox.critical(self, "Error", f"Failed to load data: {str(e)}")
             self.host_data = {
                 "hostnames": {}, 
@@ -227,6 +235,7 @@ class ConnectionsWidget(QWidget):
             for widget in [self.detail_hostname, self.detail_username, self.detail_password,
                           self.detail_port, self.detail_key, self.detail_remote_dir, self.detail_local_dir]:
                 widget.blockSignals(True)
+            self.detail_connection_type.blockSignals(True)
             
             self.detail_hostname.setText(hostname)
             self.detail_username.setText(self.host_data["usernames"].get(hostname, ""))
@@ -236,21 +245,29 @@ class ConnectionsWidget(QWidget):
             self.detail_remote_dir.setText(self.host_data["initial_remote_dir"].get(hostname, ""))
             self.detail_local_dir.setText(self.host_data["initial_local_dir"].get(hostname, ""))
             
+            connection_type = self.host_data["connection_type"].get(hostname, "SFTP Browser")
+            if connection_type == "SSH Terminal":
+                self.detail_connection_type.setCurrentIndex(1)
+            else:
+                self.detail_connection_type.setCurrentIndex(0)
+            
             for widget in [self.detail_hostname, self.detail_username, self.detail_password,
                           self.detail_port, self.detail_key, self.detail_remote_dir, self.detail_local_dir]:
                 widget.blockSignals(False)
+            self.detail_connection_type.blockSignals(False)
     
     def _clear_details(self):
         """Clear all detail fields"""
         for widget in [self.detail_hostname, self.detail_username, self.detail_password,
                       self.detail_port, self.detail_key, self.detail_remote_dir, self.detail_local_dir]:
             widget.clear()
+        self.detail_connection_type.setCurrentIndex(0)
     
     def _set_details_enabled(self, enabled):
         """Enable/disable detail panel"""
         for widget in [self.detail_hostname, self.detail_username, self.detail_password,
                       self.detail_port, self.detail_key, self.detail_remote_dir, 
-                      self.detail_local_dir, self.connect_button]:
+                      self.detail_local_dir, self.connect_button, self.detail_connection_type]:
             widget.setEnabled(enabled)
     
     def _update_selected_row(self):
@@ -267,6 +284,7 @@ class ConnectionsWidget(QWidget):
         self.table.item(selected_row, 0).setText(hostname)
         self.table.item(selected_row, 1).setText(username)
         self.table.item(selected_row, 2).setText(port)
+        self.table.item(selected_row, 3).setText(self.detail_connection_type.currentText())
         
         # Update host_data
         old_hostnames = list(self.host_data["hostnames"].keys())
@@ -280,12 +298,13 @@ class ConnectionsWidget(QWidget):
         self.host_data["passwords"][hostname] = self.detail_password.text()
         self.host_data["ports"][hostname] = int(port)
         self.host_data["key"][hostname] = self.detail_key.text()
+        self.host_data["connection_type"][hostname] = self.detail_connection_type.currentText()
         self.host_data["initial_remote_dir"][hostname] = self.detail_remote_dir.text()
         self.host_data["initial_local_dir"][hostname] = self.detail_local_dir.text()
     
     def _migrate_host_data(self, old_hostname, new_hostname):
         """Migrate data when hostname changes"""
-        for key in ["usernames", "passwords", "ports", "key", "initial_remote_dir", "initial_local_dir", "bookmarks"]:
+        for key in ["usernames", "passwords", "ports", "key", "connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks"]:
             if old_hostname in self.host_data[key]:
                 self.host_data[key][new_hostname] = self.host_data[key].pop(old_hostname)
     
@@ -296,6 +315,8 @@ class ConnectionsWidget(QWidget):
             self.table.setItem(i, 0, QTableWidgetItem(hostname))
             self.table.setItem(i, 1, QTableWidgetItem(self.host_data["usernames"].get(hostname, "")))
             self.table.setItem(i, 2, QTableWidgetItem(str(self.host_data["ports"].get(hostname, 22))))
+            connection_type = self.host_data["connection_type"].get(hostname, "SFTP Browser")
+            self.table.setItem(i, 3, QTableWidgetItem(connection_type))
         
         count = len(self.host_data["hostnames"])
         self.status_label.setText(f"{count} site{'s' if count != 1 else ''} configured")
@@ -321,10 +342,10 @@ class ConnectionsWidget(QWidget):
                 reply = QMessageBox.question(
                     self, "Confirm Delete",
                     f"Delete site '{hostname}'?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No
+                    Qt.MsgBtn_Yes | Qt.MsgBtn_No,
+                    Qt.MsgBtn_No
                 )
-                if reply == QMessageBox.Yes:
+                if reply == Qt.MsgBtn_Yes:
                     for key in ["hostnames", "usernames", "passwords", "ports", "key", 
                                "initial_remote_dir", "initial_local_dir", "bookmarks"]:
                         self.host_data[key].pop(hostname, None)
@@ -361,7 +382,7 @@ class ConnectionsWidget(QWidget):
                 QMessageBox.critical(self, "Error", "Failed to save site data")
         except ValueError as e:
             QMessageBox.critical(self, "Validation Error", str(e))
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             QMessageBox.critical(self, "Unknown Error", f"An error occurred: {str(e)}")
     
     def connect_to_selected(self):
@@ -383,6 +404,7 @@ class ConnectionsWidget(QWidget):
         key = self.host_data["key"].get(hostname, "None") or "None"
         initial_remote_dir = self.host_data["initial_remote_dir"].get(hostname, "")
         initial_local_dir = self.host_data["initial_local_dir"].get(hostname, "")
+        connection_type = self.host_data["connection_type"].get(hostname, "SFTP Browser")
         
         if not username:
             QMessageBox.critical(self, "Error", f"Username required for {hostname}")
@@ -398,6 +420,7 @@ class ConnectionsWidget(QWidget):
             "password": password,
             "port": port,
             "key": key,
+            "connection_type": connection_type,
             "initial_remote_dir": initial_remote_dir,
             "initial_local_dir": initial_local_dir
         }

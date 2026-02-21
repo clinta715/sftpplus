@@ -1,15 +1,17 @@
 import sys
 import os
-from PyQt5.QtWidgets import (
-    QApplication, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
-    QTableWidget, QTableWidgetItem, QMessageBox, QHeaderView, QCheckBox,
-    QLineEdit, QLabel, QFormLayout, QGroupBox, QSplitter, QFrame
+from PyQt6.QtWidgets import (
+    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QTableWidget, QTableWidgetItem, QMessageBox, QHeaderView,
+    QLineEdit, QLabel, QFormLayout, QGroupBox, QTextEdit,
+    QComboBox, QSpinBox, QCheckBox, QSplitter, QFileDialog,
+    QCompleter, QFrame
 )
-from PyQt5.QtGui import QIntValidator
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QIntValidator
+from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
+from PyQt6.QtCore import pyqtSignal
 import json
 from cryptography.fernet import Fernet
-from PyQt5.QtWidgets import QDialog  # Make sure to import QDialog
 from icecream import ic
 from sftp_theme import CONNECT_BUTTON_STYLE, BUTTON_STYLE_DARK
 
@@ -33,6 +35,7 @@ def save_connection_data(host_data):
             "passwords": encrypted_passwords,
             "ports": host_data["ports"],
             "key" : host_data["key"],
+            "connection_type": host_data.get("connection_type", {}),
             "initial_remote_dir": host_data.get("initial_remote_dir", {}),
             "initial_local_dir": host_data.get("initial_local_dir", {}),
             "show_manager_on_startup": host_data.get("show_manager_on_startup", True),
@@ -51,7 +54,7 @@ def save_connection_data(host_data):
     except OSError as e:
         ic(f"OS error saving connection data: {e}")
         return False
-    except Exception as e:
+    except (OSError, IOError, RuntimeError) as e:
         ic(f"Error saving connection data: {e}")
         return False
 
@@ -59,7 +62,7 @@ def load_connection_data():
     global encryption_key, cipher_suite
     host_data = {
         "hostnames": {}, "usernames": {}, "passwords": {}, "ports": {}, "key": {},
-        "initial_remote_dir": {}, "initial_local_dir": {}, "show_manager_on_startup": True,
+        "connection_type": {}, "initial_remote_dir": {}, "initial_local_dir": {}, "show_manager_on_startup": True,
         "bookmarks": {}
     }
 
@@ -95,7 +98,7 @@ def load_connection_data():
         for k, v in encrypted_passwords.items():
             try:
                 host_data["passwords"][k] = cipher_suite.decrypt(v.encode()).decode()
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 print(f"Error decrypting password for {k}: {str(e)}")
                 host_data["passwords"][k] = ""  # Set empty password if decryption fails
                 
@@ -103,6 +106,7 @@ def load_connection_data():
         host_data["key"] = data.get("key", {})
         
         # Load new fields (with defaults for backwards compatibility)
+        host_data["connection_type"] = data.get("connection_type", {})
         host_data["initial_remote_dir"] = data.get("initial_remote_dir", {})
         host_data["initial_local_dir"] = data.get("initial_local_dir", {})
         host_data["show_manager_on_startup"] = data.get("show_manager_on_startup", True)
@@ -122,7 +126,7 @@ def load_connection_data():
         cipher_suite = Fernet(encryption_key)
         return host_data
         
-    except Exception as e:
+    except (OSError, IOError, RuntimeError) as e:
         print(f"Error loading connection data: {str(e)}")
         encryption_key = Fernet.generate_key()
         cipher_suite = Fernet(encryption_key)
@@ -172,14 +176,14 @@ class HostDataEditor(QDialog):  # Change QWidget to QDialog
         self.table = QTableWidget()
         self.table.setColumnCount(3)
         self.table.setHorizontalHeaderLabels(["Hostname", "Username", "Port"])
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setSelectionBehavior(Qt.TableWidget_SelectRows)
+        self.table.setSelectionMode(Qt.TableWidget_SingleSelection)
         
         # Set column resize modes
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(0, Qt.HeaderView_Stretch)
+        header.setSectionResizeMode(1, Qt.HeaderView_Stretch)
+        header.setSectionResizeMode(2, Qt.HeaderView_ResizeToContents)
         
         # Connect signals
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
@@ -209,7 +213,7 @@ class HostDataEditor(QDialog):  # Change QWidget to QDialog
         
         self.detail_password = QLineEdit()
         self.detail_password.setPlaceholderText("password")
-        self.detail_password.setEchoMode(QLineEdit.Password)
+        self.detail_password.setEchoMode(Qt.Password)
         self.detail_password.textChanged.connect(self.update_selected_row)
         
         self.detail_port = QLineEdit()
@@ -242,8 +246,8 @@ class HostDataEditor(QDialog):  # Change QWidget to QDialog
         
         # Add separator
         line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setFrameShadow(QFrame.Sunken)
+        line.setFrameShape(Qt.Frame_HLine)
+        line.setFrameShadow(Qt.Frame_Sunken)
         details_layout.addRow(line)
         
         details_layout.addRow("Initial Remote Dir:", self.detail_remote_dir)
@@ -413,7 +417,7 @@ class HostDataEditor(QDialog):  # Change QWidget to QDialog
             data = load_connection_data()
             self.update_table()
             return data
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             QMessageBox.critical(self, "Error", f"Failed to load data: {str(e)}")
 
     def add_row(self):
@@ -430,9 +434,9 @@ class HostDataEditor(QDialog):  # Change QWidget to QDialog
                 # Confirm deletion
                 reply = QMessageBox.question(self, "Confirm Delete",
                                             f"Delete site '{hostname}'?",
-                                            QMessageBox.Yes | QMessageBox.No,
-                                            QMessageBox.No)
-                if reply == QMessageBox.Yes:
+                                            Qt.MsgBtn_Yes | Qt.MsgBtn_No,
+                                            Qt.MsgBtn_No)
+                if reply == Qt.MsgBtn_Yes:
                     # Remove the corresponding data from host_data
                     self.host_data["hostnames"].pop(hostname, None)
                     self.host_data["usernames"].pop(hostname, None)
@@ -476,7 +480,7 @@ class HostDataEditor(QDialog):  # Change QWidget to QDialog
                 QMessageBox.critical(self, "Error", "Failed to save site data")
         except ValueError as e:
             QMessageBox.critical(self, "Validation Error", str(e))
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             QMessageBox.critical(self, "Unknown Error", f"An error occurred: {str(e)}")
 
     def connect_to_selected(self):
@@ -544,6 +548,6 @@ class HostDataEditor(QDialog):  # Change QWidget to QDialog
         # Save data when the window is closed
         try:
             self.save_data()  # Call save_data() to collect and save the data
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             QMessageBox.critical(self, "Error", f"Failed to save data on close: {str(e)}")
         event.accept()  # Accept the close event

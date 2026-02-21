@@ -1,4 +1,5 @@
-from PyQt5.QtCore import QSortFilterProxyModel, Qt, QModelIndex
+from PyQt6.QtCore import QSortFilterProxyModel, QModelIndex
+from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 import stat
 import os
 

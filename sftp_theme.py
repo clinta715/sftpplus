@@ -11,6 +11,7 @@ DARK_THEME = {
     "accent_blue": "#4a6fa5",
     "error": "#f44336",
     "success": "#4CAF50",
+    "warning": "#ff9800",
 }
 
 LIGHT_THEME = {
@@ -26,6 +27,7 @@ LIGHT_THEME = {
     "accent_blue": "#2196F3",
     "error": "#f44336",
     "success": "#4CAF50",
+    "warning": "#ff9800",
 }
 
 BUTTON_STYLE_DARK = """

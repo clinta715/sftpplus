@@ -1,5 +1,6 @@
-from PyQt5.QtCore import QVariant, QAbstractTableModel, QModelIndex, Qt
-from PyQt5.QtGui import QFont, QColor
+from PyQt6.QtCore import QAbstractTableModel, QModelIndex
+from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
+from PyQt6.QtGui import QFont, QColor
 from pathlib import Path
 import os
 import datetime
@@ -73,7 +74,7 @@ class FileTableModel(QAbstractTableModel):
             file_names = [f[0] for f in self.file_list[1:10]]
             ic(f"FileTableModel.get_files: sample files: {file_names}")
             ic(f"FileTableModel.get_files: loaded {len(self.file_list)-1} items total")
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             ic(f"Error getting files: {str(e)}")
 
         self.endResetModel()
@@ -89,7 +90,7 @@ class FileTableModel(QAbstractTableModel):
 
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid() or not (0 <= index.row() < len(self.file_list)):
-            return QVariant()
+            return None
 
         # Get the file information for the current row
         file_info = self.file_list[index.row()]
@@ -118,13 +119,13 @@ class FileTableModel(QAbstractTableModel):
             # Check if it's a directory
             name = file_info[0]
             if name == "..":
-                return QColor(Qt.blue)
+                return QColor(Qt.Color_blue)
             full_path = os.path.join(str(self.directory), name)
             is_dir = os.path.isdir(full_path)
             if is_dir:
-                return QColor(Qt.blue)  # Return blue color for directories
+                return QColor(Qt.Color_blue)  # Return blue color for directories
             else:
-                return QColor(Qt.darkGray)  # Return dark gray for files
+                return QColor(Qt.Color_darkGray)  # Return dark gray for files
         elif role == Qt.FontRole:
             # Check if it's a directory
             name = file_info[0]
@@ -138,7 +139,7 @@ class FileTableModel(QAbstractTableModel):
                 font = QFont()
                 font.setBold(True)
                 return font  # Return bold font for directories
-        return QVariant()
+        return None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.DisplayRole and orientation == Qt.Horizontal:
@@ -154,19 +155,19 @@ class FileTableModel(QAbstractTableModel):
             # Sort by Name (String)
             try:
                 self.file_list.sort(key=lambda file_info: file_info[0], reverse=(order == Qt.DescendingOrder))
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 pass
         elif column == 1:
             # Sort by Size (Numeric)
             try:
                 self.file_list.sort(key=lambda file_info: int(file_info[1]), reverse=(order == Qt.DescendingOrder))
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 pass
         elif column == 2:
             # Sort by Permissions (String or Numeric, depending on representation)
             try:
                 self.file_list.sort(key=lambda file_info: file_info[2], reverse=(order == Qt.DescendingOrder))
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 pass
         elif column == 3:
             # Sort by Modified Date (Date or Timestamp)
@@ -174,7 +175,7 @@ class FileTableModel(QAbstractTableModel):
             # for proper sorting. This example assumes it's already a sortable format.
             try:
                 self.file_list.sort(key=lambda file_info: file_info[3], reverse=(order == Qt.DescendingOrder))
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 pass
 
         self.layoutChanged.emit()

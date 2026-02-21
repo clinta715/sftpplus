@@ -1,20 +1,24 @@
 # Multi-threaded SFTP Client
 
-A multi-tabbed, ephemeral-connection based graphical SFTP client written in Python and Qt5.
+A multi-tabbed, ephemeral-connection based graphical SFTP client written in Python and Qt5 with integrated SSH terminal support.
 
 ## Features
 
 - **Multi-tabbed interface**: Connect to multiple SFTP servers simultaneously
+- **SSH Terminal**: Interactive SSH shell sessions alongside SFTP file transfers
+- **Connection types**: Choose between SFTP Browser or SSH Terminal per saved site
 - **Ephemeral connections**: Each operation creates a fresh connection for security
 - **Threaded operations**: Uploads/downloads run in background threads
 - **Dual-pane interface**: Local and remote file browsers side-by-side
 - **Progress tracking**: Real-time progress indicators for file transfers
-- **Queue management**: Cancelable transfer operations
+- **Queue management**: Pause/cancel transfer operations
+- **Persistent preferences**: User settings saved to home directory
+- **Preferences**: Auto-clear completed, overwrite files, focus transfers, confirm exit
 
 ## Requirements
 
 - Python 3.7+
-- PyQt5
+- PyQt6
 - paramiko
 - icecream (for debugging)
 - cryptography
@@ -22,7 +26,7 @@ A multi-tabbed, ephemeral-connection based graphical SFTP client written in Pyth
 ## Installation
 
 ```bash
-pip install PyQt5 paramiko icecream cryptography
+pip install PyQt6 paramiko icecream cryptography
 ```
 
 ## Usage
@@ -52,7 +56,7 @@ pip install PyQt5 paramiko icecream cryptography
 
 ## Architecture
 
-### Core Components
+#### Core Components
 
 - **sftp.py**: Main application window and orchestration logic
 - **sftp_browserclass.py**: Local file browser implementation
@@ -61,9 +65,13 @@ pip install PyQt5 paramiko icecream cryptography
 - **sftp_backgroundthreadwindow.py**: Command execution and response handling
 - **sftp_creds.py**: Session credential management
 - **sftp_hostdataeditor.py**: Connection data storage and encryption
+- **sftp_terminal_widget.py**: SSH terminal widget with ANSI code stripping
+- **sftp_preferences.py**: Persistent user preferences
+- **sftp_file_browser_panel.py**: Combined file browser panel widget
+- **sftp_transfer_queue_widget.py**: Integrated transfer queue widget
 - **sftp_filetablemodel.py** / **sftp_remotefiletablemodel.py**: Data models for file listings
 
-### Connection Model
+#### Connection Model
 
 The application uses an **ephemeral connection pattern**:
 1. Each SFTP operation creates a fresh SSH connection
@@ -71,6 +79,24 @@ The application uses an **ephemeral connection pattern**:
 3. Background thread executes commands sequentially
 4. Connections are closed after each operation
 5. Response queues return results to the appropriate UI component
+
+#### Session-Based API
+
+For new code, prefer the session-based API:
+```python
+from sftp_operations import SFTPOperations
+
+with SFTPOperations('example.com', 'user', 'password') as ops:
+    ops.download('/remote/file.txt', '/local/file.txt')
+```
+
+#### Preferences
+
+User preferences are stored in `~/.sftp_client_preferences.json`:
+- `clear_completed_on_complete`: Auto-clear completed transfers
+- `overwrite_on_transfer`: Skip overwrite prompts
+- `confirm_exit`: Confirm before exiting with active transfers
+- `focus_transfers_on_start`: Focus Transfers tab when transfers start
 
 ### Security Considerations
 
@@ -91,6 +117,16 @@ The application uses an **ephemeral connection pattern**:
 ## Development History
 
 ### Recent Updates
+
+**2/20/26**: Major feature additions and bug fixes:
+- Added SSH Terminal support (interactive shell sessions)
+- Added persistent preferences system
+- Added connection type selection (SFTP Browser vs SSH Terminal)
+- Added focus transfers preference
+- Added status bar feedback for transfer events
+- Fixed crash on exit and session cleanup issues
+- Added ANSI code stripping for terminal output
+- Updated to integrated tabbed interface
 
 **7/29/25**: Code review and security audit identified critical issues:
 - Exception handling patterns need improvement

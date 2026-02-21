@@ -19,110 +19,6 @@ from sftp_session_executor import SFTPSessionAPI, CommandExecutor, create_sessio
 from sftp_connection_pool import get_connection_pool
 
 
-def quick_download(remote_path: str, local_path: str,
-                   hostname: str, username: str, 
-                   password: Optional[str] = None,
-                   port: int = 22,
-                   key: Optional[str] = None) -> Any:
-    """
-    Quick download function - creates session internally.
-    
-    Args:
-        remote_path: Remote file path
-        local_path: Local destination path
-        hostname: SFTP hostname
-        username: SSH username
-        password: SSH password (or None if using key)
-        port: SSH port (default 22)
-        key: Path to SSH private key (or None if using password)
-        
-    Returns:
-        Downloaded file path on success
-        
-    Raises:
-        Exception: On connection or transfer error
-    """
-    creds = SFTPCredentials(
-        hostname=hostname,
-        username=username,
-        password=password,
-        port=port,
-        key=key
-    )
-    
-    api = create_session_api(creds)
-    return api.download(remote_path, local_path)
-
-
-def quick_upload(local_path: str, remote_path: str,
-                 hostname: str, username: str,
-                 password: Optional[str] = None,
-                 port: int = 22,
-                 key: Optional[str] = None) -> Any:
-    """
-    Quick upload function - creates session internally.
-    
-    Args:
-        local_path: Local file path
-        remote_path: Remote destination path
-        hostname: SFTP hostname
-        username: SSH username
-        password: SSH password (or None if using key)
-        port: SSH port (default 22)
-        key: Path to SSH private key (or None if using password)
-        
-    Returns:
-        Uploaded file path on success
-        
-    Raises:
-        Exception: On connection or transfer error
-    """
-    creds = SFTPCredentials(
-        hostname=hostname,
-        username=username,
-        password=password,
-        port=port,
-        key=key
-    )
-    
-    api = create_session_api(creds)
-    return api.upload(local_path, remote_path)
-
-
-def quick_list(remote_path: str,
-               hostname: str, username: str,
-               password: Optional[str] = None,
-               port: int = 22,
-               key: Optional[str] = None) -> List[str]:
-    """
-    Quick list directory function - creates session internally.
-    
-    Args:
-        remote_path: Remote directory path
-        hostname: SFTP hostname
-        username: SSH username
-        password: SSH password (or None if using key)
-        port: SSH port (default 22)
-        key: Path to SSH private key (or None if using password)
-        
-    Returns:
-        List of filenames
-        
-    Raises:
-        Exception: On connection or list error
-    """
-    creds = SFTPCredentials(
-        hostname=hostname,
-        username=username,
-        password=password,
-        port=port,
-        key=key
-    )
-    
-    api = create_session_api(creds)
-    return api.list(remote_path)
-
-
 class SFTPOperations:
     """
     Class-based interface for SFTP operations.
@@ -336,7 +232,7 @@ class SFTPOperations:
         """Destructor - cleanup"""
         try:
             get_session_manager().remove_session(self._session.session_id)
-        except Exception:
+        except (OSError, IOError, RuntimeError):
             pass
 
 

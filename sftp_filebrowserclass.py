@@ -1,8 +1,8 @@
 from sftp_browserclass import Browser
 from sftp_filetablemodel import FileTableModel
 from sftp_sortfiltermodel import DirectoryFirstSortProxyModel
-from PyQt5.QtWidgets import QMessageBox, QHeaderView, QTableView, QApplication
-from PyQt5.QtCore import Qt
+from PyQt6.QtWidgets import QMessageBox, QHeaderView, QTableView, QApplication
+from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 import os 
 import shutil
 from icecream import ic
@@ -12,9 +12,10 @@ from sftp_creds import get_credentials, set_credentials
 class FileBrowser(Browser):
     def __init__(self, title, session_id, parent=None):
         super().__init__(title, session_id, parent)  # Initialize the FileBrowser parent class
+        self.init_ui()  # Initialize UI (creates self.table)
         try:
             self.model = FileTableModel(session_id)
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             ic(e)
 
         self.proxy_model = DirectoryFirstSortProxyModel()
@@ -25,15 +26,17 @@ class FileBrowser(Browser):
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
 
         # Make all columns resizable
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.horizontalHeader().setSectionResizeMode(Qt.HeaderView_Interactive)
 
         # Add these lines to enable full row selection
-        self.table.setSelectionBehavior(QTableView.SelectRows)
-        self.table.setSelectionMode(QTableView.ExtendedSelection)  # Allow Ctrl+Click and Shift+Click multi-select
+        self.table.setSelectionBehavior(Qt.TableView_SelectRows)
+        self.table.setSelectionMode(Qt.TableView_ExtendedSelection)  # Allow Ctrl+Click and Shift+Click multi-select
 
-        # Optionally, set initial column widths
-        # self.table.setColumnWidth(0, 100)  # Adjust widths as needed
-        # self.table.setColumnWidth(1, 50)
+        # Set column widths to prevent text truncation
+        self.table.setColumnWidth(0, 250)  # Name column - wide enough for most filenames
+        self.table.setColumnWidth(1, 80)   # Size column
+        self.table.setColumnWidth(2, 90)   # Permissions column
+        self.table.setColumnWidth(3, 140)  # Modified column
 
     def remove_directory_with_prompt(self, local_path=None, always=0):
         self.always = always
@@ -78,14 +81,14 @@ class FileBrowser(Browser):
                     None,
                     'Confirmation',
                     f"The directory '{local_path}' contains subdirectories or files. Do you want to remove them all?",
-                    QMessageBox.Yes | QMessageBox.No | QMessageBox.YesToAll,
-                    QMessageBox.No
+                    Qt.MsgBtn_Yes | Qt.MsgBtn_No | Qt.MsgBtn_YesToAll,
+                    Qt.MsgBtn_No
                 )
 
-                if response == QMessageBox.YesToAll:
+                if response == Qt.MsgBtn_YesToAll:
                     self.always = 1
 
-                if response == QMessageBox.No:
+                if response == Qt.MsgBtn_No:
                     return
 
                 # Recursively remove subdirectories
@@ -102,7 +105,7 @@ class FileBrowser(Browser):
             shutil.rmtree(local_path)
             self.model.get_files()
 
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             self.message_signal.emit(f"remove_directory_with_prompt() {e}")
             ic(e)
 
@@ -127,14 +130,13 @@ class FileBrowser(Browser):
             else:
                 self.message_signal.emit(f"Bookmark path not found: {path}")
                 return False
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             self.message_signal.emit(f"Error navigating to bookmark: {e}")
             return False
 
     def populate_tree_view(self):
         """Build tree starting from current directory as root"""
-        from PyQt5.QtWidgets import QTreeWidgetItem
-        from PyQt5.QtCore import Qt
+        from PyQt6.QtWidgets import QTreeWidgetItem
         
         creds = get_credentials(self.session_id)
         current_dir = creds.get('current_local_directory', os.getcwd())
@@ -144,7 +146,7 @@ class FileBrowser(Browser):
         self._tree_current_path = current_dir
         
         # Update UI
-        self.tree_path_label.setText(f"📂 {current_dir}")
+        self.tree_path_input.setText(current_dir)
         self._update_tree_up_button()
         
         # Build tree from root
@@ -152,8 +154,7 @@ class FileBrowser(Browser):
     
     def _build_tree_from_root(self, root_path, current_path):
         """Build tree starting from root_path, highlighting current_path"""
-        from PyQt5.QtWidgets import QTreeWidgetItem
-        from PyQt5.QtCore import Qt
+        from PyQt6.QtWidgets import QTreeWidgetItem
         
         self.tree_widget.clear()
         
@@ -176,22 +177,30 @@ class FileBrowser(Browser):
             if current_path.startswith(root_path) and current_path != root_path:
                 self._expand_to_path(root_item, root_path, current_path)
             
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             ic(f"Error building tree: {e}")
             self.tree_status_label.setText(f"Error: {e}")
     
     def _populate_tree_children(self, parent_item, path):
         """Populate tree with subdirectories of the given path (lazy loading)"""
-        from PyQt5.QtWidgets import QTreeWidgetItem
-        from PyQt5.QtCore import Qt
+        from PyQt6.QtWidgets import QTreeWidgetItem, QApplication
         
         item_count = 0
         
         try:
             if not os.path.isdir(path):
+                self.tree_status_label.setText(f"❌ Not a directory: {path}")
                 return 0
             
+            # Show loading feedback
+            self.tree_status_label.setText(f"⏳ Loading {path}...")
+            QApplication.processEvents()
+            
             entries = list(os.scandir(path))
+            
+            if not entries:
+                self.tree_status_label.setText(f"📂 {path} (empty)")
+                return 0
             
             # Filter and sort only directories
             dirs = []
@@ -211,27 +220,27 @@ class FileBrowser(Browser):
                 
                 # Add placeholder for lazy loading - this allows expansion
                 dummy_child = QTreeWidgetItem(child_item)
-                dummy_child.setText(0, "Loading...")
+                dummy_child.setText(0, "⏳ Loading...")
                 
                 item_count += 1
             
             # Refresh tree to show newly added items
             self.tree_widget.update()
         
-        except Exception as e:
-            ic(f"Error populating tree children: {e}")
+        except (OSError, IOError, RuntimeError) as e:
+            self.tree_status_label.setText(f"❌ Error: {str(e)[:50]}")
+            return 0
         
-        # Update status
+        # Update status with success message
         if item_count == 0:
-            self.tree_status_label.setText("No subdirectories")
+            self.tree_status_label.setText(f"📂 {path} (no subdirectories)")
         else:
-            self.tree_status_label.setText(f"{item_count} subdirectories - Expand to explore")
+            self.tree_status_label.setText(f"✅ {path} - {item_count} subdirectories")
         
         return item_count
     
     def _expand_to_path(self, parent_item, parent_path, target_path):
         """Expand tree to show target_path and mark it as current"""
-        from PyQt5.QtCore import Qt
         
         try:
             # Get relative path from parent to target
@@ -272,7 +281,7 @@ class FileBrowser(Browser):
             self._mark_current_item(current_item)
             self.tree_widget.scrollToItem(current_item)
             
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             ic(f"Error expanding to path: {e}")
     
     def _mark_current_item(self, item):
@@ -300,7 +309,6 @@ class FileBrowser(Browser):
     
     def tree_item_expanded_handler(self, item):
         """Handle item expansion - lazy load subdirectories"""
-        from PyQt5.QtCore import Qt
         
         data = item.data(0, Qt.UserRole)
         if not data:
@@ -318,7 +326,6 @@ class FileBrowser(Browser):
     
     def tree_double_click_handler(self, item, column):
         """Handle double-click - navigate to directory"""
-        from PyQt5.QtCore import Qt
         
         data = item.data(0, Qt.UserRole)
         if not data:
@@ -338,7 +345,7 @@ class FileBrowser(Browser):
             # Update tree current marker without rebuilding
             self._tree_current_path = path
             self._mark_current_item(item)
-            self.tree_path_label.setText(f"📂 {path}")
+            self.tree_path_input.setText(path)
     
     def tree_go_up(self):
         """Navigate to parent directory and make it the new root"""
@@ -360,6 +367,158 @@ class FileBrowser(Browser):
             # At filesystem root
             self.message_signal.emit("Already at root directory")
     
+    def tree_path_navigate(self):
+        """Navigate to path entered in tree path input"""
+        path = self.tree_path_input.text().strip()
+        
+        if not path:
+            return
+        
+        # Expand ~ to home directory
+        if path.startswith('~'):
+            path = os.path.expanduser(path)
+        
+        # Make absolute if relative
+        if not os.path.isabs(path):
+            creds = get_credentials(self.session_id)
+            current_dir = creds.get('current_local_directory', os.getcwd())
+            path = os.path.join(current_dir, path)
+        
+        # Normalize path
+        path = os.path.normpath(path)
+        
+        if not os.path.exists(path):
+            self.tree_status_label.setText(f"❌ Path does not exist: {path}")
+            return
+        
+        if not os.path.isdir(path):
+            self.tree_status_label.setText(f"❌ Not a directory: {path}")
+            return
+        
+        # Navigate to the path
+        set_credentials(self.session_id, 'current_local_directory', path)
+        os.chdir(path)
+        self.model.get_files()
+        self.notify_observers()
+        self.message_signal.emit(f"Changed to: {path}")
+        
+        # Rebuild tree with new root
+        self.populate_tree_view()
+
+    def tree_download_selected(self):
+        """Upload selected local directory to remote"""
+        
+        # Get selected item
+        selected_items = self.tree_widget.selectedItems()
+        if not selected_items:
+            self.tree_status_label.setText("❌ No directory selected")
+            return
+
+        item = selected_items[0]
+        data = item.data(0, Qt.UserRole)
+        if not data:
+            return
+
+        path = data.get('path')
+        is_dir = data.get('is_dir', False)
+
+        if not is_dir or not os.path.isdir(path):
+            self.tree_status_label.setText("❌ Selected item is not a directory")
+            return
+
+        # Get remote credentials
+        creds = get_credentials(self.session_id)
+        remote_dir = creds.get('current_remote_directory', '/')
+
+        # Upload the directory
+        self.message_signal.emit(f"⬆️ Queuing upload: {path} -> {remote_dir}")
+        self.upload_directory(path, remote_dir)
+
+    def tree_download_all(self):
+        """Upload all visible local directories to remote"""
+        
+        # Get root item
+        root = self.tree_widget.invisibleRootItem()
+        if root.childCount() == 0:
+            self.tree_status_label.setText("❌ No directories to upload")
+            return
+
+        # Get remote credentials
+        creds = get_credentials(self.session_id)
+        remote_dir = creds.get('current_remote_directory', '/')
+
+        # Count directories to upload
+        upload_count = 0
+        for i in range(root.child(0).childCount()):
+            item = root.child(0).child(i)
+            data = item.data(0, Qt.UserRole)
+            if data and data.get('is_dir', False):
+                path = data.get('path')
+                if os.path.isdir(path):
+                    self.message_signal.emit(f"⬆️ Queuing upload: {path} -> {remote_dir}")
+                    self.upload_directory(path, remote_dir)
+                    upload_count += 1
+
+        if upload_count > 0:
+            self.tree_status_label.setText(f"✅ Queued {upload_count} directories for upload")
+        else:
+            self.tree_status_label.setText("❌ No directories to upload")
+
+    def tree_delete_selected(self):
+        """Delete selected local directory"""
+        from PyQt6.QtWidgets import QMessageBox
+        import shutil
+
+        # Get selected item
+        selected_items = self.tree_widget.selectedItems()
+        if not selected_items:
+            self.tree_status_label.setText("❌ No directory selected")
+            return
+
+        item = selected_items[0]
+        data = item.data(0, Qt.UserRole)
+        if not data:
+            return
+
+        path = data.get('path')
+        is_dir = data.get('is_dir', False)
+        is_root = data.get('is_root', False)
+
+        if is_root:
+            self.tree_status_label.setText("❌ Cannot delete root directory")
+            return
+
+        if not is_dir or not os.path.isdir(path):
+            self.tree_status_label.setText("❌ Selected item is not a directory")
+            return
+
+        # Confirm deletion
+        reply = QMessageBox.question(
+            self, 'Confirm Delete',
+            f"Are you sure you want to delete the directory:\n\n{path}\n\nThis action cannot be undone!",
+            Qt.MsgBtn_Yes | Qt.MsgBtn_No,
+            Qt.MsgBtn_No
+        )
+
+        if reply != Qt.MsgBtn_Yes:
+            return
+
+        try:
+            # Remove the directory
+            shutil.rmtree(path)
+            self.message_signal.emit(f"🗑️ Deleted: {path}")
+            self.tree_status_label.setText(f"✅ Deleted: {os.path.basename(path)}")
+            
+            # Refresh tree view
+            self.populate_tree_view()
+            
+            # Refresh file table
+            self.model.get_files()
+            self.notify_observers()
+        except (OSError, IOError, RuntimeError) as e:
+            self.tree_status_label.setText(f"❌ Error deleting: {str(e)[:50]}")
+            QMessageBox.critical(self, "Error", f"Failed to delete directory:\n{str(e)}")
+
     def _update_tree_up_button(self):
         """Update up button state based on current directory"""
         creds = get_credentials(self.session_id)
@@ -371,8 +530,7 @@ class FileBrowser(Browser):
     
     def tree_context_menu_handler(self, pos):
         """Handle context menu on tree widget"""
-        from PyQt5.QtWidgets import QMenu
-        from PyQt5.QtCore import Qt
+        from PyQt6.QtWidgets import QMenu
         
         item = self.tree_widget.itemAt(pos)
         if not item:
@@ -394,7 +552,7 @@ class FileBrowser(Browser):
             menu.addSeparator()
             upload_action = menu.addAction("⬆️ Upload Directory")
         
-        action = menu.exec_(self.tree_widget.mapToGlobal(pos))
+        action = menu.exec(self.tree_widget.mapToGlobal(pos))
         
         if action == open_action:
             if os.path.isdir(path):
@@ -405,7 +563,7 @@ class FileBrowser(Browser):
                 self.message_signal.emit(f"Changed to: {path}")
                 self._tree_current_path = path
                 self._mark_current_item(item)
-                self.tree_path_label.setText(f"📂 {path}")
+            self.tree_path_input.setText(path)
         elif action == refresh_action:
             self.populate_tree_view()
         elif action == upload_action:

@@ -1,8 +1,9 @@
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, 
     QPushButton, QToolButton, QLabel, QFrame
 )
-from PyQt5.QtCore import Qt, pyqtSignal
+from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
+from PyQt6.QtCore import pyqtSignal
 from icecream import ic
 
 from sftp_filebrowserclass import FileBrowser
@@ -96,8 +97,8 @@ class FileBrowserPanel(QWidget):
         
         # Separator line
         line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setFrameShadow(QFrame.Sunken)
+        line.setFrameShape(Qt.Frame_HLine)
+        line.setFrameShadow(Qt.Frame_Sunken)
         line.setStyleSheet(f"color: {DARK_THEME['border']};")
         main_layout.addWidget(line)
         
@@ -221,5 +222,5 @@ class FileBrowserPanel(QWidget):
         try:
             if hasattr(self, 'right_browser') and self.right_browser:
                 self.right_browser.close_sftp_connection()
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             pass

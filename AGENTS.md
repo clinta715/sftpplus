@@ -1,6 +1,17 @@
 # Agent Guidelines for SFTP Client Project
 
-This document provides guidelines for AI coding agents working on this PyQt5-based SFTP client application.
+This document provides guidelines for AI coding agents working on this PyQt6-based SFTP client application.
+
+## Features Overview
+
+- **Multi-tabbed interface**: Connect to multiple SFTP servers simultaneously
+- **SSH Terminal**: Interactive SSH shell sessions in addition to SFTP
+- **Ephemeral connections**: Each operation creates a fresh connection for security
+- **Threaded operations**: Uploads/downloads run in background threads
+- **Dual-pane interface**: Local and remote file browsers side-by-side
+- **Progress tracking**: Real-time progress indicators for file transfers
+- **Queue management**: Pause/cancel transfer operations
+- **Persistent preferences**: User settings saved to home directory
 
 ## New Session-Based API (2026-02-11)
 
@@ -15,6 +26,8 @@ The project now includes a clean session-based API for SFTP operations. This pro
 | `sftp_connection_pool.py` | Thread-safe SSH/SFTP connection pooling |
 | `sftp_session_executor.py` | Command executor using sessions and pool |
 | `sftp_operations.py` | High-level convenience functions |
+| `sftp_terminal_widget.py` | SSH terminal widget with ANSI code stripping |
+| `sftp_preferences.py` | Persistent user preferences storage |
 
 ### Quick Start
 
@@ -138,12 +151,12 @@ import threading
 import queue
 import time
 
-# 2. PyQt5 modules
-from PyQt5.QtWidgets import (
+# 2. PyQt6 modules
+from PyQt6.QtWidgets import (
     QApplication, QWidget, QPushButton, QVBoxLayout,
     QTableWidget, QTableWidgetItem, QMessageBox
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QObject, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
 
 # 3. Third-party libraries
 import paramiko
@@ -153,6 +166,9 @@ from icecream import ic
 # 4. Local project modules
 from sftp_creds import get_credentials, set_credentials
 from sftp_downloadworkerclass import add_sftp_job, put_response
+
+# 5. Compatibility layer (for Qt enums)
+from sftp_qt_compat import Qt
 ```
 
 ### Naming Conventions
@@ -443,7 +459,7 @@ remote_path = self.get_normalized_remote_path(current_dir, filename)
 
 - **"No such file or directory"** - Path is malformed or file really doesn't exist
 
-## Interface Structure (2026-02-08 Update)
+## Interface Structure
 
 ### Integrated Tab Layout
 
@@ -453,7 +469,7 @@ The application now uses a single main window with permanent tabs:
 Main Window Tabs:
 ├── Tab 0: 📋 Transfers (permanent, non-closable)
 ├── Tab 1: 🔗 Connections (permanent, non-closable)  
-└── Tab 2+: Connection tabs (closable, one per connection)
+└── Tab 2+: Connection tabs (SFTP browser or SSH terminal)
 ```
 
 ### Widget Classes
@@ -461,24 +477,31 @@ Main Window Tabs:
 **Transfer Queue:**
 - File: `sftp_transfer_queue_widget.py`
 - Class: `TransferQueueWidget(QWidget)`
-- Features: Transfer list, progress bars, pause/cancel controls
+- Features: Transfer list, progress bars, pause/cancel controls, preferences checkboxes
+- Signals: `signal_transfer_started`, `signal_transfer_completed`, `signal_transfer_error`
 
 **Connections (Site Manager):**
 - File: `sftp_connections_widget.py`
 - Class: `ConnectionsWidget(QWidget)`
-- Features: Site list, connection details, quick connect
+- Features: Site list, connection details, connection type selection (SFTP/SSH Terminal)
 
 **File Browser Panel:**
 - File: `sftp_file_browser_panel.py`
 - Class: `FileBrowserPanel(QWidget)`
 - Features: Collapsible local browser, QSplitter resizing, toggle button
 
+**SSH Terminal:**
+- File: `sftp_terminal_widget.py`
+- Class: `SSHTerminalWidget(QWidget)`
+- Features: Interactive SSH shell, ANSI code stripping, dark theme
+- Uses paramiko `invoke_shell()` for interactive sessions
+
 ### Key Implementation Notes
 
 1. **Permanent Tabs:**
    - Index 0: Transfers tab (cannot be closed)
    - Index 1: Connections tab (cannot be closed)
-   - Index 2+: Connection tabs (can be closed)
+   - Index 2+: Connection tabs (can be SFTP browser or SSH terminal)
 
 2. **closeTab() Protection:**
    ```python
@@ -490,13 +513,18 @@ Main Window Tabs:
 3. **Signal Handling:**
    - `ConnectionsWidget.connect_requested` → `MainWindow.handle_connection_request()`
    - Auto-switches to connection form tab after connecting
+   - TransferQueueWidget signals for status bar updates
 
-4. **File Browser Panel:**
-   - Uses QSplitter for resizable panels
-   - Toggle button (◀/▶) to show/hide local browser
-   - Integrated observers for cross-browser synchronization
+4. **Connection Types:**
+   - Sites can be configured as "SFTP Browser" or "SSH Terminal"
+   - Connection type is persisted per-site in connection data
 
-5. **Backward Compatibility:**
+5. **Preferences:**
+   - File: `sftp_preferences.py`
+   - Stored in: `~/.sftp_client_preferences.json`
+   - Includes: `clear_completed_on_complete`, `overwrite_on_transfer`, `confirm_exit`, `focus_transfers_on_start`
+
+6. **Backward Compatibility:**
    - Original `sftp_backgroundthreadwindow.py` preserved
    - Original `sftp_hostdataeditor.py` preserved
    - Original `FileBrowser` and `RemoteFileBrowser` classes preserved

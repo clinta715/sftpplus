@@ -89,11 +89,11 @@ class ConnectionPool:
                         if conn_info.sftp:
                             try:
                                 conn_info.sftp.close()
-                            except:
-                                pass
+                            except (OSError, IOError, RuntimeError) as e:
+                                ic(f"ConnectionPool: Error closing SFTP: {e}")
                         conn_info.ssh.close()
-                    except:
-                        pass
+                    except (OSError, IOError, RuntimeError) as e:
+                        ic(f"ConnectionPool: Error closing SSH: {e}")
                     del self._pool[conn_key]
             
             # Create new connection
@@ -102,7 +102,7 @@ class ConnectionPool:
             
             try:
                 sftp = ssh.open_sftp()
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 ic(f"ConnectionPool: Failed to open SFTP channel: {e}")
                 ssh.close()
                 raise
@@ -131,11 +131,12 @@ class ConnectionPool:
         if os.path.exists(known_hosts_path):
             try:
                 ssh.load_host_keys(known_hosts_path)
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 ic(f"ConnectionPool: Warning: Could not load known_hosts: {e}")
         
-        # Use WarningPolicy for background transfers
-        ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
+        # Use AutoAddPolicy to automatically add new host keys
+        # This is more secure than WarningPolicy because keys are saved for future verification
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
         connect_kwargs = {
             'hostname': hostname,
@@ -183,7 +184,7 @@ class ConnectionPool:
                 return key_obj
             except (paramiko.SSHException, ValueError, TypeError, FileNotFoundError):
                 continue
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 ic(f"ConnectionPool: Error loading key: {e}")
                 continue
         
@@ -211,11 +212,11 @@ class ConnectionPool:
                     if conn_info.sftp:
                         try:
                             conn_info.sftp.close()
-                        except:
-                            pass
+                        except (OSError, IOError, RuntimeError) as e:
+                            ic(f"ConnectionPool: Error closing SFTP during close_all: {e}")
                     conn_info.ssh.close()
-                except:
-                    pass
+                except (OSError, IOError, RuntimeError) as e:
+                    ic(f"ConnectionPool: Error closing SSH during close_all: {e}")
                 del self._pool[conn_key]
                 ic(f"ConnectionPool: Closed connection for {hostname}:{port}")
     
@@ -246,13 +247,13 @@ class ConnectionPool:
                     if conn_info.sftp:
                         try:
                             conn_info.sftp.close()
-                        except:
-                            pass
+                        except (OSError, IOError, RuntimeError) as e:
+                            ic(f"ConnectionPool: Error closing SFTP during cleanup: {e}")
                     conn_info.ssh.close()
-                except:
-                    pass
+                except (OSError, IOError, RuntimeError) as e:
+                    ic(f"ConnectionPool: Error closing SSH during cleanup: {e}")
                 del self._pool[conn_key]
-    
+
     def close_all(self):
         """Close all pooled connections"""
         with self._pool_lock:
@@ -261,11 +262,11 @@ class ConnectionPool:
                     if conn_info.sftp:
                         try:
                             conn_info.sftp.close()
-                        except:
-                            pass
+                        except (OSError, IOError, RuntimeError) as e:
+                            ic(f"ConnectionPool: Error closing SFTP in close_all: {e}")
                     conn_info.ssh.close()
-                except:
-                    pass
+                except (OSError, IOError, RuntimeError) as e:
+                    ic(f"ConnectionPool: Error closing SSH in close_all: {e}")
             self._pool.clear()
             ic("ConnectionPool: Closed all connections")
     

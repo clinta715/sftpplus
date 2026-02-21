@@ -1,16 +1,19 @@
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                             QListWidget, QTextEdit, QProgressBar, QSizePolicy,
-                            QLabel, QListWidgetItem, QScrollArea, QFrame)
-from PyQt5.QtCore import Qt, QThreadPool, QTimer, QMutex, QMutexLocker
+                            QLabel, QListWidgetItem, QScrollArea, QFrame, QCheckBox)
+from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
+from PyQt6.QtCore import QThreadPool, QTimer, QMutex, QMutexLocker, pyqtSignal
 from icecream import ic
+import inspect
 import os
+import queue
 import time
 
-from sftp_downloadworkerclass import Transfer, DownloadWorker, sftp_queue_get, sftp_queue_isempty, clear_sftp_queue
+from sftp_downloadworkerclass import Transfer, DownloadWorker, sftp_queue, clear_sftp_queue
 from sftp_theme import (BUTTON_STYLE_DARK, LIST_WIDGET_STYLE_DARK, PROGRESS_BAR_STYLE_DARK,
                         TEXT_EDIT_STYLE_DARK, DARK_THEME)
-
-MAX_TRANSFERS = 2
+from sftp_config import MAX_TRANSFERS
+from sftp_preferences import get_preferences
 
 
 class TransferQueueWidget(QWidget):
@@ -27,12 +30,18 @@ class TransferQueueWidget(QWidget):
     - Full-width progress bars
     """
     
+    # Signals for transfer events
+    signal_transfer_started = pyqtSignal(int, str)  # (count, message)
+    signal_transfer_completed = pyqtSignal(int, str)  # (count, message)
+    signal_transfer_error = pyqtSignal(int, str)  # (count, message)
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.queue_items = []
         self.active_transfers = 0
         self.transfers = []
-        self.observees = []
+        self._observees = []
+        self._observees_lock = QMutex()  # THREAD SAFETY: Lock for observee list
         self.total_queue_items = 0
         
         # Thread safety locks
@@ -64,14 +73,49 @@ class TransferQueueWidget(QWidget):
         # Set the list as the scroll area widget
         self.main_layout.addWidget(self.transfer_list, stretch=1)
 
-        # Add control buttons
+        # Add control buttons and preferences
         self.control_layout = QHBoxLayout()
         self.control_layout.setSpacing(8)
+        
+        # Transfer control buttons
+        self.pause_button = QPushButton("⏸ Pause")
+        self.pause_button.setStyleSheet(BUTTON_STYLE_DARK)
+        self.pause_button.setToolTip("Pause all transfers")
+        self.pause_button.clicked.connect(self.pause_all_transfers)
+        self.pause_button.setCheckable(True)
+        
+        self.stop_button = QPushButton("⏹ Stop")
+        self.stop_button.setStyleSheet(BUTTON_STYLE_DARK)
+        self.stop_button.setToolTip("Cancel all transfers")
+        self.stop_button.clicked.connect(self.stop_all_transfers)
         
         self.clear_button = QPushButton("Clear Completed")
         self.clear_button.setStyleSheet(BUTTON_STYLE_DARK)
         self.clear_button.clicked.connect(self.clear_completed)
         
+        # Preferences checkboxes
+        prefs = get_preferences()
+        
+        self.clear_on_complete_checkbox = QCheckBox("Auto-clear completed")
+        self.clear_on_complete_checkbox.setToolTip("Automatically clear completed transfers when they finish")
+        self.clear_on_complete_checkbox.setChecked(prefs.get_bool("clear_completed_on_complete", False))
+        self.clear_on_complete_checkbox.stateChanged.connect(self._on_clear_on_complete_changed)
+        
+        self.overwrite_checkbox = QCheckBox("Overwrite files")
+        self.overwrite_checkbox.setToolTip("Overwrite existing files during transfer without prompting")
+        self.overwrite_checkbox.setChecked(prefs.get_bool("overwrite_on_transfer", False))
+        self.overwrite_checkbox.stateChanged.connect(self._on_overwrite_changed)
+        
+        self.focus_transfers_checkbox = QCheckBox("Focus Transfers tab")
+        self.focus_transfers_checkbox.setToolTip("Automatically switch to Transfers tab when transfers start")
+        self.focus_transfers_checkbox.setChecked(prefs.get_bool("focus_transfers_on_start", True))
+        self.focus_transfers_checkbox.stateChanged.connect(self._on_focus_transfers_changed)
+        
+        self.control_layout.addWidget(self.pause_button)
+        self.control_layout.addWidget(self.stop_button)
+        self.control_layout.addWidget(self.clear_on_complete_checkbox)
+        self.control_layout.addWidget(self.overwrite_checkbox)
+        self.control_layout.addWidget(self.focus_transfers_checkbox)
         self.control_layout.addStretch(1)
         self.control_layout.addWidget(self.clear_button)
         
@@ -92,6 +136,21 @@ class TransferQueueWidget(QWidget):
 
         # Setup timers
         self._setup_timers()
+
+    def _on_clear_on_complete_changed(self, state):
+        """Handle clear on complete checkbox change"""
+        prefs = get_preferences()
+        prefs.set_bool("clear_completed_on_complete", bool(state))
+
+    def _on_overwrite_changed(self, state):
+        """Handle overwrite checkbox change"""
+        prefs = get_preferences()
+        prefs.set_bool("overwrite_on_transfer", bool(state))
+
+    def _on_focus_transfers_changed(self, state):
+        """Handle focus transfers checkbox change"""
+        prefs = get_preferences()
+        prefs.set_bool("focus_transfers_on_start", bool(state))
 
     def _setup_timers(self):
         """Setup timers for queue processing"""
@@ -115,23 +174,39 @@ class TransferQueueWidget(QWidget):
         self.update_overall_progress()
 
     def add_observee(self, observee):
-        """Add an observer to be notified when transfers complete"""
-        if observee not in self.observees:
-            self.observees.append(observee)
+        """Add an observer to be notified when transfers complete. Thread-safe."""
+        with QMutexLocker(self._observees_lock):
+            if observee not in self._observees:
+                self._observees.append(observee)
 
     def remove_observee(self, observee):
-        """Remove an observer"""
-        if observee in self.observees:
-            self.observees.remove(observee)
+        """Remove an observer. Thread-safe."""
+        with QMutexLocker(self._observees_lock):
+            if observee in self._observees:
+                self._observees.remove(observee)
 
     def notify_observees(self):
-        """Notify all observers that transfers completed"""
-        for observee in self.observees:
+        """Notify all observers that transfers completed. Thread-safe."""
+        # Copy list under lock to avoid holding lock during callbacks
+        with QMutexLocker(self._observees_lock):
+            observees_copy = list(self._observees)
+        
+        for observee in observees_copy:
             try:
-                observee.get_files()
+                # Check if this is a remote browser that needs force_refresh
+                if hasattr(observee, 'model') and hasattr(observee.model, 'get_files'):
+                    # RemoteFileTableModel supports force_refresh parameter
+                    import inspect
+                    sig = inspect.signature(observee.model.get_files)
+                    if 'force_refresh' in sig.parameters:
+                        observee.model.get_files(force_refresh=True)
+                    else:
+                        observee.get_files()
+                else:
+                    observee.get_files()
             except AttributeError as ae:
                 ic("Observee", observee, "does not implement 'get_files' method.", ae)
-            except Exception as e:
+            except (AttributeError, RuntimeError) as e:
                 ic("An error occurred while notifying observee", observee, e)
 
     def update_overall_progress(self):
@@ -151,18 +226,19 @@ class TransferQueueWidget(QWidget):
             with QMutexLocker(self._active_transfers_lock):
                 if self.active_transfers >= MAX_TRANSFERS:
                     return
-
-            # Check if queue is empty
-            if sftp_queue_isempty():
+            
+            # Check if queue has items (debug)
+            if sftp_queue.empty():
                 return
 
-            # Get job from queue
+            # Get job from queue with timeout (thread-safe, avoids race condition)
             try:
-                job = sftp_queue_get()
-                if not job:
-                    return
+                job = sftp_queue.get_nowait()
             except Exception as e:
-                self.text_console.append(f"Error getting job from queue: {e}")
+                ic(f"Queue get error: {e}")
+                return  # Queue is empty or error
+            
+            if not job:
                 return
             
             # Debug: log job details
@@ -199,7 +275,7 @@ class TransferQueueWidget(QWidget):
                 job.command, getattr(job, 'key', None)
             )
 
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             ic(e)
             self.text_console.append(f"Error starting transfer: {e}")
 
@@ -222,74 +298,34 @@ class TransferQueueWidget(QWidget):
             
             # Create widget for the item - COMPACT DESIGN
             widget = QWidget()
-            widget.setFixedHeight(44)  # Much more compact
-            layout = QHBoxLayout()
+            widget.setFixedHeight(60)  # Slightly taller for details
+            layout = QVBoxLayout()
             layout.setContentsMargins(8, 4, 8, 4)
-            layout.setSpacing(8)
+            layout.setSpacing(2)
             
-            # File icon + name on the left
-            file_layout = QVBoxLayout()
-            file_layout.setSpacing(0)
-            file_layout.setContentsMargins(0, 0, 0, 0)
+            # Top row: Filename and action buttons
+            top_row = QHBoxLayout()
+            top_row.setSpacing(8)
             
+            # Direction arrow + filename
             file_name = os.path.basename(job_source)
-            file_label = QLabel(file_name if len(file_name) < 35 else file_name[:32] + "...")
+            direction = "⬆️" if is_source_remote and not is_destination_remote else "⬇️" if not is_source_remote and is_destination_remote else "🔄"
+            file_label = QLabel(f"{direction} {file_name}")
             file_label.setStyleSheet(f"font-weight: 600; font-size: 12px; color: {DARK_THEME['text_primary']};")
-            file_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            file_label.setToolTip(job_source)  # Full path on hover
-            file_layout.addWidget(file_label)
+            file_label.setSizePolicy(Qt.SizePolicy_Expanding, Qt.SizePolicy_Fixed)
+            file_label.setToolTip(f"Source: {job_source}\nDestination: {job_destination}")  # Full paths on hover
+            top_row.addWidget(file_label, stretch=3)
             
-            # Status below filename
+            # Status label
             status_label = QLabel("Queued")
-            status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['text_secondary']};")
-            status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            file_layout.addWidget(status_label)
+            status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['text_secondary']}; font-weight: 500;")
+            status_label.setAlignment(Qt.AlignRight)
+            top_row.addWidget(status_label)
             
-            layout.addLayout(file_layout, 3)  # Takes 3/5 of space
-            
-            # Progress bar in middle
-            progress_bar = QProgressBar()
-            progress_bar.setRange(0, 100)
-            progress_bar.setValue(0)
-            progress_bar.setFixedHeight(16)
-            progress_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            progress_bar.setStyleSheet(f"""
-                QProgressBar {{
-                    border: none;
-                    border-radius: 3px;
-                    background-color: {DARK_THEME['border']};
-                    text-align: center;
-                    font-size: 10px;
-                    color: {DARK_THEME['text_primary']};
-                }}
-                QProgressBar::chunk {{
-                    background-color: {DARK_THEME['accent_green']};
-                    border-radius: 3px;
-                }}
-            """)
-            layout.addWidget(progress_bar, 2)  # Takes 2/5 of space
-            
-            # Speed/ETA on the right
-            stats_layout = QVBoxLayout()
-            stats_layout.setSpacing(0)
-            stats_layout.setContentsMargins(0, 0, 0, 0)
-            
-            speed_label = QLabel("-")
-            speed_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['text_primary']};")
-            speed_label.setAlignment(Qt.AlignRight)
-            stats_layout.addWidget(speed_label)
-            
-            eta_label = QLabel("-")
-            eta_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['text_secondary']};")
-            eta_label.setAlignment(Qt.AlignRight)
-            stats_layout.addWidget(eta_label)
-            
-            layout.addLayout(stats_layout)
-            
-            # Compact buttons
+            # Cancel button
             cancel_button = QPushButton("✕")
-            cancel_button.setFixedWidth(28)
-            cancel_button.setFixedHeight(28)
+            cancel_button.setFixedWidth(24)
+            cancel_button.setFixedHeight(24)
             cancel_button.setToolTip("Cancel")
             cancel_button.setStyleSheet(f"""
                 QPushButton {{
@@ -297,7 +333,7 @@ class TransferQueueWidget(QWidget):
                     border-radius: 4px;
                     background-color: transparent;
                     color: {DARK_THEME['text_secondary']};
-                    font-size: 14px;
+                    font-size: 12px;
                     font-weight: bold;
                 }}
                 QPushButton:hover {{
@@ -306,7 +342,62 @@ class TransferQueueWidget(QWidget):
                 }}
             """)
             cancel_button.clicked.connect(lambda checked, tid=transfer_id: self.cancel_transfer(tid))
-            layout.addWidget(cancel_button)
+            top_row.addWidget(cancel_button)
+            
+            layout.addLayout(top_row)
+            
+            # Middle row: Source -> Destination paths
+            path_row = QHBoxLayout()
+            path_row.setSpacing(4)
+            
+            source_display = job_source if len(job_source) < 40 else "..." + job_source[-37:]
+            dest_display = job_destination if len(job_destination) < 40 else "..." + job_destination[-37:]
+            
+            path_label = QLabel(f"<span style='color: {DARK_THEME['text_secondary']};'>{source_display}</span> → <span style='color: {DARK_THEME['text_secondary']};'>{dest_display}</span>")
+            path_label.setStyleSheet(f"font-size: 9px;")
+            path_label.setSizePolicy(Qt.SizePolicy_Expanding, Qt.SizePolicy_Fixed)
+            path_row.addWidget(path_label, stretch=1)
+            
+            layout.addLayout(path_row)
+            
+            # Bottom row: Slim progress bar + speed/eta
+            bottom_row = QHBoxLayout()
+            bottom_row.setSpacing(8)
+            
+            # Progress bar - much thinner
+            progress_bar = QProgressBar()
+            progress_bar.setRange(0, 100)
+            progress_bar.setValue(0)
+            progress_bar.setFixedHeight(6)  # Much thinner
+            progress_bar.setSizePolicy(Qt.SizePolicy_Expanding, Qt.SizePolicy_Fixed)
+            progress_bar.setTextVisible(False)  # Hide text, just show bar
+            progress_bar.setStyleSheet(f"""
+                QProgressBar {{
+                    border: none;
+                    border-radius: 3px;
+                    background-color: {DARK_THEME['border']};
+                }}
+                QProgressBar::chunk {{
+                    background-color: {DARK_THEME['accent_green']};
+                    border-radius: 3px;
+                }}
+            """)
+            bottom_row.addWidget(progress_bar, stretch=4)  # Takes most space
+            
+            # Speed/ETA labels
+            speed_label = QLabel("-")
+            speed_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['text_primary']}; font-weight: 500;")
+            speed_label.setAlignment(Qt.AlignRight)
+            speed_label.setFixedWidth(70)
+            bottom_row.addWidget(speed_label)
+            
+            eta_label = QLabel("-")
+            eta_label.setStyleSheet(f"font-size: 9px; color: {DARK_THEME['text_secondary']};")
+            eta_label.setAlignment(Qt.AlignRight)
+            eta_label.setFixedWidth(50)
+            bottom_row.addWidget(eta_label)
+            
+            layout.addLayout(bottom_row)
             
             widget.setLayout(layout)
             
@@ -363,11 +454,14 @@ class TransferQueueWidget(QWidget):
             # Start the worker
             self.thread_pool.start(new_transfer.download_worker)
             
+            # Emit transfer started signal
+            self.signal_transfer_started.emit(1, f"Transfer started: {job_source}")
+            
             with QMutexLocker(self._active_transfers_lock):
                 self.active_transfers += 1
             self.update_overall_progress()
             
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             self.text_console.append(f"Failed to start transfer: {e}")
 
     def cancel_transfer(self, transfer_id):
@@ -384,7 +478,7 @@ class TransferQueueWidget(QWidget):
             if transfer.download_worker:
                 try:
                     transfer.download_worker.stop_transfer()
-                except Exception:
+                except (AttributeError, RuntimeError):
                     pass
             
             # Disconnect signals
@@ -418,7 +512,7 @@ class TransferQueueWidget(QWidget):
             # Try to start another transfer
             QTimer.singleShot(100, self.check_and_start_transfers)
             
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             self.text_console.append(f"Error cancelling transfer: {e}")
 
     def cleanup_transfer(self, transfer_id):
@@ -443,7 +537,7 @@ class TransferQueueWidget(QWidget):
             # Clean up references
             self.transfers = [t for t in self.transfers if t.transfer_id != transfer_id]
             
-        except Exception:
+        except (OSError, IOError, RuntimeError):
             pass
 
     def _release_transfer(self, transfer_id):
@@ -460,7 +554,7 @@ class TransferQueueWidget(QWidget):
             self.remove_queue_item(transfer_id)
             self.update_overall_progress()
             
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             print(f"Error releasing transfer {transfer_id}: {e}")
 
     def transfer_finished(self, transfer_id):
@@ -477,16 +571,15 @@ class TransferQueueWidget(QWidget):
             
             try:
                 if transfer.status_label:
-                    transfer.status_label.setText("Completed")
-                    transfer.status_label.setStyleSheet(f"font-size: 12px; color: {DARK_THEME['success']}; font-weight: bold;")
+                    transfer.status_label.setText("✓ Done")
+                    transfer.status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['success']}; font-weight: bold;")
                 if transfer.progress_bar:
                     transfer.progress_bar.setValue(100)
                     transfer.progress_bar.setStyleSheet(f"""
                         QProgressBar {{
-                            border: 1px solid {DARK_THEME['success']};
-                            border-radius: 4px;
-                            text-align: center;
-                            font-size: 12px;
+                            border: none;
+                            border-radius: 3px;
+                            background-color: {DARK_THEME['border']};
                         }}
                         QProgressBar::chunk {{
                             background-color: {DARK_THEME['success']};
@@ -501,16 +594,24 @@ class TransferQueueWidget(QWidget):
                 if hasattr(transfer.download_worker, 'command') and \
                    transfer.download_worker.command in ["upload", "download"]:
                     self.notify_observees()
-            except Exception:
+            except (OSError, IOError, RuntimeError):
                 pass
 
             # Release resources but DON'T cleanup - keep visible
             self._release_transfer(transfer_id)
             
+            # Emit transfer completed signal
+            self.signal_transfer_completed.emit(1, "Transfer completed")
+            
+            # Auto-clear if preference is enabled
+            prefs = get_preferences()
+            if prefs.get_bool("clear_completed_on_complete", False):
+                QTimer.singleShot(200, self.clear_completed)
+            
             # Try to start another transfer
             QTimer.singleShot(100, self.check_and_start_transfers)
             
-        except Exception:
+        except (OSError, IOError, RuntimeError):
             pass
 
     def transfer_error(self, transfer_id, message):
@@ -527,12 +628,18 @@ class TransferQueueWidget(QWidget):
             
             try:
                 if transfer.status_label:
-                    transfer.status_label.setText(f"Error: {message[:30]}...")
-                    transfer.status_label.setStyleSheet(f"font-size: 12px; color: {DARK_THEME['error']}; font-weight: bold;")
+                    transfer.status_label.setText("✗ Failed")
+                    transfer.status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['error']}; font-weight: bold;")
                 if transfer.progress_bar:
                     transfer.progress_bar.setStyleSheet(f"""
+                        QProgressBar {{
+                            border: none;
+                            border-radius: 3px;
+                            background-color: {DARK_THEME['border']};
+                        }}
                         QProgressBar::chunk {{
                             background-color: {DARK_THEME['error']};
+                            border-radius: 3px;
                         }}
                     """)
             except RuntimeError:
@@ -541,9 +648,12 @@ class TransferQueueWidget(QWidget):
             if hasattr(self, 'text_console'):
                 self.text_console.append(f"ERROR Transfer {transfer_id}: {message}")
             
+            # Emit transfer error signal
+            self.signal_transfer_error.emit(1, f"Transfer failed: {message}")
+            
             self._release_transfer(transfer_id)
             
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             print(f"Error in transfer_error handler: {e}")
 
     def _handle_worker_message(self, transfer_id, message):
@@ -554,7 +664,7 @@ class TransferQueueWidget(QWidget):
             else:
                 if hasattr(self, 'text_console'):
                     self.text_console.append(f"Transfer {transfer_id}: {message}")
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             print(f"Error handling worker message: {e}")
 
     def update_progress(self, transfer_id, value, speed_bps=None, eta_sec=None):
@@ -578,17 +688,19 @@ class TransferQueueWidget(QWidget):
                     transfer.eta_label.setText(self.format_time(eta_sec))
 
                 if transfer.status_label:
-                    transfer.status_label.setText(
-                        "Completed" if value == 100 else
-                        "Paused" if getattr(transfer, 'paused', False) else
-                        "Transferring"
-                    )
                     if value == 100:
-                        transfer.status_label.setStyleSheet(f"font-size: 12px; color: {DARK_THEME['success']}; font-weight: bold;")
+                        transfer.status_label.setText("✓ Done")
+                        transfer.status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['success']}; font-weight: bold;")
+                    elif getattr(transfer, 'paused', False):
+                        transfer.status_label.setText("⏸ Paused")
+                        transfer.status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['warning']}; font-weight: bold;")
+                    else:
+                        transfer.status_label.setText(f"{value}%")
+                        transfer.status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['text_secondary']};")
             except RuntimeError:
                 pass
 
-        except Exception:
+        except (OSError, IOError, RuntimeError):
             pass
 
     def format_speed(self, bytes_per_sec):
@@ -625,7 +737,7 @@ class TransferQueueWidget(QWidget):
                     transfer.pause_button.setText("Resume" if transfer.paused else "Pause")
                 if transfer.status_label:
                     transfer.status_label.setText("Paused" if transfer.paused else "Resuming...")
-        except Exception:
+        except (OSError, IOError, RuntimeError):
             pass
 
     def toggle_pause_all(self):
@@ -645,9 +757,40 @@ class TransferQueueWidget(QWidget):
                 if transfer.status_label:
                     transfer.status_label.setText("Paused" if transfer.paused else "Resuming...")
             self.pause_button.setText("Resume All" if not any_paused else "Pause All")
-        except Exception:
+        except (OSError, IOError, RuntimeError):
             pass
 
+    def pause_all_transfers(self):
+        """Pause or resume all active transfers"""
+        try:
+            any_paused = any(getattr(t, 'paused', False) for t in self.transfers if t.active)
+            
+            for transfer in self.transfers:
+                if transfer.active:
+                    transfer.paused = not any_paused
+                    if hasattr(transfer.download_worker, 'set_paused'):
+                        transfer.download_worker.set_paused(transfer.paused)
+            
+            self.pause_button.setText("Resume All" if any_paused else "⏸ Pause")
+            
+        except (OSError, IOError, RuntimeError) as e:
+            self.text_console.append(f"Error pausing transfers: {e}")
+    
+    def stop_all_transfers(self):
+        """Cancel all active transfers"""
+        try:
+            for transfer in self.transfers:
+                if transfer.active:
+                    if hasattr(transfer.download_worker, '_stop_flag'):
+                        transfer.download_worker._stop_flag = True
+                    if hasattr(transfer.download_worker, 'cancel'):
+                        transfer.download_worker.cancel()
+            
+            self.text_console.append("Cancelling all transfers...")
+            
+        except (OSError, IOError, RuntimeError) as e:
+            self.text_console.append(f"Error stopping transfers: {e}")
+    
     def clear_completed(self):
         """Remove completed/cancelled/error transfers"""
         try:
@@ -663,7 +806,7 @@ class TransferQueueWidget(QWidget):
             for transfer_id in transfers_to_remove:
                 self.cleanup_transfer(transfer_id)
                 
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             self.text_console.append(f"Error clearing completed transfers: {e}")
 
     def cleanup(self):
@@ -678,7 +821,7 @@ class TransferQueueWidget(QWidget):
                 try:
                     if transfer.active and hasattr(transfer, 'download_worker'):
                         transfer.download_worker._stop_flag = True
-                except Exception:
+                except (OSError, IOError, RuntimeError):
                     pass
 
             # Clear the queue
@@ -692,5 +835,5 @@ class TransferQueueWidget(QWidget):
             self.transfers.clear()
             self.active_transfers = 0
 
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             print(f"Error in cleanup: {e}")

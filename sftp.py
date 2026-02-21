@@ -11,12 +11,17 @@ from sftp_hostdataeditor import save_connection_data, load_connection_data
 from sftp_theme import BUTTON_STYLE_DARK
 from sftp_connections_widget import ConnectionsWidget
 from sftp_file_browser_panel import FileBrowserPanel
+from sftp_terminal_widget import SSHTerminalWidget
 from sftp_filebrowserclass import FileBrowser
 from sftp_creds import get_credentials, set_credentials, del_credentials, create_random_integer, clear_all_credentials, get_home_directory
-from PyQt5.QtWidgets import QInputDialog, QFileDialog, QLabel, QToolButton, QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QTextEdit, QCompleter, QComboBox, QSpinBox, QTabWidget, QMessageBox
-from PyQt5.QtCore import pyqtSignal, QObject, QCoreApplication, Qt, QTimer, QEvent, QMutexLocker
-from cryptography.fernet import Fernet
+from sftp_session import get_session_manager
+from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
+from PyQt6.QtWidgets import QInputDialog, QFileDialog, QLabel, QToolButton, QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QTextEdit, QCompleter, QComboBox, QSpinBox, QTabWidget, QMessageBox, QCheckBox
+from PyQt6.QtCore import pyqtSignal, QObject, QCoreApplication, QTimer, QEvent, QMutexLocker
 import paramiko
+
+from sftp_config import MAX_TRANSFERS
+from sftp_preferences import get_preferences
 
 class CustomComboBox(QComboBox):
     editingFinished = pyqtSignal()
@@ -28,9 +33,6 @@ class CustomComboBox(QComboBox):
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
         self.editingFinished.emit()
-
-# Define SIZE_UNIT and WorkerSignals as necessary
-MAX_TRANSFERS = 4
 
 class WorkerSignals(QObject):
     error = pyqtSignal(int, str)
@@ -95,13 +97,26 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.container_layout = QVBoxLayout()
         self.username = QLineEdit()
         self.password = QLineEdit()
-        self.password.setEchoMode(QLineEdit.Password)
+        self.password.setEchoMode(Qt.Password)
         self.port_selector = QLineEdit()
 
         # Initialize buttons
         self.connect_button = QPushButton("Connect")
+        self.connect_button.setStyleSheet(BUTTON_STYLE_DARK)
+        self.terminal_button = QPushButton("Terminal")
+        self.terminal_button.setToolTip("Open SSH terminal session")
+        self.terminal_button.setStyleSheet(BUTTON_STYLE_DARK)
         self.edit_button = QPushButton("Edit Host Data")
+        self.edit_button.setStyleSheet(BUTTON_STYLE_DARK)
         self.clear_queue_button = QPushButton("Clear Queue")
+        self.clear_queue_button.setStyleSheet(BUTTON_STYLE_DARK)
+        
+        prefs = get_preferences()
+        self.confirm_exit_checkbox = QCheckBox("Confirm exit")
+        self.confirm_exit_checkbox.setToolTip("Confirm before closing application with active transfers")
+        self.confirm_exit_checkbox.setChecked(prefs.get_bool("confirm_exit", True))
+        self.confirm_exit_checkbox.stateChanged.connect(self._on_confirm_exit_changed)
+        
         self.transfers = {}  # Dictionary to store active transfers
 
         # Initialize hostname combo box
@@ -160,6 +175,11 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.transfer_queue_widget = TransferQueueWidget()
         self.tab_widget.addTab(self.transfer_queue_widget, "📋 Transfers")
         
+        # Connect transfer signals for status bar updates and focus
+        self.transfer_queue_widget.signal_transfer_started.connect(self._on_transfer_started)
+        self.transfer_queue_widget.signal_transfer_completed.connect(self._on_transfer_completed)
+        self.transfer_queue_widget.signal_transfer_error.connect(self._on_transfer_error)
+        
         # Create and add the connections widget as a tab
         self.connections_widget = ConnectionsWidget()
         self.connections_widget.connect_requested.connect(self.handle_connection_request)
@@ -183,7 +203,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.top_bar_layout.addWidget(QLabel("Key:"), 0)   # caption
         self.key_combo = QComboBox()
         self.key_combo.setEditable(False)
-        self.key_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.key_combo.setSizeAdjustPolicy(Qt.ComboBox_AdjustToContents)
         self.top_bar_layout.addWidget(self.key_combo, 2)
 
         self.key_browse_btn = QToolButton()
@@ -229,7 +249,11 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.rename_btn.setToolTip("Rename selected file(s)")
         self.rename_btn.setFixedWidth(80)
         
-        for btn in [self.refresh_btn, self.upload_btn, self.download_btn, self.new_folder_btn, self.delete_btn, self.rename_btn]:
+        self.view_btn = QPushButton("👁 View")
+        self.view_btn.setToolTip("View/Edit selected text file")
+        self.view_btn.setFixedWidth(80)
+        
+        for btn in [self.refresh_btn, self.upload_btn, self.download_btn, self.new_folder_btn, self.delete_btn, self.rename_btn, self.view_btn]:
             btn.setStyleSheet(BUTTON_STYLE_DARK)
         
         # Connect file operation buttons
@@ -239,6 +263,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.new_folder_btn.clicked.connect(self._toolbar_new_folder)
         self.delete_btn.clicked.connect(self._toolbar_delete)
         self.rename_btn.clicked.connect(self._toolbar_rename)
+        self.view_btn.clicked.connect(self._toolbar_view)
         
         # Add file operation buttons
         self.button_layout.addWidget(self.refresh_btn)
@@ -247,11 +272,14 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.button_layout.addWidget(self.new_folder_btn)
         self.button_layout.addWidget(self.delete_btn)
         self.button_layout.addWidget(self.rename_btn)
+        self.button_layout.addWidget(self.view_btn)
         
         self.button_layout.addStretch()
         
         self.button_layout.addWidget(self.connect_button)
+        self.button_layout.addWidget(self.terminal_button)
         self.button_layout.addWidget(self.clear_queue_button)
+        self.button_layout.addWidget(self.confirm_exit_checkbox)
         self.button_layout.addWidget(self.edit_button)
 
         # Connect the clicked signal to switch to connections tab
@@ -259,13 +287,14 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
 
         # Connect the clicked signal of the connect button to the connect_button_pressed method
         self.connect_button.clicked.connect(self.connect_button_pressed)
+        self.terminal_button.clicked.connect(self.terminal_button_pressed)
         self.clear_queue_button.clicked.connect(clear_sftp_queue)
 
     def setup_hostname_completer(self):
         # Make sure self.hostnames is initialized and filled with data
         self.hostname_completer = QCompleter(self.hostnames)
         self.hostname_completer.setCaseSensitivity(Qt.CaseInsensitive)
-        self.hostname_completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.hostname_completer.setCompletionMode(Qt.Completer_PopupCompletion)
         self.hostname_combo.setCompleter(self.hostname_completer)
 
         # Connect signals for hostname combo box
@@ -335,12 +364,38 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         # Store references in container widget
         container_widget.left_browser = self.file_browser_panel.left_browser
         container_widget.right_browser = self.file_browser_panel.right_browser
+        container_widget.session_id = self.session_id
+        container_widget.is_terminal = False
 
         # Set the main layout to the container widget
         container_widget.setLayout(main_layout)
         self.message_signal.emit("Connection successful")
 
         return container_widget
+
+    def prepare_terminal_widget(self, hostname, username, password, port, key):
+        """Create a container widget with SSH terminal"""
+        self.session_id = create_random_integer()
+        
+        container_widget = QWidget()
+        
+        ic(f"prepare_terminal_widget: Creating SSHTerminalWidget with session_id={self.session_id}")
+        self.terminal_widget = SSHTerminalWidget(self.session_id)
+        
+        main_layout = QVBoxLayout()
+        main_layout.addWidget(self.terminal_widget)
+        container_widget.setLayout(main_layout)
+        
+        container_widget.terminal_widget = self.terminal_widget
+        container_widget.is_terminal = True
+        container_widget.session_id = self.session_id
+        
+        tab_title = f"Terminal: {hostname}"
+        new_tab_index = self.tab_widget.addTab(container_widget, tab_title)
+        self.tab_widget.setCurrentIndex(new_tab_index)
+        
+        self.terminal_widget.connect_ssh(hostname, username, password, port, key)
+        self.message_signal.emit(f"Terminal session opened to {hostname}")
 
     def closeTab(self, index):
         # Don't close the permanent tabs (transfers at 0, connections at 1)
@@ -349,6 +404,11 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             
         # Close the tab at the given index
         widget_to_remove = self.tab_widget.widget(index)
+        if not widget_to_remove:
+            return
+        
+        # Store session_id for cleanup before removing the widget
+        session_id = getattr(widget_to_remove, 'session_id', None)
         
         # Remove observers before closing
         if hasattr(widget_to_remove, 'left_browser'):
@@ -356,14 +416,39 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         if hasattr(widget_to_remove, 'right_browser'):
             self.transfer_queue_widget.remove_observee(widget_to_remove.right_browser)
         
+        # Close terminal session if this is a terminal tab
+        if hasattr(widget_to_remove, 'is_terminal') and widget_to_remove.is_terminal:
+            if hasattr(widget_to_remove, 'terminal_widget') and widget_to_remove.terminal_widget:
+                try:
+                    widget_to_remove.terminal_widget.disconnect_ssh()
+                except Exception as e:
+                    print(f"Error disconnecting terminal: {e}")
+        
         self.tab_widget.removeTab(index)
 
         # Close SFTP connection
-        if hasattr(widget_to_remove, 'right_browser'):
-            widget_to_remove.right_browser.close_sftp_connection()
+        if hasattr(widget_to_remove, 'right_browser') and widget_to_remove.right_browser:
+            try:
+                widget_to_remove.right_browser.close_sftp_connection()
+            except Exception as e:
+                print(f"Error closing SFTP connection: {e}")
 
         # Delete the widget if necessary
-        widget_to_remove.deleteLater()
+        try:
+            widget_to_remove.deleteLater()
+        except Exception as e:
+            print(f"Error deleting widget: {e}")
+        
+        # Clean up session and credentials
+        if session_id:
+            try:
+                get_session_manager().remove_session(str(session_id))
+            except Exception as e:
+                ic(f"Error removing session: {e}")
+            try:
+                del_credentials(session_id)
+            except Exception as e:
+                ic(f"Error clearing credentials: {e}")
 
     def add_tab(self, session_id, widget):
         self.session_id = session_id
@@ -391,13 +476,6 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             self.transfers[transfer_id].download_worker._stop_flag = True
             self.message_signal.emit(f"Cancelling transfer {transfer_id}")
 
-    def initialize_session_credentials(self, session_id):
-        self.session_id = session_id
-
-        self.title = self.get_session_title(self.session_id)
-        self.tab_widget.addTab(self.tab_widget, self.title)
-        self.sessions.append(self.tab_widget)
-
     def get_session_title(self, session_id):
         self.session_id = session_id
         creds = get_credentials(self.session_id)
@@ -410,21 +488,6 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
 
     def log_connection_success(self):
         self.status_bar.setText("Connected successfully")
-
-    def restore_user_changes(self):
-        """Restore user changes if they exist"""
-        if hasattr(self, '_user_changes') and self._user_changes:
-            if self._user_changes.get('username'):
-                self.username.setText(self._user_changes['username'])
-            if self._user_changes.get('password'):
-                self.password.setText(self._user_changes['password'])
-            if self._user_changes.get('port'):
-                self.port_selector.setText(self._user_changes['port'])
-            if self._user_changes.get('key'):
-                # Find and select the key in combo box
-                key_index = self.key_combo.findData(self._user_changes['key'])
-                if key_index >= 0:
-                    self.key_combo.setCurrentIndex(key_index)
 
     def hostname_changed(self):
         self.current_hostname = self.hostname_combo.currentText().strip()
@@ -451,20 +514,15 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             self.port_selector.setText(str(port))
 
             # Populate the key combo
-            try:
-                self.key_combo.addItem(os.path.basename(key_data), key_data)
-            except:
-                self.key_combo.addItem("<none>", None)
+            if key_data:
+                try:
+                    self.key_combo.addItem(os.path.basename(key_data), key_data)
+                except (TypeError, AttributeError) as e:
+                    ic(f"Error adding key to combo: {e}")
 
             # If we actually added any keys, select the first one
             # if key_paths and self.key_combo.count() > 1:  # More than just '<none>'
             #    self.key_combo.setCurrentIndex(1)  # Select first actual key, not '<none>'
-
-    def removeTab(self, session_id):
-        creds = get_credentials(self.session_id)
-        self.tabWidget.removeTab( self.tabs[session_id] )
-        del self.tabs[session_id]  # Remove the reference from the list
-        del_credentials(self.session_id)
 
     def on_value_changed(self, value):
         global MAX_TRANSFERS
@@ -495,7 +553,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         # Reinitialize the completer with the updated list
         self.hostname_completer = QCompleter(self.hostnames)
         self.hostname_completer.setCaseSensitivity(Qt.CaseInsensitive)
-        self.hostname_completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.hostname_completer.setCompletionMode(Qt.Completer_PopupCompletion)
         self.hostname_combo.setCompleter(self.hostname_completer)
 
     def _switch_to_connections_tab(self):
@@ -503,8 +561,40 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.tab_widget.setCurrentIndex(1)  # Index 1 is Connections tab
     
     def _switch_to_transfers_tab(self):
-        """Switch to the Transfers tab"""
-        self.tab_widget.setCurrentIndex(0)  # Index 0 is Transfers tab
+        """Switch to the Transfers tab if preference is enabled"""
+        prefs = get_preferences()
+        if prefs.get_bool("focus_transfers_on_start", True):
+            self.tab_widget.setCurrentIndex(0)  # Index 0 is Transfers tab
+    
+    def _on_transfer_started(self, count, message):
+        """Handle transfer started event"""
+        prefs = get_preferences()
+        
+        # Update status bar
+        self.status_bar.setText(f"Transfer started: {message}")
+        
+        # Focus transfers tab if preference is enabled
+        if prefs.get_bool("focus_transfers_on_start", True):
+            self.tab_widget.setCurrentIndex(0)
+    
+    def _on_transfer_completed(self, count, message):
+        """Handle transfer completed event"""
+        self.status_bar.setText("Transfer completed")
+        # Reset any error styling from failed transfers
+        self.status_bar.setStyleSheet("")
+    
+    def _on_transfer_error(self, count, message):
+        """Handle transfer error event"""
+        self.status_bar.setText(f"Transfer failed: {message}")
+        self.status_bar.setStyleSheet(f"""
+            QLabel {{
+                background-color: #5a1a1a;
+                color: #ff6b6b;
+                padding: 5px 10px;
+                border-top: 1px solid #ff6b6b;
+                font-size: 12px;
+            }}
+        """)
     
     def _switch_to_connection_tab(self, tab_index):
         """Switch to a specific connection tab"""
@@ -521,8 +611,8 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             # Container widget has right_browser directly, not file_browser_panel
             if hasattr(widget, 'right_browser'):
                 return widget.right_browser
-        except:
-            pass
+        except (AttributeError, RuntimeError) as e:
+            ic(f"Error getting right browser: {e}")
         return None
     
     def _toolbar_refresh(self):
@@ -567,7 +657,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
 
     def _toolbar_rename(self):
         """Handle Rename button click"""
-        from PyQt5.QtWidgets import QInputDialog
+        from PyQt6.QtWidgets import QInputDialog
         browser = self._get_active_browser()
         if browser:
             current_browser = browser.active_table
@@ -592,6 +682,14 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         else:
             QMessageBox.information(self, "Rename", "Please open a connection first.")
     
+    def _toolbar_view(self):
+        """Handle View button click - view/edit selected text file"""
+        browser = self._get_active_browser()
+        if browser:
+            browser.view_edit_file()
+        else:
+            QMessageBox.information(self, "View", "Please open a connection first.")
+    
     def handle_connection_request(self, connection_data):
         """Handle connection request from Connections widget"""
         hostname = connection_data.get("hostname")
@@ -599,45 +697,42 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         password = connection_data.get("password")
         port = connection_data.get("port", 22)
         key = connection_data.get("key", "None")
+        connection_type = connection_data.get("connection_type", "SFTP Browser")
+        initial_remote_dir = connection_data.get("initial_remote_dir", "")
+        initial_local_dir = connection_data.get("initial_local_dir", "")
+        
+        # Store initial directories in host_data so navigate_to_initial_directories can find them
+        if initial_remote_dir:
+            if "initial_remote_dir" not in self.host_data:
+                self.host_data["initial_remote_dir"] = {}
+            self.host_data["initial_remote_dir"][hostname] = initial_remote_dir
+        
+        if initial_local_dir:
+            if "initial_local_dir" not in self.host_data:
+                self.host_data["initial_local_dir"] = {}
+            self.host_data["initial_local_dir"][hostname] = initial_local_dir
         
         # Update UI fields
         self.hostname_combo.setCurrentText(hostname)
         self.username.setText(username)
         self.password.setText(password)
         self.port_selector.setText(str(port))
+        if key:
+            self.key_combo.setCurrentText(key)
         
         # Switch to connection form tab
         self.tab_widget.setCurrentIndex(2)  # Index 2 is the first connection tab
         
-        # Perform the connection
+        # Perform the connection based on type
         self.message_signal.emit(f"Connecting to {hostname} from Connections...")
-        self.connect(hostname=hostname, username=username, password=password, port=port, key=key)
+        
+        if connection_type == "SSH Terminal":
+            self.prepare_terminal_widget(hostname, username, password, port, key if key != "None" else None)
+        else:
+            self.connect(hostname=hostname, username=username, password=password, port=port, key=key)
 
     # Alias for backward compatibility
     on_site_manager_connect = handle_connection_request
-
-    def on_host_data_changed(self, updated_data):
-        self.host_data = updated_data
-        save_connection_data()
-        self.update_completer()
-
-    def onEntryDoubleClicked(self, entry):
-        hostname = entry.get("hostname", "localhost")
-        username = entry.get("username", "guest")
-        password = entry.get("password", "guest")
-        port = entry.get("port", "22")
-        key = entry.get("key", None)
-
-        self.connect(hostname=hostname, username=username, password=password, port=port,key=key)
-
-    # Function to safely clear a queue
-    def clear_queue(self, q):
-        try:
-            while True:  # Continue until an Empty exception is raised
-                q.get_nowait()  # Remove an item from the queue
-                q.task_done()  # Indicate that a formerly enqueued task is complete
-        except Exception as e:
-            pass  # Queue is empty, break the loop
 
     def connect_button_pressed(self):
         try:
@@ -646,10 +741,42 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
                 # Connection failed, error has already been displayed
                 return
             # If needed, add any post-connection logic here
-        except Exception as e:
+        except (ConnectionError, OSError, ValueError) as e:
             error_message = f"Connection failed: {str(e)}"
             self.display_error(error_message)
             self.update_console(error_message)
+
+    def terminal_button_pressed(self):
+        """Handle Terminal button click - opens SSH terminal session"""
+        try:
+            hostname = self.hostname_combo.currentText().strip()
+            username = self.username.text().strip()
+            password = self.password.text()
+            port_text = self.port_selector.text().strip()
+            port = int(port_text) if port_text else 22
+            key = self.key_combo.currentText() if self.key_combo.currentText() else None
+            if key == "<none>":
+                key = None
+
+            if not hostname:
+                QMessageBox.warning(self, "Missing Hostname", "Please enter a hostname")
+                return
+
+            if not username:
+                QMessageBox.warning(self, "Missing Username", "Please enter a username")
+                return
+
+            if not password and not key:
+                QMessageBox.warning(self, "Missing Credentials", "Please enter a password or select an SSH key")
+                return
+
+            self.message_signal.emit(f"Opening terminal session to {hostname}...")
+            self.prepare_terminal_widget(hostname, username, password, port, key)
+
+        except (ConnectionError, OSError, ValueError) as e:
+            error_message = f"Connection failed: {str(e)}"
+            self.update_console(error_message)
+            QMessageBox.critical(self, "Connection Error", error_message)
 
     def display_error(self, transfer_id, message):
         # Display error in a message box
@@ -683,10 +810,10 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             # Prompt the user if the key is encrypted, or handle differently
             passphrase, ok = QInputDialog.getText(
                 self, "Passphrase", f"Passphrase for {os.path.basename(path)}:",
-                QLineEdit.Password)
+                Qt.Password)
             if ok and passphrase:
                 return paramiko.PKey.from_private_key_file(path, password=passphrase)
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             QMessageBox.critical(self, "Key error", str(e))
         return None
 
@@ -744,7 +871,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
                 if not home_dir:
                     raise ValueError("SFTP connection test failed")
                 self.message_signal.emit("Connection test passed!")
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 self.message_signal.emit(f"Connection test failed: {e}")
                 raise  # Re-raise to trigger main exception handling
 
@@ -777,7 +904,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             error_message = str(ve)
             QMessageBox.critical(self, "Connection Error", error_message)
             self.message_signal.emit(f"Connection failed: {error_message}")
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             error_message = f"Unexpected error: {str(e)}"
             QMessageBox.critical(self, "Connection Error", error_message)
             self.message_signal.emit(f"Connection failed: {error_message}")
@@ -795,7 +922,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             try:
                 ssh.load_host_keys(known_hosts_path)
                 self.message_signal.emit("Loaded known hosts from ~/.ssh/known_hosts")
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 self.message_signal.emit(f"Warning: Could not load known_hosts: {e}")
         
         # Set up policy to warn about unknown hosts
@@ -820,16 +947,16 @@ Do you want to trust this host and add it to known_hosts?"""
                     self.parent,
                     "Unknown Host Key",
                     msg,
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No
+                    Qt.MsgBtn_Yes | Qt.MsgBtn_No,
+                    Qt.MsgBtn_No
                 )
                 
-                if reply == QMessageBox.Yes:
+                if reply == Qt.MsgBtn_Yes:
                     # Add to known_hosts
                     try:
                         client.save_host_keys(self.known_hosts_path)
                         return
-                    except Exception as e:
+                    except (OSError, IOError, RuntimeError) as e:
                         self.parent.message_signal.emit(f"Warning: Could not save host key: {e}")
                         return
                 else:
@@ -887,12 +1014,12 @@ Do you want to trust this host and add it to known_hosts?"""
                     self.message_signal.emit(f"Remote home directory: {home_dir}")
                 else:
                     ic(f"Could not get home directory: {error}")
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 ic(f"Could not get home directory: {e}")
 
             return home_dir
 
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             self.message_signal.emit(f"SSH connection failed: {str(e)}")
             raise Exception(f"Failed to connect: {str(e)}")
         finally:
@@ -900,13 +1027,13 @@ Do you want to trust this host and add it to known_hosts?"""
             if sftp:
                 try:
                     sftp.close()
-                except Exception as e:
+                except (OSError, IOError, RuntimeError) as e:
                     ic(f"Warning: Error closing SFTP session: {e}")
 
             # Ensure SSH connection is closed
             try:
                 ssh.close()
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 ic(f"Warning: Error closing SSH connection: {e}")
         
     def set_credentials_async(self):
@@ -935,7 +1062,7 @@ Do you want to trust this host and add it to known_hosts?"""
                 self.message_signal.emit("Connection data saved successfully")
                 
             self.update_completer()
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             self.message_signal.emit(f"Error saving connection data: {str(e)}")
 
     def navigate_to_initial_directories(self):
@@ -957,9 +1084,9 @@ Do you want to trust this host and add it to known_hosts?"""
                 # Also change the actual working directory
                 try:
                     os.chdir(initial_local)
-                except Exception as e:
+                except (OSError, IOError, RuntimeError) as e:
                     self.message_signal.emit(f"Warning: Could not change to local directory {initial_local}: {e}")
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             self.message_signal.emit(f"Warning: Could not navigate to initial directories: {e}")
 
     def create_initial_data(self):
@@ -997,9 +1124,9 @@ Do you want to trust this host and add it to known_hosts?"""
             # Save connection data
             try:
                 save_connection_data(self.host_data)
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 ic(f"Error saving connection data: {e}")
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             ic(f"Error during cleanup: {str(e)}")
         ic("All cleanup tasks completed.")
 
@@ -1022,7 +1149,7 @@ Do you want to trust this host and add it to known_hosts?"""
             try:
                 if hasattr(browser, 'close_sftp_connection'):
                     browser.close_sftp_connection()
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 ic(f"Error closing SFTP connection: {e}")
 
     def stop_background_thread(self):
@@ -1038,7 +1165,7 @@ Do you want to trust this host and add it to known_hosts?"""
                     try:
                         if transfer.active and hasattr(transfer, 'download_worker'):
                             transfer.download_worker._stop_flag = True
-                    except Exception:
+                    except (OSError, IOError, RuntimeError):
                         pass
 
                 # Wait for thread pool to finish (up to 2 seconds)
@@ -1048,12 +1175,22 @@ Do you want to trust this host and add it to known_hosts?"""
                 # Force clear the queue
                 from sftp_downloadworkerclass import clear_sftp_queue
                 clear_sftp_queue()
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             print(f"Error stopping background thread: {e}")
+
+    def _on_confirm_exit_changed(self, state):
+        """Handle confirm exit checkbox change"""
+        prefs = get_preferences()
+        prefs.set_bool("confirm_exit", bool(state))
 
     def closeEvent(self, event):
         """Handle application close"""
         try:
+            prefs = get_preferences()
+            if not prefs.get_bool("confirm_exit", True):
+                event.accept()
+                return
+
             # Check if there are active transfers
             active_count = 0
             if hasattr(self, 'transfer_queue_widget'):
@@ -1064,16 +1201,16 @@ Do you want to trust this host and add it to known_hosts?"""
                 reply = QMessageBox.question(
                     self, 'Confirm Exit',
                     f'There are {active_count} active file transfers. Are you sure you want to exit?',
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                    Qt.MsgBtn_Yes | Qt.MsgBtn_No, Qt.MsgBtn_No
                 )
-                if reply == QMessageBox.No:
+                if reply == Qt.MsgBtn_No:
                     event.ignore()
                     return
 
             # Accept the close event first to allow cleanup to happen
             # The actual cleanup will be handled by the aboutToQuit signal
             event.accept()
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             print(f"Error during application shutdown: {e}")
             import traceback
             traceback.print_exc()
@@ -1139,13 +1276,13 @@ def main():
                 port=args.port or "22",
                 key=args.key or "None"
             )
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             ic("Error connecting:", e)
 
     # Connect the aboutToQuit signal directly to the cleanup method
     app.aboutToQuit.connect(main_window.cleanup)
 
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()

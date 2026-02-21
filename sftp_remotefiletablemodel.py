@@ -1,9 +1,10 @@
-from PyQt5.QtCore import QVariant, QAbstractTableModel, QModelIndex, QTimer, QDateTime, Qt, QEventLoop
+from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QTimer, QDateTime, QEventLoop
+from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 import base64
 import queue
 import time
 from icecream import ic
-from PyQt5.QtGui import QFont, QColor
+from PyQt6.QtGui import QFont, QColor
 from sftp_creds import get_credentials, create_random_integer
 from sftp_downloadworkerclass import create_response_queue, delete_response_queue, add_sftp_job
 import stat
@@ -17,10 +18,10 @@ def _safe_decode(s, encoding='utf-8', errors='replace'):
     if isinstance(s, bytes):
         try:
             return s.decode(encoding, errors=errors)
-        except Exception:
+        except (OSError, IOError, RuntimeError):
             try:
                 return s.decode('latin-1', errors=errors)
-            except Exception:
+            except (OSError, IOError, RuntimeError):
                 return s.decode('utf-8', errors='backslashreplace')
     return str(s)
 
@@ -56,12 +57,12 @@ class RemoteFileTableModel(QAbstractTableModel):
 
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid() or not (0 <= index.row() < len(self.file_list)):
-            return QVariant()
+            return None
 
         try:
             file = self.file_list[index.row()]
-        except Exception as e:
-            return QVariant()
+        except (OSError, IOError, RuntimeError) as e:
+            return None
 
         column = index.column()
         is_directory = stat.S_ISDIR(file[2])  # Use stat.S_ISDIR to check if it's a directory
@@ -89,16 +90,16 @@ class RemoteFileTableModel(QAbstractTableModel):
 
         if role == Qt.ForegroundRole:
             if is_directory:
-                return QColor(Qt.blue)
+                return QColor(Qt.Color_blue)
             else:
-                return QColor(Qt.darkGray)
+                return QColor(Qt.Color_darkGray)
 
-        return QVariant()
+        return None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.DisplayRole and orientation == Qt.Horizontal:
             return self.column_names[section]
-        return QVariant()
+        return None
 
     def sort(self, column, order):
         # Skip sorting for very large directories to keep UI responsive
@@ -110,22 +111,22 @@ class RemoteFileTableModel(QAbstractTableModel):
         if column == 0:
             try:
                 self.file_list.sort(key=lambda x: _safe_decode(x[0]), reverse=(order == Qt.DescendingOrder))
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 pass
         elif column == 1:
             try:
                 self.file_list.sort(key=lambda x: x[1], reverse=(order == Qt.DescendingOrder))
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 pass
         elif column == 2:
             try:
                 self.file_list.sort(key=lambda x: x[2], reverse=(order == Qt.DescendingOrder))
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 pass
         elif column == 3:
             try:
                 self.file_list.sort(key=lambda x: _safe_decode(x[3]), reverse=(order == Qt.DescendingOrder))
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 pass
 
         self.layoutChanged.emit()
@@ -173,7 +174,7 @@ class RemoteFileTableModel(QAbstractTableModel):
                 permissions = item.st_mode  # Store st_mode as an integer
                 modified_time = QDateTime.fromSecsSinceEpoch(item.st_mtime).toString(Qt.ISODate)
                 new_file_list.append((name, size, permissions, modified_time))
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 ic(f"Error processing file {item.filename if hasattr(item, 'filename') else 'unknown'}: {str(e)}")
 
         self.file_list = new_file_list
@@ -187,7 +188,7 @@ class RemoteFileTableModel(QAbstractTableModel):
     def non_blocking_sleep(self, ms):
         loop = QEventLoop()
         QTimer.singleShot(ms, loop.quit)
-        loop.exec_()
+        loop.exec()
 
     def sftp_listdir_attr(self, remote_path):
         creds = get_credentials(self.session_id)
@@ -206,7 +207,7 @@ class RemoteFileTableModel(QAbstractTableModel):
                         creds.get('hostname'), creds.get('username'), creds.get('password'),
                         port, "listdir_attr", job_id, creds.get('key'))
             ic(f"sftp_listdir_attr: Job {job_id} added to queue")
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             ic(f"sftp_listdir_attr: Error adding job: {e}")
             delete_response_queue(job_id)
             return []
@@ -240,10 +241,3 @@ class RemoteFileTableModel(QAbstractTableModel):
             delete_response_queue(job_id)
             return result_list
 
-    def invalidate_cache(self, directory=None):
-        if directory:
-            self.cache.pop(directory, None)
-            self.cache_time.pop(directory, None)
-        else:
-            self.cache.clear()
-            self.cache_time.clear()

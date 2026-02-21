@@ -1,16 +1,17 @@
-from PyQt5.QtCore import QRunnable, QObject, pyqtSignal
+from PyQt6.QtCore import QRunnable, QObject, pyqtSignal
 import enum
 import queue
 from icecream import ic
 import paramiko
-import queue
 import base64
 import re
 import os
 import time
 import threading
-from io import StringIO
 import shlex
+
+from sftp_config import MAX_TRANSFERS
+from sftp_connection_pool import ConnectionPool
 
 
 def strip_decorative_chars(filename):
@@ -20,23 +21,17 @@ def strip_decorative_chars(filename):
     # Remove any remaining leading or trailing whitespace
     return filename.strip()
 
+
 class WorkerSignals(QObject):
     progress = pyqtSignal(int, int, float, float)   # transfer_id, percent, speed_bytes_per_sec, eta_seconds
     finished = pyqtSignal(int)
     message  = pyqtSignal(int, str)
-
-MAX_TRANSFERS = 10
 
 response_queues = {}
 sftp_queue = queue.Queue()
 
 # Thread safety locks
 response_queues_lock = threading.Lock()
-
-# Connection pool for reusing SSH connections
-_connection_pool = {}
-_pool_lock = threading.Lock()
-_pool_max_age = 30  # Keep connections for 30 seconds
 
 class SIZE_UNIT(enum.Enum):
     BYTES = 1
@@ -85,6 +80,10 @@ class SFTPJob:
         self.key = key
 
     def to_dict(self):
+        # SECURITY WARNING: Base64 encoding provides NO SECURITY - it is NOT encryption!
+        # This is merely obfuscation. Do NOT serialize jobs to disk or logs.
+        # Passwords should be passed through secure memory channels only.
+        # TODO: Implement proper encryption or avoid serializing credentials entirely
         return {
             "source_path": self.source_path,
             "is_source_remote": self.is_source_remote,
@@ -92,7 +91,7 @@ class SFTPJob:
             "is_destination_remote": self.is_destination_remote,
             "hostname": self.hostname,
             "username": self.username,
-            "password": base64.b64encode(self.password.encode()).decode(),  # Encode password
+            "password": base64.b64encode(self.password.encode()).decode(),  # NOT secure - only obfuscation!
             "port": self.port,
             "command": self.command,
             "job_id": self.job_id,
@@ -101,7 +100,8 @@ class SFTPJob:
 
     @staticmethod
     def from_dict(data):
-        data["password"] = base64.b64decode(data["password"]).decode()  # Decode password
+        # SECURITY WARNING: Base64 decoding provides NO SECURITY
+        data["password"] = base64.b64decode(data["password"]).decode()
         return SFTPJob(**data)
 
 def clear_sftp_queue():
@@ -160,16 +160,17 @@ class ResponseQueueContext:
         return False
 
 def check_response_queue(job_id):
+    """Check response queue for job_id. Thread-safe with minimal lock time."""
+    # Get queue reference under lock, then get from queue outside lock
+    with response_queues_lock:
+        if job_id not in response_queues:
+            return None
+        q = response_queues[job_id]
+    
+    # Get from queue OUTSIDE the lock to avoid contention
     try:
-        # Try to get an item from the queue without blocking
-        with response_queues_lock:
-            if job_id not in response_queues:
-                return None
-            item = response_queues[job_id].get_nowait()
-        return item
+        return q.get_nowait()
     except queue.Empty:
-        return None
-    except KeyError:
         return None
 
 def put_response(transfer_id, *items):
@@ -371,7 +372,7 @@ class DownloadWorker(QRunnable):
                 return None
             except (paramiko.SSHException, ValueError, TypeError, FileNotFoundError):
                 continue
-            except Exception as e:
+            except (OSError, IOError) as e:
                 ic(e)
                 continue
                 
@@ -383,75 +384,24 @@ class DownloadWorker(QRunnable):
         return None
 
     def _connect(self):
-        """Establish SSH connection with connection pooling"""
-        global _connection_pool
-        
+        """Establish SSH connection with connection pooling using ConnectionPool singleton."""
         ic(f"_connect: Starting for {self.hostname}:{self.port} user={self.username}")
-        conn_key = (self.hostname, self.port, self.username)
         
         try:
-            # Check connection pool first
-            ic(f"_connect: Checking pool for {conn_key}")
-            with _pool_lock:
-                if conn_key in _connection_pool:
-                    ic(f"_connect: Found pooled connection")
-                    pooled_conn, timestamp = _connection_pool[conn_key]
-                    # Check if connection is still alive and not too old
-                    if (time.time() - timestamp < _pool_max_age and 
-                        pooled_conn.get_transport() and 
-                        pooled_conn.get_transport().is_active()):
-                        self.ssh = pooled_conn
-                        self.transport = self.ssh.get_transport()
-                        ic(f"_connect: Using pooled connection")
-                        return True
-                    else:
-                        # Remove stale connection
-                        ic(f"_connect: Pooled connection stale, removing")
-                        try:
-                            pooled_conn.close()
-                        except:
-                            pass
-                        del _connection_pool[conn_key]
+            # Use ConnectionPool singleton for connection management
+            pool = ConnectionPool()
             
-            # Create new connection with proper host key verification
-            ic(f"_connect: Creating new SSHClient")
-            self.ssh = paramiko.SSHClient()
-            
-            # Load known hosts
-            known_hosts_path = os.path.expanduser('~/.ssh/known_hosts')
-            ic(f"_connect: Checking known_hosts at {known_hosts_path}")
-            if os.path.exists(known_hosts_path):
-                try:
-                    self.ssh.load_host_keys(known_hosts_path)
-                    ic(f"_connect: Loaded known_hosts")
-                except Exception as e:
-                    self.signals.message.emit(self.transfer_id, f"Warning: Could not load known_hosts: {e}")
-            
-            # Use WarningPolicy to warn about unknown hosts but still connect
-            # This is appropriate for background transfers where user interaction isn't possible
-            self.ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
-
-            connect_kwargs = {
-                'hostname': self.hostname,
-                'port': self.port,
-                'username': self.username,
-                'timeout': 60
-            }
-            
-            if self.temp_key:
-                self.ssh.connect(**connect_kwargs, pkey=self._load_private_key(self.temp_key))
-            else:
-                connect_kwargs['password'] = self.password
-                self.ssh.connect(**connect_kwargs)
+            # Get or create connection - pool handles all the logic
+            self.ssh, self.sftp = pool.get_connection(
+                hostname=self.hostname,
+                port=self.port,
+                username=self.username,
+                password=self.password,
+                key=self.temp_key
+            )
             
             self.transport = self.ssh.get_transport()
-            if self.transport:
-                self.transport.set_keepalive(20)
-            
-            # Add to pool
-            with _pool_lock:
-                _connection_pool[conn_key] = (self.ssh, time.time())
-            
+            ic(f"_connect: Successfully connected using connection pool")
             return True
             
         except paramiko.AuthenticationException as e:
@@ -466,7 +416,7 @@ class DownloadWorker(QRunnable):
                 f"SSH connection error to {self.hostname}: {e}"
             )
             return False
-        except Exception as e:
+        except (OSError, IOError) as e:
             self.signals.message.emit(
                 self.transfer_id, 
                 f"Connection to {self.hostname} failed: {e}"
@@ -519,7 +469,7 @@ class DownloadWorker(QRunnable):
                 # Use Qt's QueuedConnection to prevent signal buildup
                 self.signals.progress.emit(self.transfer_id, percent, speed_bps, eta_sec)
                 self._last_emit_time = now
-            except Exception as e:
+            except RuntimeError as e:
                 # If signal emission fails, don't crash the transfer
                 print(f"Progress signal emission failed: {e}")
 
@@ -558,7 +508,7 @@ class DownloadWorker(QRunnable):
             else:
                 transfer_func(*args, callback=progress_wrapper)
                 
-        except Exception as exc:
+        except (OSError, IOError, paramiko.SSHException) as exc:
             ic(f"Transfer {self.transfer_id}: Exception during transfer - {type(exc).__name__}: {exc}")
             ic(f"Transfer {self.transfer_id}: Full exception traceback:")
             import traceback
@@ -576,40 +526,16 @@ class DownloadWorker(QRunnable):
             try:
                 if hasattr(transfer_func, '__self__') and hasattr(transfer_func.__self__, 'set_callback'):
                     transfer_func.__self__.set_callback(None)
-            except:
-                pass  # Ignore if callback clearing fails
+            except (AttributeError, RuntimeError) as e:
+                ic(f"_perform_transfer: Error clearing callback: {e}")
 
     def _cleanup_connections(self):
-        """Cleanup SFTP channel but keep SSH connection in pool"""
-        global _connection_pool
-        
-        # Always close SFTP channel
-        if self.sftp:
-            try:
-                self.sftp.close()
-            except (AttributeError, RuntimeError) as e:
-                ic(f"Warning: Error closing SFTP channel: {e}")
-            finally:
-                self.sftp = None
-        
-        # Don't close SSH connection if it's in the pool - just update timestamp
-        if self.ssh:
-            conn_key = (self.hostname, self.port, self.username)
-            try:
-                with _pool_lock:
-                    if conn_key in _connection_pool:
-                        # Update timestamp to keep connection fresh
-                        _connection_pool[conn_key] = (self.ssh, time.time())
-                    else:
-                        # Not in pool, close it
-                        try:
-                            self.ssh.close()
-                        except (AttributeError, RuntimeError) as e:
-                            ic(f"Warning: Error closing SSH connection: {e}")
-            except Exception as e:
-                ic(f"Warning: Error during connection cleanup: {e}")
-            finally:
-                self.ssh = None
+        """Release connection references. ConnectionPool manages actual connections."""
+        # ConnectionPool manages the actual connections - just release our references
+        # The pool will handle connection reuse and cleanup based on its own policy
+        self.sftp = None
+        self.ssh = None
+        self.transport = None
 
     def run(self):
         resume = False
@@ -620,25 +546,13 @@ class DownloadWorker(QRunnable):
             ic(f"DownloadWorker started: transfer_id={self.transfer_id}, command={self.command}, source={self.job_source}")
             ic(f"DownloadWorker: hostname={self.hostname}, port={self.port}, username={self.username}")
             
-            # Establish connection
+            # Establish connection (includes SFTP channel from pool)
             ic(f"DownloadWorker: Calling _connect()")
             if not self._connect():
                 ic(f"Connection failed for transfer {self.transfer_id}")
                 put_response(self.transfer_id, "error", "Connection failed")
                 return
-            ic(f"DownloadWorker: _connect() returned True")
-
-            # Open SFTP channel
-            ic(f"DownloadWorker: About to open SFTP channel")
-            try:
-                self.sftp = self.ssh.open_sftp()
-                ic(f"SFTP channel opened for transfer {self.transfer_id}")
-            except Exception as e:
-                error_msg = f"SFTP connection failed: {e}"
-                ic(error_msg)
-                self.signals.message.emit(self.transfer_id, error_msg)
-                put_response(self.transfer_id, "error", error_msg)
-                return
+            ic(f"DownloadWorker: _connect() returned True, sftp ready")
 
             # Strip decorative characters from source and destination paths
             clean_source = strip_decorative_chars(self.job_source)
@@ -671,6 +585,9 @@ class DownloadWorker(QRunnable):
                 else:
                     ic(f"Transfer {self.transfer_id}: Calling sftp.get({clean_source}, {clean_destination})")
                     self._transfer_with_timeout(self.sftp.get, clean_source, clean_destination)
+                
+                # Signal successful download
+                put_response(self.transfer_id, "success", clean_destination)
 
             elif self.is_destination_remote and not self.is_source_remote:
                 # Upload
@@ -682,6 +599,9 @@ class DownloadWorker(QRunnable):
                     self._transfer_with_timeout(self._resume_upload, clean_source, clean_destination)
                 else:
                     self._transfer_with_timeout(self.sftp.put, clean_source, clean_destination)
+                
+                # Signal successful upload
+                put_response(self.transfer_id, "success", clean_destination)
 
             elif self.is_source_remote and self.is_destination_remote:
                 # Remote command execution
@@ -692,7 +612,7 @@ class DownloadWorker(QRunnable):
             else:
                 ic(f"No matching transfer type: src_remote={self.is_source_remote}, dst_remote={self.is_destination_remote}")
 
-        except Exception as e:
+        except (OSError, IOError, paramiko.SSHException) as e:
             self.signals.message.emit(self.transfer_id, f"Transfer failed: {e}")
             put_response(self.transfer_id, "error", str(e))
         finally:
@@ -721,7 +641,7 @@ class DownloadWorker(QRunnable):
                     response = self.sftp.listdir_attr(self.job_source)
                     ic(f"listdir_attr returned {len(response)} items")
                     put_response(self.transfer_id, "success", response)
-                except Exception as listdir_err:
+                except (OSError, IOError, paramiko.SSHException) as listdir_err:
                     ic(f"listdir_attr FAILED: {listdir_err}")
                     put_response(self.transfer_id, "error", str(listdir_err))
 
@@ -740,7 +660,7 @@ class DownloadWorker(QRunnable):
                     self.sftp.listdir(self.job_source)
                     ic(f"Directory exists and is accessible: {self.job_source}")
                     put_response(self.transfer_id, "success", self.job_source)
-                except Exception as e:
+                except (OSError, IOError, paramiko.SSHException) as e:
                     error_msg = f"Cannot access directory {self.job_source}: {e}"
                     ic(error_msg)
                     put_response(self.transfer_id, "error", error_msg)
@@ -755,7 +675,7 @@ class DownloadWorker(QRunnable):
                 try:
                     attr = self.sftp.stat(self.job_source)
                     put_response(self.transfer_id, "success", attr)
-                except Exception as e:
+                except (OSError, IOError, paramiko.SSHException) as e:
                     error_msg = f"Stat failed for {self.job_source}: {e}"
                     ic(error_msg)
                     put_response(self.transfer_id, "error", error_msg)
@@ -781,12 +701,12 @@ class DownloadWorker(QRunnable):
                         getcwd_path = stdout.read().strip().decode()
                         ic(f"getcwd: returning home directory: {getcwd_path}")
                         put_response(self.transfer_id, "success", getcwd_path)
-                except Exception as e:
+                except (OSError, IOError, paramiko.SSHException) as e:
                     error_msg = f"getcwd failed: {e}"
                     ic(error_msg)
                     put_response(self.transfer_id, "error", error_msg)
 
-        except Exception as e:
+        except (OSError, IOError, paramiko.SSHException) as e:
             self.signals.message.emit(self.transfer_id, f"{self.command} operation failed: {e}")
             put_response(self.transfer_id, "error", str(e))
 

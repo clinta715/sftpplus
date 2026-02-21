@@ -1,6 +1,7 @@
 from sftp_filebrowserclass import FileBrowser
-from PyQt5.QtWidgets import QTableView, QFileDialog, QMessageBox, QInputDialog, QHeaderView, QMenu, QProgressDialog
-from PyQt5.QtCore import Qt, QModelIndex, QTimer
+from PyQt6.QtWidgets import QTableView, QFileDialog, QMessageBox, QInputDialog, QHeaderView, QMenu, QProgressDialog, QApplication
+from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
+from PyQt6.QtCore import QModelIndex, QTimer
 from icecream import ic
 import os
 import stat
@@ -12,14 +13,12 @@ from sftp_creds import (get_credentials, create_random_integer, set_credentials,
                         verify_credential_update, verify_directory_consistency)
 from sftp_downloadworkerclass import (create_response_queue, delete_response_queue,
                                        add_sftp_job, QueueItem, ResponseQueueContext)
+from sftp_preferences import get_preferences
 
-DEBUG_LOG_FILE = "/tmp/sftp_debug.log"
+# SECURITY: Debug logging to /tmp is DISABLED to prevent sensitive information leakage
+# The /tmp directory is world-readable and could expose file paths and operations
+# Use the icecream (ic) function for debugging instead, which goes to stderr
 
-def debug_log(msg):
-    """Write debug message to file"""
-    with open(DEBUG_LOG_FILE, "a") as f:
-        f.write(f"{msg}\n")
-    print(msg)
 
 class RemoteFileBrowser(FileBrowser):
     def __init__(self, title, session_id, parent=None):
@@ -37,11 +36,17 @@ class RemoteFileBrowser(FileBrowser):
         self.table.verticalHeader().setDefaultSectionSize(22)
 
         # Make all columns resizable
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.horizontalHeader().setSectionResizeMode(Qt.HeaderView_Interactive)
+
+        # Set column widths to prevent text truncation
+        self.table.setColumnWidth(0, 250)  # Name column - wide enough for most filenames
+        self.table.setColumnWidth(1, 80)   # Size column
+        self.table.setColumnWidth(2, 90)   # Permissions column
+        self.table.setColumnWidth(3, 140)  # Modified column
 
         # Add these lines to enable full row selection
-        self.table.setSelectionBehavior(QTableView.SelectRows)
-        self.table.setSelectionMode(QTableView.ExtendedSelection)  # Allow Ctrl+Click and Shift+Click multi-select
+        self.table.setSelectionBehavior(Qt.TableView_SelectRows)
+        self.table.setSelectionMode(Qt.TableView_ExtendedSelection)  # Allow Ctrl+Click and Shift+Click multi-select
 
         # Don't initialize model here - defer until explicitly called
         # This allows credentials to be fully set before making SFTP calls
@@ -60,6 +65,10 @@ class RemoteFileBrowser(FileBrowser):
         """Get the session API from the parent class, initializing it if needed.
         RemoteFileBrowser shares the session with the parent FileBrowser class."""
         return super().session_api
+
+    def get_files(self, force_refresh=True):
+        """Get files from remote server, always refreshing by default."""
+        self.model.get_files(force_refresh=force_refresh)
 
     def initialize_model(self):
         creds = get_credentials(self.session_id)
@@ -121,7 +130,7 @@ class RemoteFileBrowser(FileBrowser):
                 # Force refresh to show new directory
                 self.model.get_files(force_refresh=True)
                 self.notify_observers()
-            except Exception as e:
+            except (OSError, IOError, RuntimeError) as e:
                 self.message_signal.emit(f"Error creating directory: {e}")
 
     def sftp_getcwd(self, timeout=30):
@@ -133,7 +142,7 @@ class RemoteFileBrowser(FileBrowser):
             result = self.session_api.getcwd()
             ic(f"sftp_getcwd: returned {result}")
             return result
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             ic(f"sftp_getcwd: {e}")
             return None
 
@@ -146,7 +155,7 @@ class RemoteFileBrowser(FileBrowser):
             result = self.session_api.getcwd()
             ic(f"get_remote_cwd_direct: Got cwd from server: {result}")
             return result
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             ic(f"get_remote_cwd_direct error: {e}")
             return None
 
@@ -156,10 +165,10 @@ class RemoteFileBrowser(FileBrowser):
             if hasattr(self, 'sftp') and self.sftp:
                 try:
                     self.sftp.close()
-                except Exception:
+                except (OSError, IOError, RuntimeError):
                     pass
                 self.sftp = None
-        except Exception:
+        except (OSError, IOError, RuntimeError):
             pass
 
     def change_directory(self, path, force_refresh=True):
@@ -256,7 +265,7 @@ class RemoteFileBrowser(FileBrowser):
             ic(f"change_directory: completed successfully")
             return True
 
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             ic(f"change_directory: EXCEPTION - {e}")
             self.message_signal.emit(f"change_directory() {e}")
             return False
@@ -336,7 +345,7 @@ class RemoteFileBrowser(FileBrowser):
                 self.message_signal.emit(f"Unable to process: {path}. It's neither a directory nor a file.")
                 return False
 
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             ic(e)
             self.message_signal.emit(f"Error processing: {filename}. Details: {str(e)}")
             return False
@@ -414,12 +423,12 @@ class RemoteFileBrowser(FileBrowser):
                     None,
                     'Confirmation',
                     f"The directory '{remote_path}' contains subdirectories or files. Do you want to remove them all?",
-                    QMessageBox.Yes | QMessageBox.No | QMessageBox.YesToAll,
-                    QMessageBox.No
+                    Qt.MsgBtn_Yes | Qt.MsgBtn_No | Qt.MsgBtn_YesToAll,
+                    Qt.MsgBtn_No
                 )
-                if response == QMessageBox.YesToAll:
+                if response == Qt.MsgBtn_YesToAll:
                     self.always = 1
-                if response == QMessageBox.No:
+                if response == Qt.MsgBtn_No:
                     return
 
             # Remove files
@@ -435,7 +444,7 @@ class RemoteFileBrowser(FileBrowser):
             # Remove the directory
             self.sftp_rmdir(remote_path)
             self.message_signal.emit(f"Directory '{remote_path}' removed successfully.")
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             self.message_signal.emit(f"remove_directory_with_prompt() error: {e}")
         finally:
             # Note: invalidate_cache is redundant since get_files with force_refresh=True bypasses cache
@@ -499,40 +508,26 @@ class RemoteFileBrowser(FileBrowser):
 
                 if filename:
                     try:
-                        debug_log(f"upload_download: filename={repr(filename)}, type={type(filename)}")
-                        debug_log(f"upload_download: optionalpath={repr(optionalpath)}, type={type(optionalpath)}")
-                        debug_log(f"upload_download: current_remote_directory={repr(current_remote_directory)}, type={type(current_remote_directory)}")
-
                         # Determine if we should use optionalpath or filename
                         use_optional_path = optionalpath and isinstance(optionalpath, str)
-                        debug_log(f"upload_download: use_optional_path={use_optional_path}")
 
                         if use_optional_path:
                             # optionalpath is provided, use it directly
                             remote_entry_path = optionalpath
-                            debug_log(f"upload_download: using optionalpath: {remote_entry_path}")
                         else:
                             # Normal case - use filename, join with current directory
                             is_complete = self.is_complete_path(filename)
-                            debug_log(f"upload_download: is_complete_path={is_complete}")
                             if is_complete:
                                 remote_entry_path = filename
-                                debug_log(f"upload_download: using filename directly: {remote_entry_path}")
                             else:
                                 # Join with current directory
                                 if current_remote_directory == '/':
                                     remote_entry_path = '/' + filename
-                                    debug_log(f"upload_download: joined with root: {remote_entry_path}")
                                 else:
                                     remote_entry_path = current_remote_directory + '/' + filename
-                                    debug_log(f"upload_download: joined with dir: {remote_entry_path}")
-
-                        # DEBUG: Check type before replace
-                        debug_log(f"upload_download: remote_entry_path before normalize={repr(remote_entry_path)}, type={type(remote_entry_path)}")
 
                         # Normalize to remove any double slashes or trailing slashes
                         remote_entry_path = remote_entry_path.replace('//', '/').rstrip('/')
-                        debug_log(f"upload_download: remote_entry_path after normalize={repr(remote_entry_path)}")
 
                         # Use provided local_destination or construct from current local directory
                         if local_destination:
@@ -545,41 +540,48 @@ class RemoteFileBrowser(FileBrowser):
 
                         if self.is_remote_directory(remote_entry_path):
                             if not skip_all and not overwrite_all and not resume_all and os.path.exists(local_entry_path):
-                                action = self.prompt_overwrite(local_entry_path)
-                                if action == "cancel":
-                                    return
-                                elif action == "skip":
-                                    continue
-                                elif action == "skip_all":
-                                    skip_all = True
-                                    continue
-                                elif action == "overwrite_all":
+                                prefs = get_preferences()
+                                if prefs.get_bool("overwrite_on_transfer", False):
                                     overwrite_all = True
-                                elif action == "resume_all":
-                                    resume_all = True
+                                else:
+                                    action = self.prompt_overwrite(local_entry_path)
+                                    if action == "cancel":
+                                        return
+                                    elif action == "skip":
+                                        continue
+                                    elif action == "skip_all":
+                                        skip_all = True
+                                        continue
+                                    elif action == "overwrite_all":
+                                        overwrite_all = True
+                                    elif action == "resume_all":
+                                        resume_all = True
 
                             if not skip_all:
                                 self.download_directory(remote_entry_path, local_entry_path, skip_all, overwrite_all, resume_all)
                         else:
                             # Handle individual file
                             if not skip_all and not overwrite_all and not resume_all and os.path.exists(local_entry_path):
-                                action = self.prompt_overwrite(local_entry_path)
-                                if action == "cancel":
-                                    return
-                                elif action == "skip":
-                                    continue
-                                elif action == "skip_all":
-                                    skip_all = True
-                                    continue
-                                elif action == "overwrite_all":
+                                prefs = get_preferences()
+                                if prefs.get_bool("overwrite_on_transfer", False):
                                     overwrite_all = True
-                                elif action == "resume_all":
-                                    resume_all = True
+                                else:
+                                    action = self.prompt_overwrite(local_entry_path)
+                                    if action == "cancel":
+                                        return
+                                    elif action == "skip":
+                                        continue
+                                    elif action == "skip_all":
+                                        skip_all = True
+                                        continue
+                                    elif action == "overwrite_all":
+                                        overwrite_all = True
+                                    elif action == "resume_all":
+                                        resume_all = True
 
                             if not skip_all:
-                                # Determine the command based on action or global flags
-                                command = "download"  # default
-                                if action == "resume" or resume_all:
+                                command = "download"
+                                if not overwrite_all and locals().get('action') == "resume":
                                     command = "resume"
                                 
                                 ic(f"upload_download: DEBUG - remote_entry_path={repr(remote_entry_path)}")
@@ -599,12 +601,9 @@ class RemoteFileBrowser(FileBrowser):
 
                         has_valid_item = True
 
-                    except Exception as e:
+                    except (OSError, IOError, RuntimeError) as e:
                         error_message = f"upload_download() encountered an error: {str(e)}"
                         self.message_signal.emit(error_message)
-                        debug_log(f"upload_download: ERROR: {e}")
-                        import traceback
-                        debug_log(traceback.format_exc())
                 else:
                     self.message_signal.emit("No valid path provided.")
 
@@ -650,13 +649,12 @@ class RemoteFileBrowser(FileBrowser):
             else:
                 self.message_signal.emit(f"Failed to navigate to: {path}")
                 return False
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             self.message_signal.emit(f"Error navigating to bookmark: {e}")
 
     def populate_tree_view(self):
         """Build tree starting from current remote directory as root"""
-        from PyQt5.QtWidgets import QTreeWidgetItem
-        from PyQt5.QtCore import Qt
+        from PyQt6.QtWidgets import QTreeWidgetItem
         
         creds = get_credentials(self.session_id)
         current_dir = creds.get('current_remote_directory', '/')
@@ -669,7 +667,7 @@ class RemoteFileBrowser(FileBrowser):
         self._tree_current_path = current_dir
         
         # Update UI
-        self.tree_path_label.setText(f"📂 {current_dir}")
+        self.tree_path_input.setText(current_dir)
         self._update_tree_up_button()
         
         # Build tree from root
@@ -677,8 +675,7 @@ class RemoteFileBrowser(FileBrowser):
     
     def _build_tree_from_root(self, root_path, current_path):
         """Build tree starting from root_path, highlighting current_path"""
-        from PyQt5.QtWidgets import QTreeWidgetItem
-        from PyQt5.QtCore import Qt
+        from PyQt6.QtWidgets import QTreeWidgetItem
         
         self.tree_widget.clear()
         
@@ -701,202 +698,69 @@ class RemoteFileBrowser(FileBrowser):
             if current_path.startswith(root_path) and current_path != root_path:
                 self._expand_to_path(root_item, root_path, current_path)
             
-        except Exception as e:
+        except (OSError, IOError, RuntimeError) as e:
             ic(f"Error building tree: {e}")
             self.tree_status_label.setText(f"Error: {e}")
     
     def _populate_tree_children(self, parent_item, path):
         """Populate tree with subdirectories of the given remote path (lazy loading) using paramiko"""
-        from PyQt5.QtWidgets import QTreeWidgetItem
-        from PyQt5.QtCore import Qt
+        from PyQt6.QtWidgets import QTreeWidgetItem
         
         item_count = 0
         
-        ic(f"_populate_tree_children called for path: {path}")
-        ic(f"session_api is None: {self.session_api is None}")
-        
         try:
-            if self.session_api is None:
-                ic("ERROR: session_api is None!")
-                self.tree_status_label.setText("Error: Not connected")
+            # Show loading feedback
+            self.tree_status_label.setText(f"⏳ Loading {path}...")
+            QApplication.processEvents()
+            
+            # Get directory contents via SFTP
+            directory_contents_attr = self.sftp_listdir_attr(path)
+            
+            if not directory_contents_attr:
+                self.tree_status_label.setText(f"📂 {path} (empty or inaccessible)")
                 return 0
-            
-            # Use sftp_listdir_attr which we know works from the table view
-            entries = self.sftp_listdir_attr(path)
-            
-            ic(f"sftp_listdir_attr returned: {type(entries)}, has data: {entries is not None and entries is not False}")
-            
-            if entries is None or entries is False:
-                ic(f"sftp_listdir_attr returned None/False for path: {path}")
-                self.tree_status_label.setText("Error: Could not list directory")
-                return 0
-            
-            ic(f"Found {len(entries)} entries in {path}")
-            if entries:
-                ic(f"First entry type: {type(entries[0])}")
-                ic(f"First entry: {entries[0]}")
             
             # Filter and sort only directories
             dirs = []
-            for entry in entries:
-                # Handle SFTPAttributes objects from paramiko
-                if hasattr(entry, 'filename') and hasattr(entry, 'st_mode'):
-                    filename = entry.filename
-                    if filename in ['.', '..']:
-                        continue
-                    is_dir = stat.S_ISDIR(entry.st_mode)
-                    ic(f"SFTPAttr entry: {filename}, st_mode={entry.st_mode}, is_dir={is_dir}")
-                    if is_dir:
-                        dirs.append(entry)
-                # Handle tuple format (filename, attrs)
-                elif isinstance(entry, (tuple, list)) and len(entry) >= 2:
-                    filename = entry[0]
-                    attrs = entry[1]
-                    if filename in ['.', '..']:
-                        continue
-                    if attrs and len(attrs) > 2:
-                        is_dir = stat.S_ISDIR(attrs[2])
-                        ic(f"Tuple entry: {filename}, is_dir={is_dir}")
-                        if is_dir:
-                            dirs.append((filename, attrs))
-                else:
-                    ic(f"Unknown entry format: {type(entry)}, value: {entry}")
+            for attr in directory_contents_attr:
+                filename = attr.filename
+                try:
+                    if stat.S_ISDIR(attr.st_mode):
+                        dirs.append(attr)
+                except (OSError, PermissionError):
+                    continue
             
-            # Sort directories alphabetically by filename
-            dirs.sort(key=lambda x: x.filename.lower() if hasattr(x, 'filename') else x[0].lower())
+            dirs.sort(key=lambda x: x.filename.lower())
             
-            ic(f"Found {len(dirs)} subdirectories")
-            
-            for entry in dirs:
+            for attr in dirs:
                 child_item = QTreeWidgetItem(parent_item)
-                
-                # Handle both SFTPAttributes and tuple formats
-                if hasattr(entry, 'filename'):
-                    filename = entry.filename
-                else:
-                    filename = entry[0]
-                
-                child_item.setText(0, "📁 " + filename)
-                full_path = os.path.join(path, filename).replace("\\", "/")
+                child_item.setText(0, "📁 " + attr.filename)
+                full_path = os.path.join(path, attr.filename) if path != '/' else '/' + attr.filename
                 child_item.setData(0, Qt.UserRole, {'path': full_path, 'is_dir': True, 'is_root': False})
                 
                 # Add placeholder for lazy loading - this allows expansion
                 dummy_child = QTreeWidgetItem(child_item)
-                dummy_child.setText(0, "Loading...")
+                dummy_child.setText(0, "⏳ Loading...")
                 
                 item_count += 1
             
             # Refresh tree to show newly added items
             self.tree_widget.update()
-            
-        except Exception as e:
-            ic(f"Error populating tree children: {e}")
-            self.tree_status_label.setText(f"Error: {str(e)[:50]}")
         
-        # Update status
+        except (OSError, IOError, RuntimeError) as e:
+            self.tree_status_label.setText(f"❌ Error: {str(e)[:50]}")
+            return 0
+        
+        # Update status with success message
         if item_count == 0:
-            self.tree_status_label.setText("No subdirectories")
+            self.tree_status_label.setText(f"📂 {path} (no subdirectories)")
         else:
-            self.tree_status_label.setText(f"{item_count} subdirectories - Expand to explore")
+            self.tree_status_label.setText(f"✅ {path} - {item_count} subdirectories")
         
         return item_count
-    
-    def _expand_to_path(self, parent_item, parent_path, target_path):
-        """Expand tree to show target_path and mark it as current"""
-        from PyQt5.QtCore import Qt
-        
-        try:
-            # Get relative path from parent to target
-            if not target_path.startswith(parent_path):
-                return  # Target is not under parent
-            
-            rel_path = target_path[len(parent_path):].lstrip('/')
-            if not rel_path:
-                return  # Same path
-            
-            path_parts = rel_path.split('/')
-            current_item = parent_item
-            current_path = parent_path
-            
-            for part in path_parts:
-                if not part:
-                    continue
-                
-                # Find child with this name
-                found = False
-                for i in range(current_item.childCount()):
-                    child = current_item.child(i)
-                    child_name = child.text(0).replace("📁 ", "").replace("🎯 ", "")
-                    if child_name == part:
-                        # Remove placeholder and load children (check with "in" to handle emoji prefixes)
-                        if child.childCount() > 0 and "Loading..." in child.child(0).text(0):
-                            child.removeChild(child.child(0))
-                            child_path = os.path.join(current_path, part).replace("\\", "/")
-                            self._populate_tree_children(child, child_path)
-                        
-                        child.setExpanded(True)
-                        current_item = child
-                        current_path = os.path.join(current_path, part).replace("\\", "/")
-                        found = True
-                        break
-                
-                if not found:
-                    break
-            
-            # Mark the final item as current
-            self._mark_current_item(current_item)
-            self.tree_widget.scrollToItem(current_item)
-            
-        except Exception as e:
-            ic(f"Error expanding to path: {e}")
-    
-    def _mark_current_item(self, item):
-        """Mark an item as the current directory"""
-        from PyQt5.QtCore import Qt
-        
-        # Remove bold from all items
-        self._clear_current_marks(self.tree_widget.invisibleRootItem())
-        
-        # Mark this item as current
-        font = item.font(0)
-        font.setBold(True)
-        item.setFont(0, font)
-        item.setText(0, "🎯 " + item.text(0).replace("📁 ", "").replace("🎯 ", ""))
-        item.setData(0, Qt.UserRole + 1, True)  # Mark as current
-    
-    def _clear_current_marks(self, parent_item):
-        """Clear current marks from all items"""
-        for i in range(parent_item.childCount()):
-            child = parent_item.child(i)
-            font = child.font(0)
-            font.setBold(False)
-            child.setFont(0, font)
-            child.setText(0, "📁 " + child.text(0).replace("📁 ", "").replace("🎯 ", ""))
-            child.setData(0, Qt.UserRole + 1, False)
-            self._clear_current_marks(child)
-    
-    def tree_item_expanded_handler(self, item):
-        """Handle item expansion - lazy load subdirectories"""
-        from PyQt5.QtCore import Qt
-        
-        data = item.data(0, Qt.UserRole)
-        if not data:
-            return
-        
-        path = data.get('path')
-        is_dir = data.get('is_dir', False)
-        
-        if is_dir and item.childCount() > 0:
-            first_child = item.child(0)
-            # Check for placeholder (with or without emoji prefix)
-            if "Loading..." in first_child.text(0):
-                item.removeChild(first_child)
-                self._populate_tree_children(item, path)
-    
+
     def tree_double_click_handler(self, item, column):
-        """Handle double-click - navigate to directory"""
-        from PyQt5.QtCore import Qt
-        
+        """Handle double-click on tree item - navigate to that directory"""
         data = item.data(0, Qt.UserRole)
         if not data:
             return
@@ -904,15 +768,18 @@ class RemoteFileBrowser(FileBrowser):
         path = data.get('path')
         is_dir = data.get('is_dir', False)
         
-        if is_dir:
-            # Navigate to this directory
-            self.change_directory(path)
-            
-            # Update tree current marker without rebuilding
-            self._tree_current_path = path
-            self._mark_current_item(item)
-            self.tree_path_label.setText(f"📂 {path}")
-    
+        if not is_dir:
+            return
+        
+        # Navigate to the directory
+        self.change_directory(path)
+        
+        # Update credentials so list view shows the same directory
+        set_credentials(self.session_id, 'current_remote_directory', path)
+        
+        # Refresh the tree to show new location as root
+        self.populate_tree_view()
+
     def tree_go_up(self):
         """Navigate to parent directory and make it the new root"""
         creds = get_credentials(self.session_id)
@@ -932,7 +799,147 @@ class RemoteFileBrowser(FileBrowser):
         
         # Rebuild tree with new root
         self.populate_tree_view()
-    
+
+    def tree_path_navigate(self):
+        """Navigate to path entered in tree path input"""
+        path = self.tree_path_input.text().strip()
+
+        if not path:
+            return
+
+        # Normalize path (remove trailing slash except for root)
+        path = path.rstrip('/')
+        if not path:
+            path = '/'
+
+        # Check if path exists by trying to list it
+        try:
+            result = self.sftp_listdir_attr(path)
+            if result is None or result is False:
+                self.tree_status_label.setText(f"❌ Cannot access: {path}")
+                return
+        except (OSError, IOError, RuntimeError) as e:
+            self.tree_status_label.setText(f"❌ Error: {str(e)[:50]}")
+            return
+
+        # Navigate to the path
+        self.change_directory(path)
+
+        # Rebuild tree with new root
+        self.populate_tree_view()
+
+    def tree_download_selected(self):
+        """Download selected remote directory to local"""
+        
+        # Get selected item
+        selected_items = self.tree_widget.selectedItems()
+        if not selected_items:
+            self.tree_status_label.setText("❌ No directory selected")
+            return
+
+        item = selected_items[0]
+        data = item.data(0, Qt.UserRole)
+        if not data:
+            return
+
+        path = data.get('path')
+        is_dir = data.get('is_dir', False)
+
+        if not is_dir:
+            self.tree_status_label.setText("❌ Selected item is not a directory")
+            return
+
+        # Get local directory
+        creds = get_credentials(self.session_id)
+        local_dir = creds.get('current_local_directory', os.path.expanduser('~'))
+
+        # Download the directory
+        self.message_signal.emit(f"⬇️ Queuing download: {path} -> {local_dir}")
+        self.download_directory(path, local_dir)
+
+    def tree_download_all(self):
+        """Download all visible remote directories to local"""
+        
+        # Get root item
+        root = self.tree_widget.invisibleRootItem()
+        if root.childCount() == 0:
+            self.tree_status_label.setText("❌ No directories to download")
+            return
+
+        # Get local directory
+        creds = get_credentials(self.session_id)
+        local_dir = creds.get('current_local_directory', os.path.expanduser('~'))
+
+        # Count directories to download
+        download_count = 0
+        for i in range(root.child(0).childCount()):
+            item = root.child(0).child(i)
+            data = item.data(0, Qt.UserRole)
+            if data and data.get('is_dir', False):
+                path = data.get('path')
+                self.message_signal.emit(f"⬇️ Queuing download: {path} -> {local_dir}")
+                self.download_directory(path, local_dir)
+                download_count += 1
+
+        if download_count > 0:
+            self.tree_status_label.setText(f"✅ Queued {download_count} directories for download")
+        else:
+            self.tree_status_label.setText("❌ No directories to download")
+
+    def tree_delete_selected(self):
+        """Delete selected remote directory"""
+        from PyQt6.QtWidgets import QMessageBox
+
+        # Get selected item
+        selected_items = self.tree_widget.selectedItems()
+        if not selected_items:
+            self.tree_status_label.setText("❌ No directory selected")
+            return
+
+        item = selected_items[0]
+        data = item.data(0, Qt.UserRole)
+        if not data:
+            return
+
+        path = data.get('path')
+        is_dir = data.get('is_dir', False)
+        is_root = data.get('is_root', False)
+
+        if is_root:
+            self.tree_status_label.setText("❌ Cannot delete root directory")
+            return
+
+        if not is_dir:
+            self.tree_status_label.setText("❌ Selected item is not a directory")
+            return
+
+        # Confirm deletion
+        reply = QMessageBox.question(
+            self, 'Confirm Delete',
+            f"Are you sure you want to delete the remote directory:\n\n{path}\n\nThis action cannot be undone!",
+            Qt.MsgBtn_Yes | Qt.MsgBtn_No,
+            Qt.MsgBtn_No
+        )
+
+        if reply != Qt.MsgBtn_Yes:
+            return
+
+        try:
+            # Remove the remote directory using existing method
+            self.remove_directory_with_prompt(path, always=1)  # always=1 to skip confirmation dialog
+            self.message_signal.emit(f"🗑️ Deleted remote: {path}")
+            self.tree_status_label.setText(f"✅ Deleted: {os.path.basename(path)}")
+
+            # Refresh tree view
+            self.populate_tree_view()
+
+            # Refresh file table
+            self.model.get_files()
+            self.notify_observers()
+        except (OSError, IOError, RuntimeError) as e:
+            self.tree_status_label.setText(f"❌ Error deleting: {str(e)[:50]}")
+            QMessageBox.critical(self, "Error", f"Failed to delete remote directory:\n{str(e)}")
+
     def _update_tree_up_button(self):
         """Update up button state based on current directory"""
         creds = get_credentials(self.session_id)
@@ -943,8 +950,7 @@ class RemoteFileBrowser(FileBrowser):
     
     def tree_context_menu_handler(self, pos):
         """Handle context menu on tree widget"""
-        from PyQt5.QtWidgets import QMenu
-        from PyQt5.QtCore import Qt
+        from PyQt6.QtWidgets import QMenu
         
         item = self.tree_widget.itemAt(pos)
         if not item:
@@ -966,13 +972,13 @@ class RemoteFileBrowser(FileBrowser):
             menu.addSeparator()
             download_action = menu.addAction("⬇️ Download Directory")
         
-        action = menu.exec_(self.tree_widget.mapToGlobal(pos))
+        action = menu.exec(self.tree_widget.mapToGlobal(pos))
         
         if action == open_action:
             self.change_directory(path)
             self._tree_current_path = path
             self._mark_current_item(item)
-            self.tree_path_label.setText(f"📂 {path}")
+            self.tree_path_input.setText(path)
         elif action == refresh_action:
             self.populate_tree_view()
         elif action == download_action:

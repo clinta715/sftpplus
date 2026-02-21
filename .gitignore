@@ -1,0 +1,53 @@
+# SFTP Client - Git Ignore
+
+# User configuration and data (contains passwords/credentials)
+*.json
+!package.json
+connection_data.json
+opencode.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Mac OS
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+
+# SSH keys and credentials
+*.key
+*.pem
+key/
+fake_test_key*
+id_rsa*
+id_ed25519*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# Backup files
+*~
+
+# Temporary files
+*.tmp
