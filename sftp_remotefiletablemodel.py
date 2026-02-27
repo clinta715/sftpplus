@@ -6,8 +6,30 @@ import time
 from icecream import ic
 from PyQt6.QtGui import QFont, QColor
 from sftp_creds import get_credentials, create_random_integer
-from sftp_downloadworkerclass import create_response_queue, delete_response_queue, add_sftp_job
+from sftp_downloadworkerclass import create_response_queue, delete_response_queue
+from sftp_operations import SFTPOperations
 import stat
+
+
+_sftp_ops_cache = {}
+
+
+def _get_sftp_operations(session_id):
+    """Get cached SFTPOperations instance for session"""
+    creds = get_credentials(session_id)
+    
+    if session_id in _sftp_ops_cache:
+        return _sftp_ops_cache[session_id]
+    
+    ops = SFTPOperations(
+        hostname=creds.get('hostname', ''),
+        username=creds.get('username', ''),
+        password=creds.get('password', ''),
+        port=creds.get('port', 22),
+        key=creds.get('key')
+    )
+    _sftp_ops_cache[session_id] = ops
+    return ops
 
 def _safe_decode(s, encoding='utf-8', errors='replace'):
     """Safely decode a string or bytes, handling encoding issues"""
@@ -191,53 +213,12 @@ class RemoteFileTableModel(QAbstractTableModel):
         loop.exec()
 
     def sftp_listdir_attr(self, remote_path):
-        creds = get_credentials(self.session_id)
-        job_id = create_random_integer()
-        queue = create_response_queue(job_id)
-
-        port = creds.get('port', 22)
-        if isinstance(port, str):
-            port = int(port)
-
-        ic(f"sftp_listdir_attr: Adding job {job_id} for {remote_path}")
-        ic(f"sftp_listdir_attr: hostname={creds.get('hostname')}, username={creds.get('username')}")
-
         try:
-            add_sftp_job(remote_path, True, remote_path, True,
-                        creds.get('hostname'), creds.get('username'), creds.get('password'),
-                        port, "listdir_attr", job_id, creds.get('key'))
-            ic(f"sftp_listdir_attr: Job {job_id} added to queue")
-        except (OSError, IOError, RuntimeError) as e:
-            ic(f"sftp_listdir_attr: Error adding job: {e}")
-            delete_response_queue(job_id)
-            return []
-
-        start_time = time.time()
-        timeout = 30
-        check_interval = 0  # Only log every 100 iterations (10 seconds)
-        while queue.empty() and (time.time() - start_time) < timeout:
-            self.non_blocking_sleep(100)
-            check_interval += 1
-            if check_interval % 100 == 0:
-                elapsed = time.time() - start_time
-                ic(f"sftp_listdir_attr: Still waiting for job {job_id}... ({elapsed:.1f}s elapsed)")
-        
-        if queue.empty():
-            delete_response_queue(job_id)
-            ic(f"sftp_listdir_attr() TIMEOUT after {timeout} seconds for {remote_path}")
-            return []
-
-        ic(f"sftp_listdir_attr: Got response for job {job_id}")
-        response = queue.get_nowait()
-
-        if response == "error":
-            error = queue.get_nowait()
-            ic(f"sftp_listdir_attr: Error response: {error}")
-            delete_response_queue(job_id)
-            return []
-        else:
-            result_list = queue.get_nowait()
+            ops = _get_sftp_operations(self.session_id)
+            result_list = ops.list_attr(remote_path)
             ic(f"sftp_listdir_attr: Success, got {len(result_list)} items")
-            delete_response_queue(job_id)
             return result_list
+        except Exception as e:
+            ic(f"sftp_listdir_attr: Error: {e}")
+            return []
 

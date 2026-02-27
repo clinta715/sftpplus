@@ -338,7 +338,7 @@ class DownloadWorker(QRunnable):
 
     def _load_private_key(self, key_data, passphrase=None):
         """Load private key from string data with comprehensive format support"""
-        ic("load_private_key", key_data)
+        ic("load_private_key: attempting to load key")
         if not key_data:
             return None
     
@@ -352,10 +352,8 @@ class DownloadWorker(QRunnable):
         for key_type in key_types:
             try:
                 if key_data.startswith('-----BEGIN'):
-                    # PEM format
                     key_obj = key_type.from_private_key_file(key_data, password=passphrase)
                 else:
-                    # Try as file path
                     expanded_path = os.path.expanduser(key_data)
                     key_obj = key_type.from_private_key_file(expanded_path, password=passphrase)
                 
@@ -367,7 +365,7 @@ class DownloadWorker(QRunnable):
             except paramiko.PasswordRequiredException:
                 self.signals.message.emit(
                     self.transfer_id, 
-                    f"Private key {key_data} is encrypted but no passphrase provided"
+                    "Private key is encrypted but no passphrase provided"
                 )
                 return None
             except (paramiko.SSHException, ValueError, TypeError, FileNotFoundError):
@@ -530,9 +528,18 @@ class DownloadWorker(QRunnable):
                 ic(f"_perform_transfer: Error clearing callback: {e}")
 
     def _cleanup_connections(self):
-        """Release connection references. ConnectionPool manages actual connections."""
-        # ConnectionPool manages the actual connections - just release our references
-        # The pool will handle connection reuse and cleanup based on its own policy
+        """Release connection references and invalidate the pooled connection after file transfers."""
+        # After file transfers, invalidate the connection so subsequent commands get fresh one
+        # File transfers can leave the SFTP channel in a blocked state
+        if self.is_source_remote != self.is_destination_remote:  # File transfer, not just command
+            try:
+                pool = ConnectionPool()
+                pool.close_connection(self.hostname, self.port, self.username)
+                ic(f"Invalidated connection after file transfer for {self.hostname}:{self.port}")
+            except Exception as e:
+                ic(f"Error invalidating connection: {e}")
+        
+        # Clear references
         self.sftp = None
         self.ssh = None
         self.transport = None

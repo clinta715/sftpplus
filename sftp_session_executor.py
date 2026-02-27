@@ -7,9 +7,11 @@ Provides a cleaner API that wraps the legacy add_sftp_job interface.
 from typing import Optional, Any, List, Dict
 from dataclasses import dataclass
 from threading import Lock
+from stat import S_ISDIR
 import queue
 import time
 import os
+import paramiko
 from icecream import ic
 
 from PyQt6.QtCore import pyqtSignal, QObject
@@ -27,7 +29,7 @@ from sftp_downloadworkerclass import (
 )
 
 
-class CommandExecutor:
+class CommandExecutor(QObject):
     """
     Executes SFTP commands using sessions and connection pooling.
     
@@ -35,19 +37,30 @@ class CommandExecutor:
     Each command is executed in a background thread with progress tracking.
     """
     
+    progress = pyqtSignal(str, int, float, float)
+    message = pyqtSignal(str, str)
+    finished = pyqtSignal(str)
+    
     def __init__(self, session: SFTPSession):
+        super().__init__()
         self.session = session
         self.credentials = session.credentials
         self._pool = get_connection_pool()
         self._lock = Lock()
+        
+        self._last_emit_time = 0
+        self._emit_interval = 0.2
+        self._last_bytes = 0
+        self._last_time = None
     
-    def execute(self, command: SFTPCommand, timeout: float = 60.0) -> Any:
+    def execute(self, command: SFTPCommand, timeout: float = 60.0, retry: bool = True) -> Any:
         """
         Execute a command synchronously and return the result.
         
         Args:
             command: The command to execute
             timeout: Maximum time to wait for result
+            retry: If True, retry with fresh connection on failure
             
         Returns:
             Command result data or raises exception
@@ -59,7 +72,6 @@ class CommandExecutor:
         command.validate()
         
         with self._lock:
-            # Get or create connection
             ssh, sftp = self._pool.get_connection(
                 hostname=self.credentials.hostname,
                 port=self.credentials.port,
@@ -71,7 +83,6 @@ class CommandExecutor:
         job_id = self.session.get_next_job_id()
         
         with ResponseQueueContext(job_id) as response_queue:
-            # Execute based on command type
             try:
                 if command.command_type == CommandType.DOWNLOAD:
                     self._execute_download(ssh, sftp, command, job_id)
@@ -98,57 +109,138 @@ class CommandExecutor:
                 else:
                     raise ValueError(f"Unknown command type: {command.command_type}")
                 
-                # Wait for result
                 return self._wait_for_result(response_queue, timeout)
                 
-            except (OSError, IOError, RuntimeError) as e:
+            except (OSError, IOError, RuntimeError, paramiko.SSHException) as e:
                 put_response(job_id, "error", str(e))
+                # Invalidate the connection so a fresh one is created next time
+                self._pool.close_connection(
+                    self.credentials.hostname,
+                    self.credentials.port,
+                    self.credentials.username
+                )
+                # Retry once with a fresh connection if this was the first attempt
+                if retry:
+                    ic(f"Executor: Retrying command {command.command_type} with fresh connection")
+                    return self.execute(command, timeout, retry=False)
                 raise
+    
+    def _progress_callback(self, job_id: str, transferred: int, total: int):
+        """Progress callback with rate limiting"""
+        now = time.time()
+        
+        if self._last_time is None:
+            speed_bps = 0.0
+            eta_sec = 0.0
+        else:
+            delta_t = now - self._last_time
+            delta_b = transferred - self._last_bytes
+            speed_bps = delta_b / max(delta_t, 1e-6)
+            if speed_bps <= 0 or total <= transferred:
+                eta_sec = 0.0
+            else:
+                eta_sec = (total - transferred) / speed_bps
+        
+        self._last_bytes = transferred
+        self._last_time = now
+        
+        percent = int(transferred * 100 / max(total, 1))
+        
+        if (now - self._last_emit_time >= self._emit_interval) or (percent >= 100):
+            try:
+                self.progress.emit(job_id, percent, speed_bps, eta_sec)
+                self._last_emit_time = now
+            except RuntimeError as e:
+                ic(f"Progress signal emission failed: {e}")
+    
+    def _reset_progress_tracking(self):
+        """Reset progress tracking state for new transfer"""
+        self._last_emit_time = 0
+        self._last_bytes = 0
+        self._last_time = None
     
     def _execute_download(self, ssh, sftp, command: DownloadCommand, job_id: str):
         """Execute download command"""
         ic(f"Executor: Downloading {command.remote_path} to {command.local_path}")
         
-        # Ensure local directory exists
-        local_dir = os.path.dirname(command.local_path)
-        if local_dir:
-            os.makedirs(local_dir, exist_ok=True)
+        self._reset_progress_tracking()
         
-        if command.resume:
-            self._resume_download(ssh, sftp, command.remote_path, command.local_path, job_id)
-        else:
-            sftp.get(command.remote_path, command.local_path)
-        
-        put_response(job_id, "success", command.local_path)
+        try:
+            local_dir = os.path.dirname(command.local_path)
+            if local_dir:
+                os.makedirs(local_dir, exist_ok=True)
+            
+            total_size = sftp.stat(command.remote_path).st_size
+            
+            if command.resume:
+                self._resume_download(ssh, sftp, command.remote_path, command.local_path, job_id)
+            else:
+                sftp.get(command.remote_path, command.local_path, 
+                        callback=lambda transferred, total: self._progress_callback(job_id, transferred, total_size))
+            
+            self.progress.emit(job_id, 100, 0.0, 0.0)
+            put_response(job_id, "success", command.local_path)
+            self.finished.emit(job_id)
+        except (OSError, IOError, paramiko.SSHException) as e:
+            ic(f"Executor: Download failed for {command.remote_path}: {e}")
+            put_response(job_id, "error", str(e))
+            raise
     
     def _execute_upload(self, ssh, sftp, command: UploadCommand, job_id: str):
         """Execute upload command"""
         ic(f"Executor: Uploading {command.local_path} to {command.remote_path}")
         
-        if command.resume:
-            self._resume_upload(ssh, sftp, command.local_path, command.remote_path, job_id)
-        else:
-            sftp.put(command.local_path, command.remote_path)
+        self._reset_progress_tracking()
         
-        put_response(job_id, "success", command.remote_path)
+        try:
+            total_size = os.path.getsize(command.local_path)
+            
+            if command.resume:
+                self._resume_upload(ssh, sftp, command.local_path, command.remote_path, job_id)
+            else:
+                sftp.put(command.local_path, command.remote_path,
+                        callback=lambda transferred, total: self._progress_callback(job_id, transferred, total_size))
+            
+            self.progress.emit(job_id, 100, 0.0, 0.0)
+            put_response(job_id, "success", command.remote_path)
+            self.finished.emit(job_id)
+        except (OSError, IOError, paramiko.SSHException) as e:
+            ic(f"Executor: Upload failed for {command.local_path}: {e}")
+            put_response(job_id, "error", str(e))
+            raise
     
     def _execute_list(self, ssh, sftp, command: ListCommand, job_id: str):
         """Execute list directory command"""
         ic(f"Executor: Listing {command.remote_path}")
-        result = sftp.listdir(command.remote_path)
-        put_response(job_id, "success", result)
+        try:
+            result = sftp.listdir(command.remote_path)
+            put_response(job_id, "success", result)
+        except (OSError, IOError, paramiko.SSHException) as e:
+            ic(f"Executor: List failed for {command.remote_path}: {e}")
+            put_response(job_id, "error", str(e))
+            raise
     
     def _execute_list_attr(self, ssh, sftp, command: ListCommand, job_id: str):
         """Execute list directory with attributes command"""
         ic(f"Executor: Listing {command.remote_path} with attributes")
-        result = sftp.listdir_attr(command.remote_path)
-        put_response(job_id, "success", result)
+        try:
+            result = sftp.listdir_attr(command.remote_path)
+            put_response(job_id, "success", result)
+        except (OSError, IOError, paramiko.SSHException) as e:
+            ic(f"Executor: List_attr failed for {command.remote_path}: {e}")
+            put_response(job_id, "error", str(e))
+            raise
     
     def _execute_stat(self, ssh, sftp, command: StatCommand, job_id: str):
         """Execute stat command"""
         ic(f"Executor: Stat {command.path}")
-        result = sftp.stat(command.path)
-        put_response(job_id, "success", result)
+        try:
+            result = sftp.stat(command.path)
+            put_response(job_id, "success", result)
+        except (OSError, IOError, paramiko.SSHException) as e:
+            ic(f"Executor: Stat failed for {command.path}: {e}")
+            put_response(job_id, "error", str(e))
+            raise
     
     def _execute_mkdir(self, ssh, sftp, command: MkDirCommand, job_id: str):
         """Execute mkdir command"""
@@ -323,7 +415,6 @@ class CommandExecutor:
                 error = response_queue.get_nowait()
                 raise Exception(error)
             
-            # Get the actual data
             data = response_queue.get_nowait()
             return data
             
@@ -331,41 +422,31 @@ class CommandExecutor:
             raise TimeoutError(f"Command timed out after {timeout} seconds")
 
 
-class SFTPSessionAPI:
+class SFTPSessionAPI(QObject):
     """
     High-level API for SFTP operations using sessions.
     
     This provides a cleaner interface than the legacy add_sftp_job calls.
-    Example usage:
     
-    ```python
-    # Create credentials
-    creds = SFTPCredentials(
-        hostname='example.com',
-        username='user',
-        password='password'
-    )
-    
-    # Create session
-    session = get_session_manager().create_session(creds)
-    
-    # Use API
-    api = SFTPSessionAPI(session)
-    
-    # Download file
-    api.download('/remote/file.txt', '/local/file.txt')
-    
-    # Upload file
-    api.upload('/local/file.txt', '/remote/file.txt')
-    
-    # List directory
-    files = api.list('/remote/directory')
-    ```
+    Example:
+        creds = SFTPCredentials(hostname='example.com', username='user', password='password')
+        session = get_session_manager().create_session(creds)
+        api = SFTPSessionAPI(session)
+        api.download('/remote/file.txt', '/local/file.txt')
     """
     
+    progress = pyqtSignal(str, int, float, float)
+    message = pyqtSignal(str, str)
+    finished = pyqtSignal(str)
+    
     def __init__(self, session: SFTPSession):
+        super().__init__()
         self.session = session
         self.executor = CommandExecutor(session)
+        
+        self.executor.progress.connect(self.progress)
+        self.executor.message.connect(self.message)
+        self.executor.finished.connect(self.finished)
     
     def download(self, remote_path: str, local_path: str, 
                  job_id: Optional[str] = None, resume: bool = False) -> Any:
@@ -475,8 +556,6 @@ class SFTPSessionAPI:
 
         command = ChDirCommand(job_id=job_id, remote_path=remote_path)
         result = self.executor.execute(command)
-
-        # Update session's remote directory
         self.session.update_remote_directory(remote_path)
         return result
 
@@ -499,7 +578,6 @@ class SFTPSessionAPI:
     def is_directory(self, path: str) -> bool:
         """Check if path is a directory"""
         try:
-            from stat import S_ISDIR
             attr = self.stat(path)
             return S_ISDIR(attr.st_mode)
         except (OSError, IOError, RuntimeError):
@@ -508,7 +586,6 @@ class SFTPSessionAPI:
     def is_file(self, path: str) -> bool:
         """Check if path is a file"""
         try:
-            from stat import S_ISDIR
             attr = self.stat(path)
             return not S_ISDIR(attr.st_mode)
         except (OSError, IOError, RuntimeError):
@@ -528,360 +605,3 @@ def create_session_api(credentials: SFTPCredentials) -> SFTPSessionAPI:
     session_manager = get_session_manager()
     session = session_manager.create_session(credentials)
     return SFTPSessionAPI(session)
-
-
-class AsyncSignals(QObject):
-    """
-    Signals for async SFTP operations.
-    
-    Emitted during file transfers to report progress.
-    """
-    progress = pyqtSignal(str, int, int, float, float)
-    finished = pyqtSignal(str, bool, str)
-    message = pyqtSignal(str, str)
-
-
-class SFTPAsyncSessionAPI:
-    """
-    Asynchronous API for SFTP operations using sessions.
-    
-    This provides non-blocking versions of SFTP operations that emit
-    progress signals instead of blocking until completion.
-    
-    Example usage:
-    
-    ```python
-    # Create credentials
-    creds = SFTPCredentials(
-        hostname='example.com',
-        username='user',
-        password='password'
-    )
-    
-    # Create session
-    session = get_session_manager().create_session(creds)
-    
-    # Use async API
-    api = SFTPAsyncSessionAPI(session)
-    
-    # Connect to signals
-    api.signals.progress.connect(lambda job_id, done, total, speed, pct: print(f"{pct}%"))
-    api.signals.finished.connect(lambda job_id, success, msg: print(f"Done: {msg}"))
-    
-    # Start async download (returns immediately)
-    api.download_async('/remote/file.txt', '/local/file.txt')
-    ```
-    """
-    
-    def __init__(self, session: SFTPSession):
-        self.session = session
-        self.signals = AsyncSignals()
-        self._active_jobs: Dict[str, str] = {}
-        self._jobs_lock = Lock()
-    
-    def _generate_job_id(self) -> str:
-        """Generate a unique job ID"""
-        return f"{int(time.time() * 1000)}"
-    
-    def _emit_progress(self, job_id: str, done: int, total: int, speed: float, pct: float):
-        """Emit progress signal"""
-        self.signals.progress.emit(job_id, done, total, speed, pct)
-    
-    def _emit_finished(self, job_id: str, success: bool, message: str = ""):
-        """Emit finished signal and cleanup job"""
-        self.signals.finished.emit(job_id, success, message)
-        with self._jobs_lock:
-            self._active_jobs.pop(job_id, None)
-    
-    def _emit_message(self, job_id: str, message: str):
-        """Emit message signal"""
-        self.signals.message.emit(job_id, message)
-    
-    def download_async(self, remote_path: str, local_path: str,
-                      job_id: Optional[str] = None,
-                      resume: bool = False) -> str:
-        """
-        Start an asynchronous file download.
-        
-        Args:
-            remote_path: Remote file path
-            local_path: Local destination path
-            job_id: Optional job ID (generated if not provided)
-            resume: Whether to resume a partial download
-            
-        Returns:
-            Job ID that can be used to track the transfer
-        """
-        if job_id is None:
-            job_id = self._generate_job_id()
-        
-        with self._jobs_lock:
-            self._active_jobs[job_id] = 'downloading'
-        
-        self._emit_message(job_id, f"Starting download: {remote_path}")
-        
-        try:
-            from sftp_downloadworkerclass import add_sftp_job
-            
-            add_sftp_job(
-                remote_path, True, local_path, False,
-                self.session.credentials.hostname,
-                self.session.credentials.username,
-                self.session.credentials.password,
-                self.session.credentials.port,
-                'resume' if resume else 'download',
-                job_id,
-                self.session.credentials.key
-            )
-            
-            return job_id
-            
-        except Exception as e:
-            self._emit_finished(job_id, False, str(e))
-            return job_id
-    
-    def upload_async(self, local_path: str, remote_path: str,
-                     job_id: Optional[str] = None,
-                     resume: bool = False) -> str:
-        """
-        Start an asynchronous file upload.
-        
-        Args:
-            local_path: Local file path
-            remote_path: Remote destination path
-            job_id: Optional job ID (generated if not provided)
-            resume: Whether to resume a partial upload
-            
-        Returns:
-            Job ID that can be used to track the transfer
-        """
-        if job_id is None:
-            job_id = self._generate_job_id()
-        
-        with self._jobs_lock:
-            self._active_jobs[job_id] = 'uploading'
-        
-        self._emit_message(job_id, f"Starting upload: {local_path}")
-        
-        try:
-            from sftp_downloadworkerclass import add_sftp_job
-            
-            add_sftp_job(
-                local_path, False, remote_path, True,
-                self.session.credentials.hostname,
-                self.session.credentials.username,
-                self.session.credentials.password,
-                self.session.credentials.port,
-                'resume' if resume else 'upload',
-                job_id,
-                self.session.credentials.key
-            )
-            
-            return job_id
-            
-        except Exception as e:
-            self._emit_finished(job_id, False, str(e))
-            return job_id
-    
-    def list_async(self, remote_path: str,
-                   job_id: Optional[str] = None) -> str:
-        """
-        Start an asynchronous directory listing.
-        
-        Args:
-            remote_path: Remote directory path
-            job_id: Optional job ID (generated if not provided)
-            
-        Returns:
-            Job ID that can be used to track the operation
-        """
-        if job_id is None:
-            job_id = self._generate_job_id()
-        
-        with self._jobs_lock:
-            self._active_jobs[job_id] = 'listing'
-        
-        self._emit_message(job_id, f"Listing directory: {remote_path}")
-        
-        try:
-            from sftp_downloadworkerclass import add_sftp_job
-            
-            add_sftp_job(
-                remote_path, True, '', False,
-                self.session.credentials.hostname,
-                self.session.credentials.username,
-                self.session.credentials.password,
-                self.session.credentials.port,
-                'list',
-                job_id,
-                self.session.credentials.key
-            )
-            
-            return job_id
-            
-        except Exception as e:
-            self._emit_finished(job_id, False, str(e))
-            return job_id
-    
-    def mkdir_async(self, remote_path: str,
-                    job_id: Optional[str] = None) -> str:
-        """
-        Start an asynchronous directory creation.
-        
-        Args:
-            remote_path: Remote directory path to create
-            job_id: Optional job ID (generated if not provided)
-            
-        Returns:
-            Job ID that can be used to track the operation
-        """
-        if job_id is None:
-            job_id = self._generate_job_id()
-        
-        with self._jobs_lock:
-            self._active_jobs[job_id] = 'mkdir'
-        
-        self._emit_message(job_id, f"Creating directory: {remote_path}")
-        
-        try:
-            from sftp_downloadworkerclass import add_sftp_job
-            
-            add_sftp_job(
-                remote_path, True, '', False,
-                self.session.credentials.hostname,
-                self.session.credentials.username,
-                self.session.credentials.password,
-                self.session.credentials.port,
-                'mkdir',
-                job_id,
-                self.session.credentials.key
-            )
-            
-            return job_id
-            
-        except Exception as e:
-            self._emit_finished(job_id, False, str(e))
-            return job_id
-    
-    def remove_async(self, remote_path: str,
-                     job_id: Optional[str] = None) -> str:
-        """
-        Start an asynchronous file removal.
-        
-        Args:
-            remote_path: Remote file path to remove
-            job_id: Optional job ID (generated if not provided)
-            
-        Returns:
-            Job ID that can be used to track the operation
-        """
-        if job_id is None:
-            job_id = self._generate_job_id()
-        
-        with self._jobs_lock:
-            self._active_jobs[job_id] = 'removing'
-        
-        self._emit_message(job_id, f"Removing file: {remote_path}")
-        
-        try:
-            from sftp_downloadworkerclass import add_sftp_job
-            
-            add_sftp_job(
-                remote_path, True, '', False,
-                self.session.credentials.hostname,
-                self.session.credentials.username,
-                self.session.credentials.password,
-                self.session.credentials.port,
-                'remove',
-                job_id,
-                self.session.credentials.key
-            )
-            
-            return job_id
-            
-        except Exception as e:
-            self._emit_finished(job_id, False, str(e))
-            return job_id
-    
-    def rmdir_async(self, remote_path: str,
-                    job_id: Optional[str] = None) -> str:
-        """
-        Start an asynchronous directory removal.
-        
-        Args:
-            remote_path: Remote directory path to remove
-            job_id: Optional job ID (generated if not provided)
-            
-        Returns:
-            Job ID that can be used to track the operation
-        """
-        if job_id is None:
-            job_id = self._generate_job_id()
-        
-        with self._jobs_lock:
-            self._active_jobs[job_id] = 'rmdir'
-        
-        self._emit_message(job_id, f"Removing directory: {remote_path}")
-        
-        try:
-            from sftp_downloadworkerclass import add_sftp_job
-            
-            add_sftp_job(
-                remote_path, True, '', False,
-                self.session.credentials.hostname,
-                self.session.credentials.username,
-                self.session.credentials.password,
-                self.session.credentials.port,
-                'rmdir',
-                job_id,
-                self.session.credentials.key
-            )
-            
-            return job_id
-            
-        except Exception as e:
-            self._emit_finished(job_id, False, str(e))
-            return job_id
-    
-    def cancel_job(self, job_id: str) -> bool:
-        """
-        Cancel an active job.
-        
-        Args:
-            job_id: The ID of the job to cancel
-            
-        Returns:
-            True if job was cancelled, False if not found
-        """
-        with self._jobs_lock:
-            if job_id in self._active_jobs:
-                del self._active_jobs[job_id]
-                self._emit_message(job_id, "Job cancelled")
-                return True
-        return False
-    
-    def get_active_jobs(self) -> Dict[str, str]:
-        """
-        Get all active jobs.
-        
-        Returns:
-            Dictionary mapping job IDs to their status
-        """
-        with self._jobs_lock:
-            return dict(self._active_jobs)
-
-
-def create_async_session_api(credentials: SFTPCredentials) -> SFTPAsyncSessionAPI:
-    """
-    Convenience function to create a session and return the async API.
-    
-    Args:
-        credentials: SFTP connection credentials
-        
-    Returns:
-        SFTPAsyncSessionAPI instance ready for async operations
-    """
-    session_manager = get_session_manager()
-    session = session_manager.create_session(credentials)
-    return SFTPAsyncSessionAPI(session)
-

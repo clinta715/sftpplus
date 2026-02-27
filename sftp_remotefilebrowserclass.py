@@ -11,8 +11,6 @@ from sftp_remotefiletablemodel import RemoteFileTableModel
 from sftp_sortfiltermodel import DirectoryFirstSortProxyModel
 from sftp_creds import (get_credentials, create_random_integer, set_credentials,
                         verify_credential_update, verify_directory_consistency)
-from sftp_downloadworkerclass import (create_response_queue, delete_response_queue,
-                                       add_sftp_job, QueueItem, ResponseQueueContext)
 from sftp_preferences import get_preferences
 
 # SECURITY: Debug logging to /tmp is DISABLED to prevent sensitive information leakage
@@ -175,8 +173,6 @@ class RemoteFileBrowser(FileBrowser):
         """Change to a directory - handles both relative and complete paths"""
         creds = get_credentials(self.session_id)
         ic(f"change_directory: session_id={self.session_id}, path={path}, current_dir={creds.get('current_remote_directory')}")
-        job_id = create_random_integer()
-        queue = create_response_queue(job_id)
         
         try:
             if path == "..":
@@ -184,16 +180,13 @@ class RemoteFileBrowser(FileBrowser):
                 new_path = head
                 ic(f"change_directory: parent directory, new_path={new_path}")
             elif self.is_complete_path(path):
-                # Path is already complete (e.g., from double_click_handler)
                 new_path = path
                 ic(f"change_directory: complete path, new_path={new_path}")
             else:
-                # Relative path - join with current directory using forward slashes for remote
                 current_dir = creds.get('current_remote_directory', '.')
                 new_path = self.get_normalized_remote_path(current_dir, path)
                 ic(f"change_directory: relative path, current_dir={current_dir}, new_path={new_path}")
 
-            # Check if the new path is in the cache and force_refresh is False
             if not force_refresh and new_path in self.model.cache and time.time() - self.model.cache_time.get(new_path, 0) < self.model.cache_duration:
                 set_credentials(self.session_id, 'current_remote_directory', new_path)
                 self.model.file_list = self.model.cache[new_path]
@@ -203,60 +196,36 @@ class RemoteFileBrowser(FileBrowser):
                 self.table.viewport().update()
                 return True
 
-            # If not in cache or force_refresh is True, proceed with SFTP operation
-            ic(f"change_directory: submitting chdir job for {new_path}")
-            port = creds.get('port', 22)
-            if isinstance(port, str):
-                port = int(port)
-            add_sftp_job(new_path.replace("\\", "/"), True, new_path.replace("\\", "/"), True,
-                         creds.get('hostname'), creds.get('username'), creds.get('password'),
-                         port, "chdir", job_id, creds.get('key'))
-            ic(f"change_directory: submitted job {job_id}")
-
-            self.progressBar.setRange(0, 0)
-            start_time = time.time()
-            timeout = 30
-            ic(f"change_directory: waiting for response on job {job_id}")
-            while queue.empty() and (time.time() - start_time) < timeout:
-                self.non_blocking_sleep(100)
+            ic(f"change_directory: submitting chdir to {new_path}")
             
-            if queue.empty():
-                ic(f"change_directory: TIMEOUT waiting for job {job_id}")
+            self.progressBar.setRange(0, 0)
+            
+            try:
+                ops = self.get_sftp_operations()
+                ops.chdir(new_path.replace("\\", "/"))
+            except Exception as e:
+                ic(f"change_directory: ERROR - {e}")
                 self.progressBar.setRange(0, 100)
-                delete_response_queue(job_id)
-                self.message_signal.emit(f"change_directory() timeout after {timeout} seconds")
+                self.message_signal.emit(f"change_directory() failed: {e}")
                 return False
             
-            ic(f"change_directory: got response for job {job_id}")
-            response = queue.get_nowait()
             self.progressBar.setRange(0, 100)
-            ic(f"change_directory: response={response}")
-
-            if response == "error":
-                error_msg = queue.get_nowait()
-                ic(f"change_directory: ERROR - {error_msg}")
-                raise Exception(error_msg)
 
             ic(f"change_directory: success! updating credentials to {new_path}")
             set_credentials(self.session_id, 'current_remote_directory', new_path)
             
-            # Verify credentials were updated correctly using assertion helper
             if not verify_credential_update(self.session_id, 'current_remote_directory', new_path, "change_directory"):
                 ic(f"change_directory: CRITICAL - Failed to update credentials to {new_path}")
             
-            # Verify directory is valid
             is_valid, current_dir = verify_directory_consistency(self.session_id, "change_directory")
             if not is_valid:
                 ic(f"change_directory: WARNING - Directory '{current_dir}' may be invalid")
             
             self.message_signal.emit(f"{new_path}")
-            # Clear cache for the new directory to ensure fresh data
             self.model.invalidate_cache(new_path)
-            # Pass directory explicitly to avoid race condition with credentials
             ic(f"change_directory: calling get_files for {new_path}")
             self.model.get_files(force_refresh=True, directory=new_path)
             
-            # Verify after model update
             final_creds = get_credentials(self.session_id)
             ic(f"change_directory: final current_remote_directory={final_creds.get('current_remote_directory')}")
             
@@ -269,9 +238,6 @@ class RemoteFileBrowser(FileBrowser):
             ic(f"change_directory: EXCEPTION - {e}")
             self.message_signal.emit(f"change_directory() {e}")
             return False
-
-        finally:
-            delete_response_queue(job_id)
 
     def double_click_handler(self, index):
         creds = get_credentials(self.session_id)
@@ -580,23 +546,20 @@ class RemoteFileBrowser(FileBrowser):
                                         resume_all = True
 
                             if not skip_all:
-                                command = "download"
-                                if not overwrite_all and locals().get('action') == "resume":
-                                    command = "resume"
+                                resume = (not overwrite_all and locals().get('action') == "resume")
                                 
                                 ic(f"upload_download: DEBUG - remote_entry_path={repr(remote_entry_path)}")
                                 ic(f"upload_download: DEBUG - local_entry_path={repr(local_entry_path)}")
-                                ic(f"upload_download: DEBUG - command={command}")
+                                ic(f"upload_download: DEBUG - resume={resume}")
                                 
-                                add_sftp_job(remote_entry_path, True, local_entry_path, False,
-                                        self.init_hostname, self.init_username,
-                                        self.init_password, self.init_port,
-                                        command, job_id, self.init_key)
+                                try:
+                                    ops = self.get_sftp_operations()
+                                    ops.download(remote_entry_path, local_entry_path, job_id=str(job_id), resume=resume)
+                                    self.transfer_started.emit(str(job_id))
+                                except Exception as e:
+                                    self.message_signal.emit(f"Download failed: {e}")
+                                    ic(e)
                                 
-                                # Emit signal that transfer has started
-                                self.transfer_started.emit(str(job_id))
-                                
-                                # Switch to transfers tab
                                 self.message_signal.emit(f"Starting transfer: {remote_entry_path}")
 
                         has_valid_item = True

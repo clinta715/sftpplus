@@ -9,13 +9,20 @@ This document provides guidelines for AI coding agents working on this PyQt6-bas
 - **Ephemeral connections**: Each operation creates a fresh connection for security
 - **Threaded operations**: Uploads/downloads run in background threads
 - **Dual-pane interface**: Local and remote file browsers side-by-side
+- **File preview panel**: Collapsible side panel for text/image preview
+- **Customizable toolbar**: Drag-and-drop reordering, visibility toggles
+- **Bookmarks**: Per-host directory bookmarks
+- **Tree view**: Directory tree panel (above or below list)
 - **Progress tracking**: Real-time progress indicators for file transfers
 - **Queue management**: Pause/cancel transfer operations
 - **Persistent preferences**: User settings saved to home directory
+- **Enhanced security**: Separate key storage, proper file permissions
 
-## New Session-Based API (2026-02-11)
+## Session-Based API (2026-02-11) - MIGRATION COMPLETE
 
-The project now includes a clean session-based API for SFTP operations. This provides a better alternative to the legacy 11-parameter `add_sftp_job()` calls.
+The project now uses a clean session-based API for SFTP operations. This provides a better alternative to the legacy 11-parameter `add_sftp_job()` calls.
+
+> **Migration Status**: Complete as of 2026-02-27 - All production code now uses the session-based API
 
 ### Module Overview
 
@@ -28,6 +35,9 @@ The project now includes a clean session-based API for SFTP operations. This pro
 | `sftp_operations.py` | High-level convenience functions |
 | `sftp_terminal_widget.py` | SSH terminal widget with ANSI code stripping |
 | `sftp_preferences.py` | Persistent user preferences storage |
+| `sftp_preview_widget.py` | File preview side panel (text/images) |
+| `sftp_toolbar_customizer.py` | Toolbar customization dialog |
+| `sftp_qt_compat.py` | Qt6 enum compatibility layer |
 
 ### Quick Start
 
@@ -107,12 +117,12 @@ with SFTPOperations('example.com', 'user', 'password') as ops:
 | `is_directory(path)` | Check if path is directory |
 | `is_file(path)` | Check if path is file |
 
-### Legacy API Compatibility
+### Legacy API Compatibility (DEPRECATED)
 
-The old `add_sftp_job()` function is still available and works identically:
+The old `add_sftp_job()` function is still available but **deprecated**. All production code has been migrated to the session-based API:
 
 ```python
-# Old API still works (11 parameters)
+# Old API (deprecated - DO NOT USE)
 add_sftp_job(
     source_path, is_source_remote,
     destination_path, is_destination_remote,
@@ -121,7 +131,12 @@ add_sftp_job(
 )
 ```
 
-For new code, prefer the session-based API for better type safety and cleaner interfaces.
+**Migration Status**: Complete (2026-02-27)
+
+Migrated files:
+- `sftp_browserclass.py` - upload, download, traverse_and_transfer, sftp_exists
+- `sftp_remotefilebrowserclass.py` - change_directory, upload_download
+- `sftp_remotefiletablemodel.py` - sftp_listdir_attr
 
 ```bash
 # Run the application
@@ -286,18 +301,75 @@ finally:
 
 ### File Organization
 ```
-sftp.py                      # Main application entry point
-sftp_creds.py               # Thread-safe credential management
-sftp_downloadworkerclass.py # Background transfer workers
+__init__.py                   # Package structure and public API exports
+sftp.py                       # Main application entry point
+sftp_creds.py                 # Thread-safe credential management
+sftp_downloadworkerclass.py   # Background transfer workers
 sftp_backgroundthreadwindow.py # Transfer queue UI
-sftp_hostdataeditor.py      # Site manager dialog
-sftp_browserclass.py        # Local file browser
+sftp_hostdataeditor.py        # Connection data storage/encryption (functions only)
+sftp_browserclass.py          # Base browser (uses mixins)
+sftp_browser_mixins.py        # Browser mixins: TreeViewMixin, BookmarkMixin, FileOpsMixin
 sftp_remotefilebrowserclass.py # Remote file browser
-sftp_filebrowserclass.py    # Base browser class
-sftp_*tablemodel.py         # Table models for file listings
-sftp_editwindowclass.py     # Edit window dialog
-connection_data.json        # Site configurations (auto-generated)
+sftp_filebrowserclass.py      # Legacy base browser class
+sftp_*tablemodel.py           # Table models for file listings
+sftp_editwindowclass.py       # Edit window dialog
+sftp_session.py               # Session management
+sftp_commands.py              # Typed command classes
+sftp_connection_pool.py       # SSH connection pooling
+sftp_session_executor.py      # Command executor
+sftp_operations.py            # High-level SFTP operations
+sftp_preferences.py           # Persistent user preferences
+sftp_preview_widget.py        # File preview side panel
+sftp_toolbar_customizer.py    # Toolbar customization dialog
+sftp_terminal_widget.py       # SSH terminal widget
+sftp_file_browser_panel.py    # Combined browser panel
+sftp_transfer_queue_widget.py # Transfer queue widget
+sftp_connections_widget.py    # Connection manager widget
+sftp_qt_compat.py             # Qt6 enum compatibility layer
+connection_data.json          # Site configurations (auto-generated)
+
+archive/                      # Archived (unused) files
+├── sftp_browser_actions.py   # Never integrated
+├── sftp_navigation.py        # Never integrated
+└── sftp_file_operations.py   # Never integrated
 ```
+
+### Browser Mixin Architecture (2026-02-22)
+
+The `Browser` class in `sftp_browserclass.py` now uses mixins for modularity:
+
+```python
+class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
+    ...
+```
+
+| Mixin | Purpose |
+|-------|---------|
+| `TreeViewMixin` | Directory tree population, expansion, navigation |
+| `BookmarkMixin` | Per-host directory bookmarks |
+| `FileOpsMixin` | SFTP operations with cached `SFTPOperations` instance |
+
+**FileOpsMixin Caching:**
+
+The `FileOpsMixin` caches `SFTPOperations` instances for performance:
+
+```python
+class FileOpsMixin:
+    _sftp_ops_cache: dict = {}
+    
+    def get_sftp_operations(self):
+        # Returns cached instance or creates new one
+        ...
+    
+    def clear_sftp_cache(self):
+        # Call when credentials change
+        ...
+```
+
+All SFTP operations in the mixin use the cached instance:
+- `sftp_listdir()`, `sftp_listdir_attr()`
+- `sftp_mkdir()`, `sftp_rmdir()`, `sftp_remove()`, `sftp_rename()`
+- `sftp_exists()`, `is_remote_directory()`, `is_remote_file()`
 
 ### Key Patterns
 
@@ -522,11 +594,16 @@ Main Window Tabs:
 5. **Preferences:**
    - File: `sftp_preferences.py`
    - Stored in: `~/.sftp_client_preferences.json`
-   - Includes: `clear_completed_on_complete`, `overwrite_on_transfer`, `confirm_exit`, `focus_transfers_on_start`
+   - Includes: `clear_completed_on_complete`, `overwrite_on_transfer`, `confirm_exit`, `focus_transfers_on_start`, `tree_view_position`, `toolbar_buttons`
 
-6. **Backward Compatibility:**
+6. **Keyboard Shortcuts:**
+   - Global shortcuts registered in `MainWindow.setup_keyboard_shortcuts()`
+   - Browser shortcuts handled in `Browser.keyPressEvent()`
+   - See README.md for complete shortcut list
+
+7. **Backward Compatibility:**
    - Original `sftp_backgroundthreadwindow.py` preserved
-   - Original `sftp_hostdataeditor.py` preserved
+   - `sftp_hostdataeditor.py` - HostDataEditor class removed (replaced by ConnectionsWidget), functions retained
    - Original `FileBrowser` and `RemoteFileBrowser` classes preserved
    - Old dialog-based code still exists but not used
 
@@ -560,9 +637,68 @@ Main Window (single window)
 ## Dependencies
 
 Core dependencies (install with pip):
-- PyQt5
+- PyQt6
 - paramiko
 - cryptography
 - icecream
+- humanize (optional, for file size formatting)
 
 No formal requirements.txt exists - install manually as needed.
+
+## New Features (2026-02-22)
+
+### File Preview Panel
+
+The preview panel (`sftp_preview_widget.py`) provides:
+- Text file preview (up to 100KB)
+- Image preview (PNG, JPG, GIF, BMP, SVG up to 5MB)
+- File info display (size, permissions, modified date)
+- Toggle with `Ctrl+P` or 👁 button
+- Automatic cleanup of temp files via `atexit`
+
+### Customizable Toolbar
+
+Toolbar buttons can be customized via `sftp_toolbar_customizer.py`:
+- Drag to reorder in the dialog
+- Double-click to show/hide
+- Right-click toolbar for quick toggle menu
+- Settings persist in preferences
+
+### Tree View Position
+
+The directory tree panel can be positioned:
+- Above or below the file list
+- Toggle with ↕ button when tree is visible
+- Position saved in `tree_view_position` preference
+
+### Bookmarks
+
+Per-host directory bookmarks:
+- Add with `Ctrl+D` or ⭐ button
+- Stored in connection data per-hostname
+- Quick jump from bookmarks menu
+
+### Tab Management
+
+- Double-click tab to rename
+- Right-click for context menu
+- Connection manager has copy function for sites
+
+### Persistent Transfer Queue
+
+Unfinished transfers are saved and restored between sessions:
+- Queued transfers saved to `~/.sftp_client_transfer_queue.json`
+- File uses mode 0o600 (owner read/write only)
+- Credentials included (encrypted when possible)
+- Auto-deleted after successful restoration
+- Restored transfers re-added to queue on startup
+- Message displayed in console showing count of restored transfers
+
+### Security Enhancements
+
+Key security improvements:
+1. **Separate key storage**: `~/.sftp_client_key` with mode 0o600
+2. **Secure file permissions**: All credential files use restrictive permissions
+3. **No hardcoded defaults**: Removed guest/guest credentials
+4. **Secure temp handling**: atexit cleanup, hidden files, proper permissions
+5. **Sanitized logging**: Private key data removed from debug output

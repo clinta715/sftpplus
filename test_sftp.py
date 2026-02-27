@@ -190,6 +190,70 @@ class TestSecurityFixes:
         assert 'shlex' in dir(sftp_downloadworkerclass) or 'shlex' in str(sftp_downloadworkerclass)
 
 
+class TestSFTPOperations:
+    """Test SFTPOperations class"""
+    
+    def test_sftp_operations_import(self):
+        """Test that SFTPOperations can be imported"""
+        from sftp_operations import SFTPOperations
+        assert SFTPOperations is not None
+    
+    def test_sftp_operations_has_required_methods(self):
+        """Test that SFTPOperations has all required methods"""
+        from sftp_operations import SFTPOperations
+        required_methods = [
+            'download', 'upload', 'list', 'list_attr', 'stat',
+            'mkdir', 'rmdir', 'remove', 'chdir', 'exists',
+            'is_directory', 'is_file', 'close'
+        ]
+        for method in required_methods:
+            assert hasattr(SFTPOperations, method), f"Missing method: {method}"
+    
+    def test_sftp_operations_context_manager(self):
+        """Test that SFTPOperations supports context manager"""
+        from sftp_operations import SFTPOperations
+        assert hasattr(SFTPOperations, '__enter__')
+        assert hasattr(SFTPOperations, '__exit__')
+
+
+class TestSFTPSessionAPI:
+    """Test SFTPSessionAPI class"""
+    
+    def test_session_api_import(self):
+        """Test that SFTPSessionAPI can be imported"""
+        from sftp_session_executor import SFTPSessionAPI
+        assert SFTPSessionAPI is not None
+    
+    def test_session_api_has_required_methods(self):
+        """Test that SFTPSessionAPI has all required methods"""
+        from sftp_session_executor import SFTPSessionAPI
+        required_methods = [
+            'download', 'upload', 'list', 'list_attr', 'stat',
+            'mkdir', 'rmdir', 'remove', 'chdir', 'exists',
+            'is_directory', 'is_file'
+        ]
+        for method in required_methods:
+            assert hasattr(SFTPSessionAPI, method), f"Missing method: {method}"
+    
+    def test_session_api_has_signals(self):
+        """Test that SFTPSessionAPI has progress signals"""
+        from sftp_session_executor import SFTPSessionAPI
+        assert hasattr(SFTPSessionAPI, 'progress')
+        assert hasattr(SFTPSessionAPI, 'message')
+        assert hasattr(SFTPSessionAPI, 'finished')
+
+
+class TestCommandExecutor:
+    """Test CommandExecutor class"""
+    
+    def test_command_executor_has_signals(self):
+        """Test that CommandExecutor has progress signals"""
+        from sftp_session_executor import CommandExecutor
+        assert hasattr(CommandExecutor, 'progress')
+        assert hasattr(CommandExecutor, 'message')
+        assert hasattr(CommandExecutor, 'finished')
+
+
 def run_quick_tests():
     """Run quick smoke tests without pytest"""
     print("Running quick smoke tests...")
@@ -215,6 +279,28 @@ def run_quick_tests():
     test_thread.test_response_queues_lock_exists()
     test_thread.test_creds_lock_exists()
     print("  ✓ Thread safety tests passed")
+    
+    # Test SFTPOperations
+    print("✓ Testing SFTPOperations...")
+    test_ops = TestSFTPOperations()
+    test_ops.test_sftp_operations_import()
+    test_ops.test_sftp_operations_has_required_methods()
+    test_ops.test_sftp_operations_context_manager()
+    print("  ✓ SFTPOperations tests passed")
+    
+    # Test SFTPSessionAPI
+    print("✓ Testing SFTPSessionAPI...")
+    test_api = TestSFTPSessionAPI()
+    test_api.test_session_api_import()
+    test_api.test_session_api_has_required_methods()
+    test_api.test_session_api_has_signals()
+    print("  ✓ SFTPSessionAPI tests passed")
+    
+    # Test CommandExecutor
+    print("✓ Testing CommandExecutor...")
+    test_exe = TestCommandExecutor()
+    test_exe.test_command_executor_has_signals()
+    print("  ✓ CommandExecutor tests passed")
     
     print("\n✅ All quick smoke tests passed!")
 

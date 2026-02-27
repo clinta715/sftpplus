@@ -1,8 +1,6 @@
-from PyQt6.QtWidgets import QTableView, QApplication, QWidget, QVBoxLayout, QLabel, QFileDialog, QMessageBox, QInputDialog, QMenu, QHeaderView, QProgressBar, QSizePolicy, QTreeWidget, QTreeWidgetItem, QPushButton, QHBoxLayout, QProgressDialog, QLineEdit
+from PyQt6.QtWidgets import QTableView, QApplication, QWidget, QVBoxLayout, QLabel, QFileDialog, QMessageBox, QInputDialog, QMenu, QHeaderView, QProgressBar, QSizePolicy, QTreeWidget, QTreeWidgetItem, QPushButton, QHBoxLayout, QProgressDialog, QLineEdit, QToolButton
 from PyQt6.QtCore import pyqtSignal, QTimer, QEventLoop, QModelIndex
-from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
-from PyQt6 import QtCore
-from stat import S_ISDIR
+from sftp_qt_compat import Qt
 import stat
 import os
 import sys
@@ -17,15 +15,17 @@ import threading
 
 from sftp_creds import get_credentials, create_random_integer, set_credentials
 from sftp_downloadworkerclass import (create_response_queue, delete_response_queue,
-                                       check_response_queue, add_sftp_job, QueueItem, ResponseQueueContext)
+                                       check_response_queue, QueueItem, ResponseQueueContext)
 from sftp_session_executor import SFTPSessionAPI, create_session_api
 from sftp_session import SFTPCredentials, get_session_manager
+from sftp_browser_mixins import TreeViewMixin, BookmarkMixin, FileOpsMixin
 
-class Browser(QWidget):
+
+class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
     def __init__(self, title, session_id, parent=None):
-        super().__init__(parent)  # Initialize the QWidget parent class
+        super().__init__(parent)
         self._observers = []
-        self._observers_lock = threading.Lock()  # THREAD SAFETY: Lock for observer list
+        self._observers_lock = threading.Lock()
         self.title = title
         self.model = None
         self.session_id = session_id
@@ -101,14 +101,13 @@ class Browser(QWidget):
     def init_ui(self):
         self.layout = QVBoxLayout()
         
-        # Header with title and view toggle
         header_layout = QHBoxLayout()
         self.label = QLabel(self.title)
         header_layout.addWidget(self.label)
         header_layout.addStretch()
         
-        # Tree view toggle button
         self.tree_toggle_btn = QPushButton("🌲 Tree")
+        self.tree_toggle_btn.setToolTip("Toggle tree view panel")
         self.tree_toggle_btn.setCheckable(True)
         self.tree_toggle_btn.setStyleSheet("""
             QPushButton {
@@ -129,41 +128,91 @@ class Browser(QWidget):
         self.tree_toggle_btn.clicked.connect(self.toggle_tree_view)
         header_layout.addWidget(self.tree_toggle_btn)
         
+        self.tree_position_btn = QPushButton("↕")
+        self.tree_position_btn.setToolTip("Toggle tree view position (above/below list)")
+        self.tree_position_btn.setVisible(False)
+        self.tree_position_btn.setStyleSheet("""
+            QPushButton {
+                padding: 4px 8px;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                background-color: #444444;
+                color: #dddddd;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #555555;
+            }
+        """)
+        self.tree_position_btn.clicked.connect(self.toggle_tree_position)
+        header_layout.addWidget(self.tree_position_btn)
+        
+        self.bookmarks_btn = QToolButton()
+        self.bookmarks_btn.setText("⭐")
+        self.bookmarks_btn.setToolTip("Bookmarks (Ctrl+D to add)")
+        self.bookmarks_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.bookmarks_btn.setStyleSheet("""
+            QToolButton {
+                padding: 4px 8px;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                background-color: #444444;
+                color: #dddddd;
+                font-size: 11px;
+            }
+            QToolButton:hover {
+                background-color: #555555;
+            }
+            QToolButton::menu-indicator {
+                subcontrol-position: right center;
+                subcontrol-origin: padding;
+                left: -2px;
+                width: 8px;
+            }
+        """)
+        self.bookmarks_btn.clicked.connect(self._show_bookmarks_menu)
+        header_layout.addWidget(self.bookmarks_btn)
+        
         self.layout.addLayout(header_layout)
         
-        # Initialize and set the model for the table
+        self._create_tree_container()
+        
         self.table = QTableView()
-        self.active_table = self.table  # Store reference to our table
+        self.active_table = self.table
 
         self.table.setSizePolicy(Qt.SizePolicy_Expanding, Qt.SizePolicy_Expanding)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(22)  # Fixed row height
+        self.table.verticalHeader().setDefaultSectionSize(22)
         self.table.verticalHeader().setStretchLastSection(False)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(Qt.HeaderView_Stretch)
         self.table.horizontalHeader().setSectionResizeMode(Qt.HeaderView_Interactive)
-        # Enable sorting
         self.table.setSortingEnabled(True)
 
-        # Connect signals and slots
-        self.table.horizontalHeader().sectionClicked.connect(self.on_header_clicked)
         self.table.doubleClicked.connect(self.double_click_handler)
         self.table.customContextMenuRequested.connect(self.context_menu_handler)
-        # UI configuration
         self.table.setFocusPolicy(Qt.StrongFocus)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.sortByColumn(0, Qt.AscendingOrder)
 
-        self.layout.addWidget(self.table)  # Correctly add the table to the layout
+        self._tree_position = "above"
+        self._apply_tree_layout()
         
-        # Tree view container (initially hidden)
+        self._tree_root_path = None
+        self._tree_current_path = None
+        
+        self.progressBar = QProgressBar()
+        self.layout.addWidget(self.progressBar)
+
+        self.setLayout(self.layout)
+    
+    def _create_tree_container(self):
         self.tree_container = QWidget()
         self.tree_container.setVisible(False)
         tree_container_layout = QVBoxLayout()
         tree_container_layout.setContentsMargins(0, 0, 0, 0)
         tree_container_layout.setSpacing(5)
         
-        # Tree controls: Up button and current path
         tree_controls_layout = QHBoxLayout()
         
         self.tree_up_btn = QPushButton("⬆️ Up")
@@ -207,7 +256,6 @@ class Browser(QWidget):
         self.tree_path_input.returnPressed.connect(self.tree_path_navigate)
         tree_controls_layout.addWidget(self.tree_path_input, stretch=1)
         
-        # Download button for tree view
         self.tree_download_btn = QPushButton("⬇️ Download")
         self.tree_download_btn.setToolTip("Download selected directory")
         self.tree_download_btn.setStyleSheet("""
@@ -230,7 +278,6 @@ class Browser(QWidget):
         self.tree_download_btn.clicked.connect(self.tree_download_selected)
         tree_controls_layout.addWidget(self.tree_download_btn)
         
-        # Download All button for tree view
         self.tree_download_all_btn = QPushButton("⬇️⬇️ Download All")
         self.tree_download_all_btn.setToolTip("Download all visible directories")
         self.tree_download_all_btn.setStyleSheet("""
@@ -253,7 +300,6 @@ class Browser(QWidget):
         self.tree_download_all_btn.clicked.connect(self.tree_download_all)
         tree_controls_layout.addWidget(self.tree_download_all_btn)
         
-        # Delete directory button for tree view
         self.tree_delete_btn = QPushButton("🗑️ Delete")
         self.tree_delete_btn.setToolTip("Delete selected directory")
         self.tree_delete_btn.setStyleSheet("""
@@ -278,7 +324,6 @@ class Browser(QWidget):
         
         tree_container_layout.addLayout(tree_controls_layout)
         
-        # Tree view widget - shows directory structure only
         self.tree_widget = QTreeWidget()
         self.tree_widget.setHeaderLabels(["Directories"])
         self.tree_widget.setHeaderHidden(False)
@@ -317,7 +362,6 @@ class Browser(QWidget):
         """)
         tree_container_layout.addWidget(self.tree_widget)
         
-        # Tree view status label
         self.tree_status_label = QLabel("")
         self.tree_status_label.setStyleSheet("""
             color: #ffffff;
@@ -330,63 +374,79 @@ class Browser(QWidget):
         tree_container_layout.addWidget(self.tree_status_label)
         
         self.tree_container.setLayout(tree_container_layout)
-        self.layout.addWidget(self.tree_container)
+    
+    def _apply_tree_layout(self):
+        self.tree_container.setParent(None)
+        self.table.setParent(None)
         
-        # Tree root path tracking
-        self._tree_root_path = None
-        self._tree_current_path = None
+        from sftp_preferences import get_preferences
+        position = get_preferences().get('tree_view_position', 'above')
+        self._tree_position = position
         
-        # Add the table and status bar to the layout
-        self.progressBar = QProgressBar()
-        self.layout.addWidget(self.progressBar)
-
-        # Set the main layout of the widget
-        self.setLayout(self.layout)
-
+        if position == 'above':
+            self.layout.addWidget(self.tree_container)
+            self.layout.addWidget(self.table)
+        else:
+            self.layout.addWidget(self.table)
+            self.layout.addWidget(self.tree_container)
+        
+        self.tree_position_btn.setToolTip(f"Tree position: {position} list (click to toggle)")
+    
+    def toggle_tree_position(self):
+        from sftp_preferences import get_preferences
+        prefs = get_preferences()
+        
+        current = prefs.get('tree_view_position', 'above')
+        new_position = 'below' if current == 'above' else 'above'
+        
+        prefs.set('tree_view_position', new_position)
+        self._tree_position = new_position
+        self._apply_tree_layout()
+    
+    def toggle_tree_view(self):
+        show_tree = self.tree_toggle_btn.isChecked()
+        ic(f"Tree toggle: show_tree={show_tree}")
+        self.tree_container.setVisible(show_tree)
+        self.tree_position_btn.setVisible(show_tree)
+        
+        if show_tree:
+            self.populate_tree_view()
+    
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts"""
         key = event.key()
         modifiers = event.modifiers()
         
-        # F5 - Refresh
         if key == Qt.Key_F5:
             self.refresh_files()
-        
-        # Delete - Remove selected
         elif key == Qt.Key_Delete:
             self.remove_directory_with_prompt()
-        
-        # Ctrl+A - Select all
         elif key == Qt.Key_A and modifiers == Qt.ControlModifier:
             self.table.selectAll()
-        
-        # Enter - Open/Enter directory
         elif key == Qt.Key_Return or key == Qt.Key_Enter:
             self.change_directory_handler()
-        
-        # Backspace - Go to parent directory
-        elif key == Qt.Key_Backspace:
+        elif key == Qt.Key_Backspace and modifiers == Qt.NoModifier:
             self.navigate_to_parent()
-        
-        # Ctrl+B - Add bookmark
         elif key == Qt.Key_B and modifiers == Qt.ControlModifier:
             self.add_bookmark()
-        
+        elif key == Qt.Key_D and modifiers == Qt.ControlModifier:
+            self.add_bookmark()
+        elif key == Qt.Key_F2:
+            self.rename_selected()
+        elif key == Qt.Key_F6:
+            if hasattr(self, 'upload_download'):
+                self.upload_download()
+        elif key == Qt.Key_F7:
+            if hasattr(self, 'upload_download'):
+                self.upload_download()
+        elif key == Qt.Key_L and modifiers == Qt.ControlModifier:
+            if hasattr(self, 'tree_path_input'):
+                self.tree_path_input.setFocus()
+                self.tree_path_input.selectAll()
+        elif key == Qt.Key_P and modifiers == Qt.ControlModifier:
+            self.toggle_preview()
         else:
-            # Pass to parent for default handling
             super().keyPressEvent(event)
-
-    def toggle_tree_view(self):
-        """Toggle between table view and tree view"""
-        show_tree = self.tree_toggle_btn.isChecked()
-        ic(f"Tree toggle: show_tree={show_tree}")
-        self.table.setVisible(not show_tree)
-        self.tree_container.setVisible(show_tree)
-        
-        if show_tree:
-            self.populate_tree_view()
-        else:
-            self.refresh_files()
     
     def populate_tree_view(self):
         """Populate the tree view with directory structure. Override in subclasses."""
@@ -427,6 +487,41 @@ class Browser(QWidget):
     def navigate_to_parent(self):
         """Navigate to parent directory"""
         self.change_directory("..")
+
+    def rename_selected(self):
+        """Rename the currently selected file or directory"""
+        from PyQt6.QtWidgets import QInputDialog
+        
+        current_index = self.table.currentIndex()
+        if not current_index.isValid():
+            self.message_signal.emit("Please select a file or folder to rename.")
+            return
+        
+        filename_index = self.table.model().index(current_index.row(), 0)
+        selected_item = self.table.model().data(filename_index, Qt.DisplayRole)
+        if ' ' in selected_item:
+            selected_item = selected_item.split(' ', 1)[-1]
+        
+        new_name, ok = QInputDialog.getText(self, "Rename", f"Enter new name for '{selected_item}':")
+        if ok and new_name and new_name != selected_item:
+            creds = get_credentials(self.session_id)
+            current_dir = creds.get('current_remote_directory' if hasattr(self, 'is_remote_browser') and self.is_remote_browser() else 'current_local_directory', '.')
+            remote_path = os.path.join(current_dir, selected_item)
+            if hasattr(self, 'sftp_rename'):
+                self.sftp_rename(remote_path, new_name)
+            else:
+                self.message_signal.emit("Rename not available for this browser type")
+        elif ok and new_name == selected_item:
+            self.message_signal.emit("New name is the same as current name.")
+
+    def toggle_preview(self):
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'toggle_preview') and hasattr(parent, 'preview_widget'):
+                parent.toggle_preview()
+                return
+            parent = parent.parent()
+        self.message_signal.emit("Preview panel: Open a connection tab first")
 
     def get_files(self):
         self.model.get_files()
@@ -620,7 +715,7 @@ class Browser(QWidget):
             self.session_api.rmdir(remote_path, job_id=str(job_id))
             ic(f"sftp_rmdir: session_api.rmdir returned successfully")
             result = True
-        except (OSError, IOError, PermissionError) as e:
+        except (OSError, IOError, PermissionError, paramiko.SSHException) as e:
             ic(f"sftp_rmdir: Exception: {e}")
             import traceback
             traceback.print_exc()
@@ -645,7 +740,7 @@ class Browser(QWidget):
             self.session_api.remove(remote_path, job_id=str(job_id))
             ic(f"sftp_remove: session_api.remove returned successfully")
             result = True
-        except (OSError, IOError, PermissionError) as e:
+        except (OSError, IOError, PermissionError, paramiko.SSHException) as e:
             ic(f"sftp_remove: Exception: {e}")
             import traceback
             traceback.print_exc()
@@ -677,7 +772,7 @@ class Browser(QWidget):
             QMessageBox.warning(None, "Permission Denied", error_msg)
             self.message_signal.emit(f"Rename failed: {error_msg}")
             result = False
-        except (OSError, IOError) as e:
+        except (OSError, IOError, paramiko.SSHException) as e:
             ic(f"sftp_rename: Exception: {e}")
             import traceback
             traceback.print_exc()
@@ -701,7 +796,7 @@ class Browser(QWidget):
             result = self.session_api.list(remote_path)
             self.progressBar.setRange(0, 100)
             return result
-        except (OSError, IOError) as e:
+        except (OSError, IOError, paramiko.SSHException) as e:
             self.message_signal.emit(f"FileBrowser sftp_listdir() {e}")
             self.progressBar.setRange(0, 100)
             return False
@@ -724,7 +819,7 @@ class Browser(QWidget):
             result = self.session_api.list_attr(remote_path)
             self.progressBar.setRange(0, 100)
             return result
-        except (OSError, IOError) as e:
+        except (OSError, IOError, paramiko.SSHException) as e:
             self.message_signal.emit(f"FileBrowser sftp_listdir_attr() {e}")
             self.progressBar.setRange(0, 100)
             return False
@@ -820,7 +915,7 @@ class Browser(QWidget):
                 return False
 
             attr = self.session_api.stat(remote_path)
-            is_directory = S_ISDIR(attr.st_mode)
+            is_directory = stat.S_ISDIR(attr.st_mode)
             is_file = not is_directory
             ic(f"is_remote_file: {remote_path} is_file={is_file}")
             return is_file
@@ -1197,20 +1292,15 @@ class Browser(QWidget):
                                 job_id = create_random_integer()
                                 queue_item = QueueItem(os.path.basename(selected_path), job_id)
                                 
-                                # Determine command based on action
-                                command = "upload"  # default
-                                if action == "resume":
-                                    command = "resume"
-                                elif action == "overwrite":
-                                    command = "upload"  # overwrite is just normal upload
+                                resume = (action == "resume")
                                 
-                                add_sftp_job(selected_path, False, remote_entry_path, True,
-                                        creds.get('hostname'), creds.get('username'),
-                                        creds.get('password'), creds.get('port'),
-                                        command, job_id, creds.get('key',{}))
-                                
-                                # Emit signal that transfer has started
-                                self.transfer_started.emit(str(job_id))
+                                try:
+                                    ops = self.get_sftp_operations()
+                                    ops.upload(selected_path, remote_entry_path, job_id=str(job_id), resume=resume)
+                                    self.transfer_started.emit(str(job_id))
+                                except Exception as e:
+                                    self.message_signal.emit(f"Upload failed: {e}")
+                                    ic(e)
                         has_valid_item = True
             
             except (OSError, IOError, RuntimeError) as e:
@@ -1394,24 +1484,22 @@ class Browser(QWidget):
                     if action == "skip":
                         continue
                     
-                    # Determine transfer command
-                    command = "upload" if not is_source_remote else "download"
-                    if action == "resume" or resume_all:
-                        command = "resume"
+                    resume = (action == "resume" or resume_all)
                     
                     self.message_signal.emit(f"Transferring: {source_path} to {dest_path}")
                     
-                    # Create transfer job
                     job_id = create_random_integer()
-                    add_sftp_job(
-                        source_path, is_source_remote, dest_path, is_dest_remote,
-                        creds.get('hostname'), creds.get('username'),
-                        creds.get('password'), creds.get('port'),
-                        command, job_id, creds.get('key', {})
-                    )
                     
-                    # Emit signal that transfer has started
-                    self.transfer_started.emit(str(job_id))
+                    try:
+                        ops = self.get_sftp_operations()
+                        if is_source_remote:
+                            ops.download(source_path, dest_path, job_id=str(job_id), resume=resume)
+                        else:
+                            ops.upload(source_path, dest_path, job_id=str(job_id), resume=resume)
+                        self.transfer_started.emit(str(job_id))
+                    except Exception as e:
+                        self.message_signal.emit(f"Transfer failed: {e}")
+                        ic(e)
         
         except (OSError, IOError, RuntimeError) as e:
             operation = "upload" if not is_source_remote else "download"
@@ -1438,18 +1526,18 @@ class Browser(QWidget):
     def prompt_overwrite(self, item_path):
         """Prompt user for overwrite action - should be implemented in base class"""
         msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Question)
+        msg_box.setIcon(Qt.MsgIcon_Question)
         msg_box.setText(f"The item '{item_path}' already exists.")
         msg_box.setInformativeText("What would you like to do?")
         msg_box.setWindowTitle("Overwrite Confirmation")
 
-        cancel_btn = msg_box.addButton("Cancel All", QMessageBox.RejectRole)
-        skip_btn = msg_box.addButton("Skip", Qt.MsgBtn_NoRole)
-        skip_all_btn = msg_box.addButton("Skip All", Qt.MsgBtn_NoRole)
-        overwrite_btn = msg_box.addButton("Overwrite", Qt.MsgBtn_YesRole)
-        overwrite_all_btn = msg_box.addButton("Overwrite All", Qt.MsgBtn_YesRole)
-        resume_btn = msg_box.addButton("Resume", QMessageBox.AcceptRole)
-        resume_all_btn = msg_box.addButton("Resume All", QMessageBox.AcceptRole)
+        cancel_btn = msg_box.addButton("Cancel All", Qt.MsgRole_RejectRole)
+        skip_btn = msg_box.addButton("Skip", Qt.MsgRole_NoRole)
+        skip_all_btn = msg_box.addButton("Skip All", Qt.MsgRole_NoRole)
+        overwrite_btn = msg_box.addButton("Overwrite", Qt.MsgRole_YesRole)
+        overwrite_all_btn = msg_box.addButton("Overwrite All", Qt.MsgRole_YesRole)
+        resume_btn = msg_box.addButton("Resume", Qt.MsgRole_AcceptRole)
+        resume_all_btn = msg_box.addButton("Resume All", Qt.MsgRole_AcceptRole)
 
         msg_box.exec()
 
@@ -1517,7 +1605,7 @@ class Browser(QWidget):
                     try:
                         file_stat = self.session_api.stat(remote_path)
                         file_size = file_stat.st_size if hasattr(file_stat, 'st_size') else 0
-                    except (OSError, IOError) as e:
+                    except (OSError, IOError, paramiko.SSHException) as e:
                         self.message_signal.emit(f"Could not get file info: {e}")
                         return
                     
@@ -1537,18 +1625,13 @@ class Browser(QWidget):
                         temp_path = temp_file.name
                     
                     job_id = create_random_integer()
-                    queue = create_response_queue(job_id)
-                    add_sftp_job(
-                        remote_path, True, temp_path, False,
-                        creds.get('hostname'), creds.get('username'),
-                        creds.get('password'), creds.get('port'),
-                        "download", job_id, creds.get('key', {})
-                    )
                     
-                    ic(f"view_edit_file: waiting for download job {job_id}")
-                    if not self.waitjob(job_id):
-                        ic("view_edit_file: download was interrupted or timed out")
-                        self.message_signal.emit("File download was interrupted or timed out.")
+                    try:
+                        ops = self.get_sftp_operations()
+                        ops.download(remote_path, temp_path, job_id=str(job_id))
+                    except Exception as e:
+                        ic(f"view_edit_file: download failed: {e}")
+                        self.message_signal.emit(f"File download failed: {e}")
                         return
                     
                     ic(f"view_edit_file: download complete, checking text file: {temp_path}")
@@ -1616,31 +1699,13 @@ class Browser(QWidget):
             self.message_signal.emit("Current browser is not a valid QTableView.")
 
     def sftp_exists(self, path):
-        creds = get_credentials(self.session_id)
-        job_id = create_random_integer()
-        queue = create_response_queue(job_id)
-
         try:
-            add_sftp_job(path, True, path, True, creds.get('hostname'), creds.get('username'), creds.get('password'), creds.get('port'), "stat", job_id, creds.get('key',{}) )
-
-            while queue.empty():
-                self.non_blocking_sleep(100)
-            response = queue.get_nowait()
-
-            if response == "error":
-                error = queue.get_nowait() # get error message
-                self.message_signal.emit(f"sftp_exists() {error}")
-                raise error
-            else: # success means what it is it exists
-                exist = True
-
-        except (OSError, IOError, RuntimeError) as e:
-            self.message_signal.emit(f"sftp_exists() {e}")
-            exist = False
-
-        finally:
-            delete_response_queue(job_id)
+            ops = self.get_sftp_operations()
+            exist = ops.exists(path)
             return exist
+        except Exception as e:
+            self.message_signal.emit(f"sftp_exists() {e}")
+            return False
         
     def refresh_files(self):
         if hasattr(self.model, 'invalidate_cache'):
@@ -1729,3 +1794,57 @@ class Browser(QWidget):
         """Navigate to a bookmarked directory - to be overridden by subclasses"""
         self.message_signal.emit(f"Navigating to: {path}")
         return False  # Subclasses should implement actual navigation
+
+    def _show_bookmarks_menu(self):
+        bookmarks = self.get_bookmarks()
+        menu = QMenu(self)
+        
+        add_action = menu.addAction("⭐ Add Current Directory")
+        add_action.triggered.connect(lambda: self.add_bookmark())
+        
+        if bookmarks:
+            menu.addSeparator()
+            for bm in bookmarks:
+                if isinstance(bm, dict):
+                    name = bm.get('name', bm.get('path', 'Unknown'))
+                    path = bm.get('path', '')
+                    action = menu.addAction(f"📁 {name}")
+                    action.triggered.connect(lambda checked, p=path: self.navigate_to_bookmark(p))
+        
+        menu.addSeparator()
+        manage_action = menu.addAction("⚙️ Manage Bookmarks...")
+        manage_action.triggered.connect(self._manage_bookmarks)
+        
+        menu.exec(self.bookmarks_btn.mapToGlobal(self.bookmarks_btn.rect().bottomLeft()))
+
+    def _manage_bookmarks(self):
+        bookmarks = self.get_bookmarks()
+        if not bookmarks:
+            QMessageBox.information(self, "Manage Bookmarks", "No bookmarks to manage.")
+            return
+        
+        items = []
+        for bm in bookmarks:
+            if isinstance(bm, dict):
+                items.append(f"{bm.get('name', 'Unknown')} - {bm.get('path', '')}")
+        
+        item, ok = QInputDialog.getItem(
+            self, "Manage Bookmarks", 
+            "Select bookmark to delete:", 
+            items, 0, False
+        )
+        
+        if ok and item:
+            from sftp_hostdataeditor import load_connection_data, save_connection_data
+            host_data = load_connection_data()
+            creds = get_credentials(self.session_id)
+            hostname = creds.get('hostname', 'localhost')
+            
+            name = item.split(' - ')[0]
+            host_data['bookmarks'][hostname] = [
+                bm for bm in host_data.get('bookmarks', {}).get(hostname, [])
+                if isinstance(bm, dict) and bm.get('name') != name
+            ]
+            
+            if save_connection_data(host_data):
+                self.message_signal.emit(f"Bookmark '{name}' deleted")
