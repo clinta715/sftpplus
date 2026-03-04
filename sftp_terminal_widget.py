@@ -6,7 +6,7 @@ No additional dependencies beyond PyQt6 and paramiko.
 """
 import threading
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit
-from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
+from sftp_qt_compat import Qt
 from PyQt6.QtCore import pyqtSignal, QObject, QEvent
 from PyQt6.QtGui import QTextCursor
 import paramiko
@@ -37,7 +37,7 @@ def strip_ansi_codes(text):
 class _TerminalOutputEvent(QEvent):
     """Custom event for thread-safe terminal output"""
     def __init__(self, callback):
-        super().__init__(QEvent.User)
+        super().__init__(Qt.User)
         self.callback = callback
 
 
@@ -95,7 +95,7 @@ class SSHTerminalWidget(QWidget):
     
     def eventFilter(self, obj, event):
         """Capture keyboard input"""
-        if obj == self.terminal and event.type() == QEvent.KeyPress:
+        if obj == self.terminal and event.type() == Qt.KeyPress:
             key = event.text()
             if key:
                 self._send_input(key)
@@ -128,7 +128,7 @@ class SSHTerminalWidget(QWidget):
             except Exception as e:
                 ic(f"Error executing terminal output callback: {e}")
     
-    def connect_ssh(self, hostname, username, password=None, port=22, key=None):
+    def connect_ssh(self, hostname, username, password=None, port=22, key=None, ssh_commands=""):
         """Connect to SSH server and start interactive shell"""
         try:
             self.ssh = paramiko.SSHClient()
@@ -165,6 +165,16 @@ class SSHTerminalWidget(QWidget):
             self.terminal.appendPlainText(f"Connected to {username}@{hostname}\n")
             
             ic(f"SSH connected to {hostname}")
+            
+            if ssh_commands:
+                import time
+                time.sleep(0.5)
+                for command in ssh_commands.split('\n'):
+                    command = command.strip()
+                    if command:
+                        self.terminal.appendPlainText(f"$ {command}\n")
+                        self.send_command(command)
+                        time.sleep(0.3)
             
         except Exception as e:
             error_msg = f"Connection failed: {str(e)}"
@@ -209,7 +219,7 @@ class SSHTerminalWidget(QWidget):
                 if self.terminal is None:
                     return
                 cursor = self.terminal.textCursor()
-                cursor.movePosition(cursor.End)
+                cursor.movePosition(QTextCursor.MoveOperation.End)
                 cursor.insertText(text)
                 self.terminal.setTextCursor(cursor)
                 self.terminal.ensureCursorVisible()

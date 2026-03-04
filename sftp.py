@@ -16,12 +16,14 @@ from sftp_filebrowserclass import FileBrowser
 from sftp_creds import get_credentials, set_credentials, del_credentials, create_random_integer, clear_all_credentials, get_home_directory
 from sftp_session import get_session_manager
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
-from PyQt6.QtWidgets import QInputDialog, QFileDialog, QLabel, QToolButton, QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QTextEdit, QCompleter, QComboBox, QSpinBox, QTabWidget, QMessageBox, QCheckBox
+from PyQt6.QtWidgets import QInputDialog, QFileDialog, QLabel, QToolButton, QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QTextEdit, QCompleter, QComboBox, QSpinBox, QTabWidget, QMessageBox, QCheckBox, QMenu
 from PyQt6.QtCore import pyqtSignal, QObject, QCoreApplication, QTimer, QEvent, QMutexLocker
+from PyQt6.QtGui import QKeySequence, QShortcut
 import paramiko
 
 from sftp_config import MAX_TRANSFERS
 from sftp_preferences import get_preferences
+from sftp_toolbar_customizer import customize_toolbar
 
 class CustomComboBox(QComboBox):
     editingFinished = pyqtSignal()
@@ -71,6 +73,9 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         # Initialize UI after loading connection data
         self.init_ui()
 
+        # Setup keyboard shortcuts
+        self.setup_keyboard_shortcuts()
+
         # Install event filter for window movement
         self.installEventFilter(self)
         
@@ -81,8 +86,8 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         QMessageBox.critical(self, "Error", f"Transfer {transfer_id}: {message}")
         
         # Display the error in the status bar
-        self.status_bar.setText(f"Error in transfer {transfer_id}: {message}")
-        self.status_bar.setStyleSheet("""
+        self.status_message.setText(f"Error in transfer {transfer_id}: {message}")
+        self.status_message.setStyleSheet("""
             QLabel {
                 background-color: #5a1a1a;
                 color: #ff6b6b;
@@ -91,6 +96,140 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
                 font-size: 12px;
             }
         """)
+
+    def setup_keyboard_shortcuts(self):
+        shortcuts = [
+            (QKeySequence("Ctrl+R"), self._toolbar_refresh),
+            (QKeySequence("F5"), self._toolbar_refresh),
+            (QKeySequence("Ctrl+N"), self._new_connection_tab),
+            (QKeySequence("Ctrl+W"), self._close_current_tab),
+            (QKeySequence("F6"), self._toolbar_download),
+            (QKeySequence("F7"), self._toolbar_upload),
+            (QKeySequence("F2"), self._toolbar_rename),
+            (QKeySequence("Delete"), self._toolbar_delete),
+            (QKeySequence("Backspace"), self._navigate_parent),
+            (QKeySequence("Ctrl+L"), self._focus_address_bar),
+            (QKeySequence("Ctrl+D"), self._add_bookmark),
+            (QKeySequence("Ctrl+P"), self._toggle_preview),
+            (QKeySequence("Ctrl+T"), self._toggle_transfers_tab),
+            (QKeySequence("Ctrl+Shift+T"), self._customize_toolbar),
+        ]
+        for key_seq, callback in shortcuts:
+            shortcut = QShortcut(key_seq, self)
+            shortcut.activated.connect(callback)
+
+    def _new_connection_tab(self):
+        self.tab_widget.setCurrentIndex(1)
+        self.hostname_combo.setFocus()
+
+    def _close_current_tab(self):
+        current_index = self.tab_widget.currentIndex()
+        if current_index > 1:
+            self.closeTab(current_index)
+
+    def _navigate_parent(self):
+        browser = self._get_active_browser()
+        if browser:
+            browser.navigate_to_parent()
+
+    def _focus_address_bar(self):
+        browser = self._get_active_browser()
+        if browser and hasattr(browser, 'tree_path_input'):
+            browser.tree_path_input.setFocus()
+            browser.tree_path_input.selectAll()
+
+    def _add_bookmark(self):
+        browser = self._get_active_browser()
+        if browser and hasattr(browser, 'add_bookmark'):
+            browser.add_bookmark()
+
+    def _toggle_preview(self):
+        current_widget = self.tab_widget.currentWidget()
+        if hasattr(current_widget, 'file_browser_panel'):
+            panel = current_widget.file_browser_panel
+            if hasattr(panel, 'toggle_preview'):
+                panel.toggle_preview()
+        elif hasattr(current_widget, 'right_browser'):
+            browser = current_widget.right_browser
+            if hasattr(browser, 'toggle_preview'):
+                browser.toggle_preview()
+
+    def _toggle_transfers_tab(self):
+        if self.tab_widget.currentIndex() == 0:
+            self.tab_widget.setCurrentIndex(1)
+        else:
+            self.tab_widget.setCurrentIndex(0)
+
+    def _create_separator(self):
+        sep = QLabel("│")
+        sep.setStyleSheet("QLabel { color: #555555; }")
+        return sep
+
+    def _copy_current_path(self, event):
+        from PyQt6.QtWidgets import QApplication
+        current_widget = self.tab_widget.currentWidget()
+        path = ""
+        if hasattr(current_widget, 'right_browser') and current_widget.right_browser:
+            creds = get_credentials(current_widget.right_browser.session_id)
+            path = creds.get('current_remote_directory', '')
+        if path:
+            QApplication.clipboard().setText(path)
+            self.status_message.setText(f"Copied: {path}")
+
+    def _update_status_path(self):
+        current_widget = self.tab_widget.currentWidget()
+        if hasattr(current_widget, 'right_browser') and current_widget.right_browser:
+            creds = get_credentials(current_widget.right_browser.session_id)
+            hostname = creds.get('hostname', '')
+            path = creds.get('current_remote_directory', '')
+            self.status_path.setText(f"{hostname}:{path}")
+            self.status_connection.setText("🟢 Connected")
+            self.status_connection.setStyleSheet("QLabel { color: #4a8a4a; font-size: 11px; }")
+        elif hasattr(current_widget, 'terminal_widget') and current_widget.terminal_widget:
+            creds = get_credentials(current_widget.terminal_widget.session_id)
+            hostname = creds.get('hostname', '')
+            self.status_path.setText(f"{hostname}")
+            self.status_connection.setText("🟢 Connected")
+            self.status_connection.setStyleSheet("QLabel { color: #4a8a4a; font-size: 11px; }")
+        else:
+            self.status_path.setText("No path")
+            self.status_connection.setText("⚫ Disconnected")
+            self.status_connection.setStyleSheet("QLabel { color: #888888; font-size: 11px; }")
+
+    def _on_tab_changed(self, index):
+        """Handle tab change to update status bar"""
+        self._update_status_path()
+
+    def _rename_tab_by_index(self, index):
+        if index <= 1:
+            return
+        current_name = self.tab_widget.tabText(index)
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Tab", "Enter new tab name:", text=current_name
+        )
+        if ok and new_name:
+            self.tab_widget.setTabText(index, new_name)
+
+    def _show_tab_context_menu(self, pos):
+        index = self.tab_widget.tabBar().tabAt(pos)
+        if index <= 1:
+            return
+        
+        menu = QMenu(self)
+        rename_action = menu.addAction("Rename Tab")
+        close_action = menu.addAction("Close Tab")
+        close_others_action = menu.addAction("Close Other Tabs")
+        
+        action = menu.exec(self.tab_widget.tabBar().mapToGlobal(pos))
+        
+        if action == rename_action:
+            self._rename_tab_by_index(index)
+        elif action == close_action:
+            self.closeTab(index)
+        elif action == close_others_action:
+            for i in range(self.tab_widget.count() - 1, 1, -1):
+                if i != index:
+                    self.closeTab(i)
 
     def init_ui(self):
         # Initialize input widgets
@@ -138,7 +277,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         # Set main layout
         self.top_layout = QVBoxLayout()
         self.top_layout.addLayout(self.top_bar_layout)
-        self.top_layout.addLayout(self.button_layout)
+        self.top_layout.addWidget(self._toolbar_container)
 
         # Set up central widget
         self.central_widget = QWidget()
@@ -149,6 +288,10 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.tab_widget = QTabWidget()
         self.tab_widget.setTabsClosable(True)
         self.tab_widget.tabCloseRequested.connect(self.closeTab)
+        self.tab_widget.tabBarDoubleClicked.connect(self._rename_tab_by_index)
+        self.tab_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tab_widget.customContextMenuRequested.connect(self._show_tab_context_menu)
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
 
         # Additional setup if necessary
         self.setup_hostname_completer()
@@ -157,19 +300,50 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         # Add the tab widget (takes most of the space)
         self.top_layout.addWidget(self.tab_widget)
         
-        # Create status bar (single line at bottom)
-        self.status_bar = QLabel("Ready")
-        self.status_bar.setStyleSheet("""
-            QLabel {
+        # Create enhanced status bar with multiple sections
+        status_bar_widget = QWidget()
+        status_bar_layout = QHBoxLayout()
+        status_bar_layout.setContentsMargins(5, 0, 5, 0)
+        status_bar_layout.setSpacing(10)
+        
+        self.status_connection = QLabel("⚫ Disconnected")
+        self.status_connection.setStyleSheet("QLabel { color: #888888; font-size: 11px; }")
+        self.status_connection.setToolTip("Connection status")
+        status_bar_layout.addWidget(self.status_connection)
+        
+        status_bar_layout.addWidget(self._create_separator())
+        
+        self.status_path = QLabel("No path")
+        self.status_path.setStyleSheet("QLabel { color: #aaaaaa; font-size: 11px; }")
+        self.status_path.setToolTip("Click to copy current path")
+        self.status_path.setCursor(Qt.PointingHandCursor)
+        self.status_path.mousePressEvent = self._copy_current_path
+        status_bar_layout.addWidget(self.status_path, stretch=1)
+        
+        status_bar_layout.addWidget(self._create_separator())
+        
+        self.status_transfers = QLabel("Transfers: 0")
+        self.status_transfers.setStyleSheet("QLabel { color: #aaaaaa; font-size: 11px; }")
+        self.status_transfers.setToolTip("Active transfers")
+        status_bar_layout.addWidget(self.status_transfers)
+        
+        status_bar_layout.addWidget(self._create_separator())
+        
+        self.status_message = QLabel("Ready")
+        self.status_message.setStyleSheet("QLabel { color: #7eb8ff; font-size: 11px; }")
+        status_bar_layout.addWidget(self.status_message, stretch=1)
+        
+        status_bar_widget.setLayout(status_bar_layout)
+        status_bar_widget.setStyleSheet("""
+            QWidget {
                 background-color: #2a2a2a;
-                color: #aaaaaa;
-                padding: 5px 10px;
                 border-top: 1px solid #555555;
-                font-size: 12px;
             }
         """)
-        self.status_bar.setMaximumHeight(30)
-        self.top_layout.addWidget(self.status_bar)
+        status_bar_widget.setMaximumHeight(28)
+        self.top_layout.addWidget(status_bar_widget)
+        
+        self._active_transfers = 0
         
         # Create and add the transfer queue widget as a permanent tab
         self.transfer_queue_widget = TransferQueueWidget()
@@ -179,6 +353,9 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.transfer_queue_widget.signal_transfer_started.connect(self._on_transfer_started)
         self.transfer_queue_widget.signal_transfer_completed.connect(self._on_transfer_completed)
         self.transfer_queue_widget.signal_transfer_error.connect(self._on_transfer_error)
+        self.transfer_queue_widget.signal_transfer_progress.connect(self._on_transfer_progress)
+        
+        QTimer.singleShot(500, self.transfer_queue_widget.load_pending_transfers)
         
         # Create and add the connections widget as a tab
         self.connections_widget = ConnectionsWidget()
@@ -222,73 +399,161 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.port_selector.returnPressed.connect(self.connect_button_pressed)
 
     def init_button_layout(self):
+        self._toolbar_container = QWidget()
         self.button_layout = QHBoxLayout()
+        self.button_layout.setSpacing(5)
+        self.button_layout.setContentsMargins(0, 0, 0, 0)
+        self._toolbar_buttons = {}
         
-        # File operation buttons
-        self.refresh_btn = QPushButton("↻ Refresh")
-        self.refresh_btn.setToolTip("Refresh current directory")
-        self.refresh_btn.setFixedWidth(80)
-        
-        self.upload_btn = QPushButton("↑ Upload")
-        self.upload_btn.setToolTip("Upload selected file(s)")
-        self.upload_btn.setFixedWidth(80)
-        
-        self.download_btn = QPushButton("↓ Download")
-        self.download_btn.setToolTip("Download selected file(s)")
-        self.download_btn.setFixedWidth(80)
-        
-        self.new_folder_btn = QPushButton("+ Folder")
-        self.new_folder_btn.setToolTip("Create new folder")
-        self.new_folder_btn.setFixedWidth(80)
-        
-        self.delete_btn = QPushButton("✕ Delete")
-        self.delete_btn.setToolTip("Delete selected file(s)")
-        self.delete_btn.setFixedWidth(80)
-        
-        self.rename_btn = QPushButton("⇄ Rename")
-        self.rename_btn.setToolTip("Rename selected file(s)")
-        self.rename_btn.setFixedWidth(80)
-        
-        self.view_btn = QPushButton("👁 View")
-        self.view_btn.setToolTip("View/Edit selected text file")
-        self.view_btn.setFixedWidth(80)
-        
-        for btn in [self.refresh_btn, self.upload_btn, self.download_btn, self.new_folder_btn, self.delete_btn, self.rename_btn, self.view_btn]:
-            btn.setStyleSheet(BUTTON_STYLE_DARK)
-        
-        # Connect file operation buttons
-        self.refresh_btn.clicked.connect(self._toolbar_refresh)
-        self.upload_btn.clicked.connect(self._toolbar_upload)
-        self.download_btn.clicked.connect(self._toolbar_download)
-        self.new_folder_btn.clicked.connect(self._toolbar_new_folder)
-        self.delete_btn.clicked.connect(self._toolbar_delete)
-        self.rename_btn.clicked.connect(self._toolbar_rename)
-        self.view_btn.clicked.connect(self._toolbar_view)
-        
-        # Add file operation buttons
-        self.button_layout.addWidget(self.refresh_btn)
-        self.button_layout.addWidget(self.upload_btn)
-        self.button_layout.addWidget(self.download_btn)
-        self.button_layout.addWidget(self.new_folder_btn)
-        self.button_layout.addWidget(self.delete_btn)
-        self.button_layout.addWidget(self.rename_btn)
-        self.button_layout.addWidget(self.view_btn)
+        self._create_toolbar_buttons()
+        self._apply_toolbar_config()
         
         self.button_layout.addStretch()
+        
+        self.customize_btn = QToolButton()
+        self.customize_btn.setText("⚙")
+        self.customize_btn.setToolTip("Customize toolbar (right-click toolbar for quick toggle)")
+        self.customize_btn.setStyleSheet("""
+            QToolButton {
+                padding: 4px 8px;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                background-color: #444444;
+                color: #dddddd;
+                font-size: 11px;
+            }
+            QToolButton:hover {
+                background-color: #555555;
+            }
+        """)
+        self.customize_btn.clicked.connect(self._customize_toolbar)
+        self.button_layout.addWidget(self.customize_btn)
         
         self.button_layout.addWidget(self.connect_button)
         self.button_layout.addWidget(self.terminal_button)
         self.button_layout.addWidget(self.clear_queue_button)
         self.button_layout.addWidget(self.confirm_exit_checkbox)
         self.button_layout.addWidget(self.edit_button)
+        
+        self._toolbar_container.setLayout(self.button_layout)
+        self._toolbar_container.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._toolbar_container.customContextMenuRequested.connect(self._show_toolbar_context_menu)
 
-        # Connect the clicked signal to switch to connections tab
         self.edit_button.clicked.connect(self._switch_to_connections_tab)
-
-        # Connect the clicked signal of the connect button to the connect_button_pressed method
         self.connect_button.clicked.connect(self.connect_button_pressed)
         self.terminal_button.clicked.connect(self.terminal_button_pressed)
         self.clear_queue_button.clicked.connect(clear_sftp_queue)
+    
+    def _show_toolbar_context_menu(self, pos):
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2a2a2a;
+                color: #dddddd;
+                border: 1px solid #555555;
+            }
+            QMenu::item:selected {
+                background-color: #4a6fa5;
+            }
+        """)
+        
+        prefs = get_preferences()
+        config = prefs.get('toolbar_buttons', [])
+        
+        if not config:
+            from sftp_preferences import DEFAULT_PREFERENCES
+            config = DEFAULT_PREFERENCES.get('toolbar_buttons', [])
+        
+        for btn_config in config:
+            btn_id = btn_config.get('id', '')
+            text = btn_config.get('text', 'Button')
+            visible = btn_config.get('visible', True)
+            
+            action = menu.addAction(f"{'✓' if visible else '○'} {text}")
+            action.setCheckable(True)
+            action.setChecked(visible)
+            action.triggered.connect(lambda checked, bid=btn_id: self._toggle_button_visibility(bid))
+        
+        menu.addSeparator()
+        customize_action = menu.addAction("⚙ Customize Toolbar...")
+        customize_action.triggered.connect(self._customize_toolbar)
+        
+        menu.exec(self._toolbar_container.mapToGlobal(pos))
+    
+    def _toggle_button_visibility(self, btn_id):
+        prefs = get_preferences()
+        config = prefs.get('toolbar_buttons', [])
+        
+        if not config:
+            from sftp_preferences import DEFAULT_PREFERENCES
+            config = [b.copy() for b in DEFAULT_PREFERENCES.get('toolbar_buttons', [])]
+        else:
+            config = [b.copy() for b in config]
+        
+        for btn_config in config:
+            if btn_config.get('id') == btn_id:
+                btn_config['visible'] = not btn_config.get('visible', True)
+                break
+        
+        prefs.set('toolbar_buttons', config)
+        self._apply_toolbar_config()
+    
+    def _create_toolbar_buttons(self):
+        button_defs = {
+            'refresh': ('↻ Refresh', 'Refresh current directory', self._toolbar_refresh),
+            'upload': ('↑ Upload', 'Upload selected file(s)', self._toolbar_upload),
+            'download': ('↓ Download', 'Download selected file(s)', self._toolbar_download),
+            'new_folder': ('+ Folder', 'Create new folder', self._toolbar_new_folder),
+            'delete': ('✕ Delete', 'Delete selected file(s)', self._toolbar_delete),
+            'rename': ('⇄ Rename', 'Rename selected file(s)', self._toolbar_rename),
+            'view': ('👁 View', 'View/Edit selected text file', self._toolbar_view),
+        }
+        
+        for btn_id, (text, tooltip, callback) in button_defs.items():
+            btn = QPushButton(text)
+            btn.setToolTip(tooltip)
+            btn.setFixedWidth(80)
+            btn.setStyleSheet(BUTTON_STYLE_DARK)
+            btn.clicked.connect(callback)
+            self._toolbar_buttons[btn_id] = btn
+    
+    def _apply_toolbar_config(self):
+        for btn_id, btn in self._toolbar_buttons.items():
+            self.button_layout.removeWidget(btn)
+            btn.setParent(None)
+        
+        prefs = get_preferences()
+        config = prefs.get('toolbar_buttons', [])
+        
+        if not config:
+            from sftp_preferences import DEFAULT_PREFERENCES
+            config = DEFAULT_PREFERENCES.get('toolbar_buttons', [])
+        
+        insert_index = 0
+        for btn_config in config:
+            btn_id = btn_config.get('id', '')
+            visible = btn_config.get('visible', True)
+            
+            if btn_id in self._toolbar_buttons:
+                btn = self._toolbar_buttons[btn_id]
+                btn.setVisible(visible)
+                if visible:
+                    self.button_layout.insertWidget(insert_index, btn)
+                    insert_index += 1
+    
+    def _customize_toolbar(self):
+        prefs = get_preferences()
+        current_config = prefs.get('toolbar_buttons', [])
+        
+        if not current_config:
+            from sftp_preferences import DEFAULT_PREFERENCES
+            current_config = DEFAULT_PREFERENCES.get('toolbar_buttons', [])
+        
+        new_config = customize_toolbar(self, current_config)
+        
+        if new_config is not None:
+            prefs.set('toolbar_buttons', new_config)
+            self._apply_toolbar_config()
 
     def setup_hostname_completer(self):
         # Make sure self.hostnames is initialized and filled with data
@@ -373,7 +638,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
 
         return container_widget
 
-    def prepare_terminal_widget(self, hostname, username, password, port, key):
+    def prepare_terminal_widget(self, hostname, username, password, port, key, ssh_commands=""):
         """Create a container widget with SSH terminal"""
         self.session_id = create_random_integer()
         
@@ -394,7 +659,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         new_tab_index = self.tab_widget.addTab(container_widget, tab_title)
         self.tab_widget.setCurrentIndex(new_tab_index)
         
-        self.terminal_widget.connect_ssh(hostname, username, password, port, key)
+        self.terminal_widget.connect_ssh(hostname, username, password, port, key, ssh_commands)
         self.message_signal.emit(f"Terminal session opened to {hostname}")
 
     def closeTab(self, index):
@@ -487,7 +752,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         return title
 
     def log_connection_success(self):
-        self.status_bar.setText("Connected successfully")
+        self.status_message.setText("Connected successfully")
 
     def hostname_changed(self):
         self.current_hostname = self.hostname_combo.currentText().strip()
@@ -530,9 +795,9 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         
     def update_console(self, message):
         # Update status bar with latest message
-        self.status_bar.setText(message)
+        self.status_message.setText(message)
         # Reset to normal style (in case it was showing an error)
-        self.status_bar.setStyleSheet("""
+        self.status_message.setStyleSheet("""
             QLabel {
                 background-color: #2a2a2a;
                 color: #aaaaaa;
@@ -570,31 +835,53 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         """Handle transfer started event"""
         prefs = get_preferences()
         
-        # Update status bar
-        self.status_bar.setText(f"Transfer started: {message}")
+        self._active_transfers = count
+        self.status_transfers.setText(f"Transfers: {count}")
+        self.status_message.setText(f"Transfer started: {message}")
         
-        # Focus transfers tab if preference is enabled
         if prefs.get_bool("focus_transfers_on_start", True):
             self.tab_widget.setCurrentIndex(0)
     
     def _on_transfer_completed(self, count, message):
         """Handle transfer completed event"""
-        self.status_bar.setText("Transfer completed")
-        # Reset any error styling from failed transfers
-        self.status_bar.setStyleSheet("")
+        self._active_transfers = count
+        self.status_transfers.setText(f"Transfers: {count}")
+        self.status_message.setText("Transfer completed")
+        self.status_message.setStyleSheet("QLabel { color: #7eb8ff; font-size: 11px; }")
+        self._update_status_path()
     
     def _on_transfer_error(self, count, message):
         """Handle transfer error event"""
-        self.status_bar.setText(f"Transfer failed: {message}")
-        self.status_bar.setStyleSheet(f"""
-            QLabel {{
-                background-color: #5a1a1a;
-                color: #ff6b6b;
-                padding: 5px 10px;
-                border-top: 1px solid #ff6b6b;
-                font-size: 12px;
-            }}
-        """)
+        prefs = get_preferences()
+        
+        self._active_transfers = count
+        self.status_transfers.setText(f"Transfers: {count}")
+        self.status_message.setText(f"Transfer failed: {message}")
+        self.status_message.setStyleSheet("QLabel { color: #ff6b6b; font-size: 11px; }")
+        
+        # Focus on transfers tab so user can see the error
+        if prefs.get_bool("focus_transfers_on_start", True):
+            self.tab_widget.setCurrentIndex(0)
+    
+    def _on_transfer_progress(self, transfer_id, percent, speed_bps, eta_sec):
+        """Handle transfer progress updates"""
+        speed_kbps = speed_bps / 1024 if speed_bps else 0
+        if speed_kbps >= 1024:
+            speed_str = f"{speed_kbps/1024:.1f} MB/s"
+        else:
+            speed_str = f"{speed_kbps:.0f} KB/s"
+        
+        eta_str = ""
+        if eta_sec and eta_sec > 0:
+            if eta_sec < 60:
+                eta_str = f" - {int(eta_sec)}s remaining"
+            elif eta_sec < 3600:
+                eta_str = f" - {int(eta_sec/60)}m remaining"
+            else:
+                eta_str = f" - {int(eta_sec/3600)}h remaining"
+        
+        self.status_message.setText(f"Transfer: {percent}% {speed_str}{eta_str}")
+        self.status_message.setStyleSheet("QLabel { color: #a0a0a0; font-size: 11px; }")
     
     def _switch_to_connection_tab(self, tab_index):
         """Switch to a specific connection tab"""
@@ -700,6 +987,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         connection_type = connection_data.get("connection_type", "SFTP Browser")
         initial_remote_dir = connection_data.get("initial_remote_dir", "")
         initial_local_dir = connection_data.get("initial_local_dir", "")
+        ssh_commands = connection_data.get("ssh_commands", "")
         
         # Store initial directories in host_data so navigate_to_initial_directories can find them
         if initial_remote_dir:
@@ -727,7 +1015,11 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.message_signal.emit(f"Connecting to {hostname} from Connections...")
         
         if connection_type == "SSH Terminal":
-            self.prepare_terminal_widget(hostname, username, password, port, key if key != "None" else None)
+            self.prepare_terminal_widget(
+                hostname, username, password, port, 
+                key if key != "None" else None,
+                ssh_commands
+            )
         else:
             self.connect(hostname=hostname, username=username, password=password, port=port, key=key)
 
@@ -771,7 +1063,12 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
                 return
 
             self.message_signal.emit(f"Opening terminal session to {hostname}...")
-            self.prepare_terminal_widget(hostname, username, password, port, key)
+            
+            ssh_commands = ""
+            if hostname in self.host_data.get("ssh_commands", {}):
+                ssh_commands = self.host_data["ssh_commands"].get(hostname, "")
+            
+            self.prepare_terminal_widget(hostname, username, password, port, key, ssh_commands)
 
         except (ConnectionError, OSError, ValueError) as e:
             error_message = f"Connection failed: {str(e)}"
@@ -783,8 +1080,8 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         QMessageBox.critical(self, "Error", f"Transfer {transfer_id}: {message}")
         
         # Display the error in the status bar
-        self.status_bar.setText(f"Error in transfer {transfer_id}: {message}")
-        self.status_bar.setStyleSheet("""
+        self.status_message.setText(f"Error in transfer {transfer_id}: {message}")
+        self.status_message.setStyleSheet("""
             QLabel {
                 background-color: #5a1a1a;
                 color: #ff6b6b;
@@ -1111,17 +1408,16 @@ Do you want to trust this host and add it to known_hosts?"""
 
         ic("Cleanup method called")
         try:
-            # Stop background thread first (prevents new work)
+            if hasattr(self, 'transfer_queue_widget'):
+                self.transfer_queue_widget.cleanup()
+            
             self.stop_background_thread()
 
-            # Clear the SFTP queue
             from sftp_downloadworkerclass import clear_sftp_queue
             clear_sftp_queue()
 
-            # Close SFTP connections
             self.close_sftp_connections()
 
-            # Save connection data
             try:
                 save_connection_data(self.host_data)
             except (OSError, IOError, RuntimeError) as e:
@@ -1191,30 +1487,34 @@ Do you want to trust this host and add it to known_hosts?"""
                 event.accept()
                 return
 
-            # Check if there are active transfers
             active_count = 0
+            queued_count = 0
             if hasattr(self, 'transfer_queue_widget'):
                 with QMutexLocker(self.transfer_queue_widget._active_transfers_lock):
                     active_count = self.transfer_queue_widget.active_transfers
+                from sftp_downloadworkerclass import sftp_queue
+                queued_count = sftp_queue.qsize()
 
-            if active_count > 0:
+            if active_count > 0 or queued_count > 0:
+                total = active_count + queued_count
+                msg = f'There are {total} pending file transfers ({active_count} active, {queued_count} queued).\n\n'
+                msg += 'Unfinished transfers will be saved and resumed on next launch.\n\n'
+                msg += 'Exit and save transfers?'
                 reply = QMessageBox.question(
                     self, 'Confirm Exit',
-                    f'There are {active_count} active file transfers. Are you sure you want to exit?',
+                    msg,
                     Qt.MsgBtn_Yes | Qt.MsgBtn_No, Qt.MsgBtn_No
                 )
                 if reply == Qt.MsgBtn_No:
                     event.ignore()
                     return
 
-            # Accept the close event first to allow cleanup to happen
-            # The actual cleanup will be handled by the aboutToQuit signal
             event.accept()
         except (OSError, IOError, RuntimeError) as e:
             print(f"Error during application shutdown: {e}")
             import traceback
             traceback.print_exc()
-            event.accept()  # Force exit on error
+            event.accept()
 
     def eventFilter(self, source, event):
         """Handle events for child widgets"""

@@ -4,7 +4,7 @@ PyQt6 Compatibility Layer
 Provides backward-compatible enum access for code written for PyQt5.
 """
 from PyQt6 import QtCore
-from PyQt6.QtWidgets import QApplication, QLineEdit, QComboBox, QCompleter, QTableWidget, QHeaderView, QTableView, QFrame, QSizePolicy, QMessageBox
+from PyQt6.QtWidgets import QApplication, QLineEdit, QComboBox, QCompleter, QTableWidget, QHeaderView, QTableView, QFrame, QSizePolicy, QMessageBox, QTextBrowser
 from PyQt6.QtCore import Qt
 
 # Create backward-compatible Qt namespace
@@ -14,6 +14,11 @@ class QtCompat:
     UserRole = QtCore.Qt.ItemDataRole.UserRole
     FontRole = QtCore.Qt.ItemDataRole.FontRole
     ForegroundRole = QtCore.Qt.ItemDataRole.ForegroundRole
+    
+    # CheckState
+    Unchecked = QtCore.Qt.CheckState.Unchecked
+    PartiallyChecked = QtCore.Qt.CheckState.PartiallyChecked
+    Checked = QtCore.Qt.CheckState.Checked
     
     # Orientation
     Horizontal = QtCore.Qt.Orientation.Horizontal
@@ -92,6 +97,10 @@ class QtCompat:
     # Policy for QSizePolicy
     SizePolicy_Expanding = QSizePolicy.Policy.Expanding
     SizePolicy_Fixed = QSizePolicy.Policy.Fixed
+    SizePolicy_Minimum = QSizePolicy.Policy.Minimum
+    
+    # LineWrapMode for QTextBrowser
+    NoWrap = QTextBrowser.LineWrapMode.NoWrap
     
     # GlobalColor for QColor
     Color_blue = QtCore.Qt.GlobalColor.blue
@@ -113,10 +122,47 @@ class QtCompat:
     MsgRole_NoRole = QMessageBox.ButtonRole.NoRole
     MsgRole_AcceptRole = QMessageBox.ButtonRole.AcceptRole
     MsgRole_RejectRole = QMessageBox.ButtonRole.RejectRole
+    MsgRole_ActionRole = QMessageBox.ButtonRole.ActionRole
+    
+    # QMessageBox Icon
+    MsgIcon_Question = QMessageBox.Icon.Question
+    MsgIcon_Information = QMessageBox.Icon.Information
+    MsgIcon_Warning = QMessageBox.Icon.Warning
+    MsgIcon_Critical = QMessageBox.Icon.Critical
     
     # Event types
     User = QtCore.QEvent.Type.User
     KeyPress = QtCore.QEvent.Type.KeyPress
+    
+    # CursorShape
+    PointingHandCursor = QtCore.Qt.CursorShape.PointingHandCursor
+    ArrowCursor = QtCore.Qt.CursorShape.ArrowCursor
+    
+    # AspectRatioMode
+    KeepAspectRatio = QtCore.Qt.AspectRatioMode.KeepAspectRatio
+    
+    # TransformationMode
+    SmoothTransformation = QtCore.Qt.TransformationMode.SmoothTransformation
+    
+    # KeyboardModifier
+    NoModifier = QtCore.Qt.KeyboardModifier.NoModifier
+    
+    # Additional Key codes
+    Key_F2 = QtCore.Qt.Key.Key_F2
+    Key_F6 = QtCore.Qt.Key.Key_F6
+    Key_F7 = QtCore.Qt.Key.Key_F7
+    Key_D = QtCore.Qt.Key.Key_D
+    Key_L = QtCore.Qt.Key.Key_L
+    Key_P = QtCore.Qt.Key.Key_P
+    Key_R = QtCore.Qt.Key.Key_R
+    Key_N = QtCore.Qt.Key.Key_N
+    Key_W = QtCore.Qt.Key.Key_W
+    Key_T = QtCore.Qt.Key.Key_T
+    Key_Up = QtCore.Qt.Key.Key_Up
+    Key_Down = QtCore.Qt.Key.Key_Down
+    Key_Right = QtCore.Qt.Key.Key_Right
+    Key_Left = QtCore.Qt.Key.Key_Left
+    Key_Tab = QtCore.Qt.Key.Key_Tab
 
 # Add QApplication for convenience
 def get_qapplication():

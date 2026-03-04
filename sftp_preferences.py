@@ -19,6 +19,16 @@ DEFAULT_PREFERENCES = {
     "show_hidden_files": False,
     "default_local_directory": "",
     "default_remote_directory": "",
+    "tree_view_position": "above",
+    "toolbar_buttons": [
+        {"id": "refresh", "text": "↻ Refresh", "tooltip": "Refresh current directory", "visible": True},
+        {"id": "upload", "text": "↑ Upload", "tooltip": "Upload selected file(s)", "visible": True},
+        {"id": "download", "text": "↓ Download", "tooltip": "Download selected file(s)", "visible": True},
+        {"id": "new_folder", "text": "+ Folder", "tooltip": "Create new folder", "visible": True},
+        {"id": "delete", "text": "✕ Delete", "tooltip": "Delete selected file(s)", "visible": True},
+        {"id": "rename", "text": "⇄ Rename", "tooltip": "Rename selected file(s)", "visible": True},
+        {"id": "view", "text": "👁 View", "tooltip": "View/Edit selected text file", "visible": True},
+    ]
 }
 
 
@@ -80,7 +90,12 @@ class Preferences:
     
     def get_bool(self, key: str, default: bool = False) -> bool:
         """Get a boolean preference"""
-        return bool(self.get(key, default))
+        value = self.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ('true', '1', 'yes', 'on')
+        return bool(value)
     
     def set_bool(self, key: str, value: bool):
         """Set a boolean preference"""

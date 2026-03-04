@@ -6,14 +6,19 @@ from PyQt6.QtCore import QThreadPool, QTimer, QMutex, QMutexLocker, pyqtSignal
 from icecream import ic
 import inspect
 import os
+import json
 import queue
 import time
+import stat
 
-from sftp_downloadworkerclass import Transfer, DownloadWorker, sftp_queue, clear_sftp_queue
+from sftp_downloadworkerclass import Transfer, DownloadWorker, SFTPJob, sftp_queue, clear_sftp_queue
 from sftp_theme import (BUTTON_STYLE_DARK, LIST_WIDGET_STYLE_DARK, PROGRESS_BAR_STYLE_DARK,
                         TEXT_EDIT_STYLE_DARK, DARK_THEME)
 from sftp_config import MAX_TRANSFERS
 from sftp_preferences import get_preferences
+
+
+QUEUE_FILE_PATH = os.path.join(os.path.expanduser('~'), '.sftp_client_transfer_queue.json')
 
 
 class TransferQueueWidget(QWidget):
@@ -34,6 +39,7 @@ class TransferQueueWidget(QWidget):
     signal_transfer_started = pyqtSignal(int, str)  # (count, message)
     signal_transfer_completed = pyqtSignal(int, str)  # (count, message)
     signal_transfer_error = pyqtSignal(int, str)  # (count, message)
+    signal_transfer_progress = pyqtSignal(int, int, float, float)  # (transfer_id, percent, speed_bps, eta_sec)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -158,6 +164,7 @@ class TransferQueueWidget(QWidget):
         self.check_queue_timer = QTimer(self)
         self.check_queue_timer.timeout.connect(self.check_and_start_transfers)
         self.check_queue_timer.start(100)  # Check every 100 ms
+        self._timer_tick_count = 0
 
     def add_queue_item(self, item, transfer_id):
         """Add item to queue with transfer_id as unique identifier"""
@@ -216,20 +223,29 @@ class TransferQueueWidget(QWidget):
     def check_and_start_transfers(self):
         """Check for new transfers in queue and start them"""
         try:
+            self._timer_tick_count = getattr(self, '_timer_tick_count', 0) + 1
+            
             # Fix active transfers counter
             with QMutexLocker(self._transfer_lock):
                 actual_active = len([t for t in self.transfers if t.active])
                 if self.active_transfers != actual_active:
+                    ic(f"Fixing active_transfers: {self.active_transfers} -> {actual_active}")
                     self.active_transfers = actual_active
             
             # Check if we've reached max transfers
             with QMutexLocker(self._active_transfers_lock):
                 if self.active_transfers >= MAX_TRANSFERS:
+                    # Log every 50 ticks (5 seconds) to avoid spam
+                    if self._timer_tick_count % 50 == 0:
+                        ic(f"Max transfers reached: {self.active_transfers}/{MAX_TRANSFERS}")
                     return
             
-            # Check if queue has items (debug)
-            if sftp_queue.empty():
+            # Check if queue has items
+            queue_size = sftp_queue.qsize()
+            if queue_size == 0:
                 return
+            
+            ic(f"Queue has {queue_size} items, active_transfers={self.active_transfers}")
 
             # Get job from queue with timeout (thread-safe, avoids race condition)
             try:
@@ -239,6 +255,7 @@ class TransferQueueWidget(QWidget):
                 return  # Queue is empty or error
             
             if not job:
+                ic("Got null job from queue")
                 return
             
             # Debug: log job details
@@ -542,14 +559,18 @@ class TransferQueueWidget(QWidget):
 
     def _release_transfer(self, transfer_id):
         """Release transfer resources"""
+        ic(f"_release_transfer called for {transfer_id}")
         try:
             with QMutexLocker(self._transfer_lock):
                 if transfer_id in self._released_transfers:
+                    ic(f"_release_transfer: {transfer_id} already released")
                     return
                 self._released_transfers.add(transfer_id)
 
             with QMutexLocker(self._active_transfers_lock):
+                old_count = self.active_transfers
                 self.active_transfers = max(self.active_transfers - 1, 0)
+                ic(f"_release_transfer: active_transfers {old_count} -> {self.active_transfers}")
 
             self.remove_queue_item(transfer_id)
             self.update_overall_progress()
@@ -559,15 +580,18 @@ class TransferQueueWidget(QWidget):
 
     def transfer_finished(self, transfer_id):
         """Handle transfer completion"""
+        ic(f"transfer_finished called for {transfer_id}")
         try:
             if not transfer_id:
                 return
                 
             transfer = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
             if not transfer:
+                ic(f"transfer_finished: transfer {transfer_id} not found")
                 return
 
             transfer.active = False
+            ic(f"transfer_finished: marked transfer {transfer_id} as inactive")
             
             try:
                 if transfer.status_label:
@@ -648,6 +672,15 @@ class TransferQueueWidget(QWidget):
             if hasattr(self, 'text_console'):
                 self.text_console.append(f"ERROR Transfer {transfer_id}: {message}")
             
+            # Notify observers to refresh browsers (local file may have been created before error)
+            try:
+                if hasattr(transfer, 'download_worker') and transfer.download_worker and \
+                   hasattr(transfer.download_worker, 'command') and \
+                   transfer.download_worker.command in ["upload", "download"]:
+                    self.notify_observees()
+            except (OSError, IOError, RuntimeError):
+                pass
+            
             # Emit transfer error signal
             self.signal_transfer_error.emit(1, f"Transfer failed: {message}")
             
@@ -672,11 +705,15 @@ class TransferQueueWidget(QWidget):
         try:
             if not transfer_id:
                 return
-                
+            
             transfer = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
             if not transfer or not transfer.active:
                 return
 
+            speed = speed_bps if speed_bps is not None else 0.0
+            eta = eta_sec if eta_sec is not None else 0.0
+            self.signal_transfer_progress.emit(transfer_id, value, speed, eta)
+            
             try:
                 if transfer.progress_bar:
                     transfer.progress_bar.setValue(value)
@@ -812,11 +849,11 @@ class TransferQueueWidget(QWidget):
     def cleanup(self):
         """Cleanup resources when widget is destroyed"""
         try:
-            # Stop timers first to prevent new transfers
+            self.save_pending_transfers()
+            
             if hasattr(self, 'check_queue_timer'):
                 self.check_queue_timer.stop()
 
-            # Cancel all transfers
             for transfer in self.transfers[:]:
                 try:
                     if transfer.active and hasattr(transfer, 'download_worker'):
@@ -824,16 +861,148 @@ class TransferQueueWidget(QWidget):
                 except (OSError, IOError, RuntimeError):
                     pass
 
-            # Clear the queue
             clear_sftp_queue()
 
-            # Wait for threads with timeout
             if hasattr(self, 'thread_pool'):
                 self.thread_pool.waitForDone(2000)
 
-            # Final cleanup of transfers list
             self.transfers.clear()
             self.active_transfers = 0
 
         except (OSError, IOError, RuntimeError) as e:
             print(f"Error in cleanup: {e}")
+    
+    def save_pending_transfers(self):
+        """Save pending and paused transfers to disk for restoration on next launch"""
+        try:
+            pending_jobs = []
+            
+            while not sftp_queue.empty():
+                try:
+                    job = sftp_queue.get_nowait()
+                    if job and hasattr(job, 'job_id'):
+                        # Skip jobs with empty paths
+                        src = getattr(job, 'source_path', '') or ''
+                        dst = getattr(job, 'destination_path', '') or ''
+                        if not src or not dst:
+                            ic(f"Skipping queued job with empty path: src={src!r}, dst={dst!r}")
+                            continue
+                        pending_jobs.append({
+                            'source_path': src,
+                            'is_source_remote': getattr(job, 'is_source_remote', False),
+                            'destination_path': dst,
+                            'is_destination_remote': getattr(job, 'is_destination_remote', False),
+                            'hostname': getattr(job, 'hostname', ''),
+                            'username': getattr(job, 'username', ''),
+                            'password': getattr(job, 'password', ''),
+                            'port': getattr(job, 'port', 22),
+                            'command': getattr(job, 'command', 'download'),
+                            'job_id': getattr(job, 'job_id'),
+                            'key': getattr(job, 'key'),
+                            'status': 'queued'
+                        })
+                except queue.Empty:
+                    break
+            
+            with QMutexLocker(self._transfer_lock):
+                for transfer in self.transfers:
+                    if transfer.active or (hasattr(transfer, 'paused') and transfer.paused):
+                        if hasattr(transfer, 'download_worker') and transfer.download_worker:
+                            worker = transfer.download_worker
+                            # Use job_source/job_destination (DownloadWorker attributes)
+                            src = getattr(worker, 'job_source', '') or ''
+                            dst = getattr(worker, 'job_destination', '') or ''
+                            # Skip transfers with empty paths
+                            if not src or not dst:
+                                continue
+                            pending_jobs.append({
+                                'source_path': src,
+                                'is_source_remote': getattr(worker, 'is_source_remote', False),
+                                'destination_path': dst,
+                                'is_destination_remote': getattr(worker, 'is_destination_remote', False),
+                                'hostname': getattr(worker, 'hostname', ''),
+                                'username': getattr(worker, 'username', ''),
+                                'password': getattr(worker, 'password', ''),
+                                'port': getattr(worker, 'port', 22),
+                                'command': getattr(worker, 'command', 'download'),
+                                'job_id': transfer.transfer_id,
+                                'key': getattr(worker, 'temp_key', None),
+                                'status': 'paused' if getattr(transfer, 'paused', False) else 'active'
+                            })
+            
+            if pending_jobs:
+                old_umask = os.umask(0o077)
+                try:
+                    with open(QUEUE_FILE_PATH, 'w') as f:
+                        json.dump(pending_jobs, f, indent=2)
+                    os.chmod(QUEUE_FILE_PATH, stat.S_IRUSR | stat.S_IWUSR)
+                    ic(f"Saved {len(pending_jobs)} pending transfers to {QUEUE_FILE_PATH}")
+                finally:
+                    os.umask(old_umask)
+            else:
+                if os.path.exists(QUEUE_FILE_PATH):
+                    try:
+                        os.unlink(QUEUE_FILE_PATH)
+                    except OSError:
+                        pass
+            
+        except (OSError, IOError, json.JSONEncodeError) as e:
+            ic(f"Error saving pending transfers: {e}")
+    
+    def load_pending_transfers(self):
+        """Load pending transfers from disk and restore them to the queue"""
+        try:
+            if not os.path.exists(QUEUE_FILE_PATH):
+                return 0
+            
+            with open(QUEUE_FILE_PATH, 'r') as f:
+                saved_jobs = json.load(f)
+            
+            if not saved_jobs:
+                return 0
+            
+            restored_count = 0
+            for job_data in saved_jobs:
+                try:
+                    src = job_data.get('source_path', '')
+                    dst = job_data.get('destination_path', '')
+                    # Skip jobs with empty paths
+                    if not src or not dst:
+                        ic(f"Skipping job with empty path: src={src!r}, dst={dst!r}")
+                        continue
+                    
+                    job = SFTPJob(
+                        source_path=src,
+                        is_source_remote=job_data.get('is_source_remote', False),
+                        destination_path=dst,
+                        is_destination_remote=job_data.get('is_destination_remote', False),
+                        hostname=job_data.get('hostname', ''),
+                        username=job_data.get('username', ''),
+                        password=job_data.get('password', ''),
+                        port=job_data.get('port', 22),
+                        command=job_data.get('command', 'download'),
+                        job_id=job_data.get('job_id'),
+                        key=job_data.get('key')
+                    )
+                    
+                    sftp_queue.put(job)
+                    restored_count += 1
+                    
+                except (KeyError, TypeError) as e:
+                    ic(f"Error restoring job: {e}")
+                    continue
+            
+            try:
+                os.unlink(QUEUE_FILE_PATH)
+            except OSError:
+                pass
+            
+            if restored_count > 0:
+                self.text_console.append(f"Restored {restored_count} pending transfer(s) from previous session")
+                ic(f"Restored {restored_count} pending transfers")
+            
+            return restored_count
+            
+        except (OSError, IOError, json.JSONDecodeError) as e:
+            ic(f"Error loading pending transfers: {e}")
+            return 0

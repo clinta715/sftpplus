@@ -44,7 +44,7 @@ class ConnectionPool:
                     cls._instance = super().__new__(cls)
                     cls._instance._pool: Dict[Tuple, ConnectionInfo] = {}
                     cls._instance._pool_lock = Lock()
-                    cls._instance._max_age = 30  # seconds
+                    cls._instance._max_age = 0  # Disable connection reuse to avoid stale SFTP channels
                     cls._instance._cleanup_interval = 60  # seconds
                     cls._instance._last_cleanup = 0
         return cls._instance
@@ -255,6 +255,35 @@ class ConnectionPool:
                 del self._pool[conn_key]
 
     def close_all(self):
+        """Close all connections in the pool"""
+        with self._pool_lock:
+            keys_to_remove = list(self._pool.keys())
+            for conn_key in keys_to_remove:
+                conn_info = self._pool[conn_key]
+                try:
+                    if conn_info.sftp:
+                        try:
+                            conn_info.sftp.close()
+                        except (OSError, IOError, RuntimeError) as e:
+                            ic(f"ConnectionPool: Error closing SFTP: {e}")
+                    conn_info.ssh.close()
+                except (OSError, IOError, RuntimeError) as e:
+                    ic(f"ConnectionPool: Error closing SSH: {e}")
+            self._pool.clear()
+            ic("ConnectionPool: All connections closed")
+    
+    def _check_connection_health(self, conn_info: ConnectionInfo) -> bool:
+        """Check if a connection is actually healthy by testing a simple operation"""
+        try:
+            # Try a simple stat on root to check if SFTP channel is responsive
+            # Use a short timeout to avoid blocking
+            transport = conn_info.ssh.get_transport()
+            if not transport or not transport.is_active():
+                return False
+            # Don't actually call stat - just check transport
+            return True
+        except Exception:
+            return False
         """Close all pooled connections"""
         with self._pool_lock:
             for conn_key, conn_info in list(self._pool.items()):

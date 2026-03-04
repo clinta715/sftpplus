@@ -9,6 +9,7 @@ from icecream import ic
 from sftp_filebrowserclass import FileBrowser
 from sftp_remotefilebrowserclass import RemoteFileBrowser
 from sftp_theme import DARK_THEME, LIGHT_THEME
+from sftp_preview_widget import FilePreviewWidget
 
 
 class FileBrowserPanel(QWidget):
@@ -34,14 +35,13 @@ class FileBrowserPanel(QWidget):
         super().__init__(parent)
         self.session_id = session_id
         self._local_browser_visible = True
+        self._preview_visible = False
         self._auto_initialize = auto_initialize
         self._initialized = False
         self._init_ui()
         self._setup_browsers()
         self._connect_signals()
         
-        # If auto_initialize is False, defer initialization
-        # Caller must call initialize() explicitly after connection is ready
         if not auto_initialize:
             ic(f"FileBrowserPanel: Created with deferred initialization for session {session_id}")
         else:
@@ -61,17 +61,14 @@ class FileBrowserPanel(QWidget):
             self.right_browser.initialize()
     
     def _init_ui(self):
-        """Initialize the UI layout"""
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         
-        # Toolbar with toggle button
         toolbar_layout = QHBoxLayout()
         toolbar_layout.setContentsMargins(5, 2, 5, 2)
         toolbar_layout.setSpacing(5)
         
-        # Toggle button for local browser
         self.toggle_local_btn = QToolButton()
         self.toggle_local_btn.setText("◀")
         self.toggle_local_btn.setToolTip("Toggle Local Files")
@@ -80,7 +77,6 @@ class FileBrowserPanel(QWidget):
         self.toggle_local_btn.clicked.connect(self._toggle_local_browser)
         toolbar_layout.addWidget(self.toggle_local_btn)
         
-        # Labels
         self.local_label = QLabel("📁 Local Files")
         self.local_label.setStyleSheet(f"font-weight: bold; color: {DARK_THEME['text_secondary']};")
         toolbar_layout.addWidget(self.local_label)
@@ -93,42 +89,55 @@ class FileBrowserPanel(QWidget):
         
         toolbar_layout.addStretch()
         
+        self.toggle_preview_btn = QToolButton()
+        self.toggle_preview_btn.setText("👁")
+        self.toggle_preview_btn.setToolTip("Toggle Preview (Ctrl+P)")
+        self.toggle_preview_btn.setCheckable(True)
+        self.toggle_preview_btn.setChecked(False)
+        self.toggle_preview_btn.clicked.connect(self.toggle_preview)
+        toolbar_layout.addWidget(self.toggle_preview_btn)
+        
         main_layout.addLayout(toolbar_layout)
         
-        # Separator line
         line = QFrame()
         line.setFrameShape(Qt.Frame_HLine)
         line.setFrameShadow(Qt.Frame_Sunken)
         line.setStyleSheet(f"color: {DARK_THEME['border']};")
         main_layout.addWidget(line)
         
-        # Splitter for browsers
-        splitter = QSplitter(Qt.Horizontal)
+        content_layout = QHBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
         
-        # Local browser container (will be toggleable)
+        self.browser_splitter = QSplitter(Qt.Horizontal)
+        
         self.local_container = QWidget()
         local_layout = QVBoxLayout()
         local_layout.setContentsMargins(0, 0, 0, 0)
         local_layout.setSpacing(0)
         self.local_container.setLayout(local_layout)
         
-        # Remote browser container
         self.remote_container = QWidget()
         remote_layout = QVBoxLayout()
         remote_layout.setContentsMargins(0, 0, 0, 0)
         remote_layout.setSpacing(0)
         self.remote_container.setLayout(remote_layout)
         
-        splitter.addWidget(self.local_container)
-        splitter.addWidget(self.remote_container)
-        splitter.setSizes([300, 500])  # Default split ratio
+        self.browser_splitter.addWidget(self.local_container)
+        self.browser_splitter.addWidget(self.remote_container)
+        self.browser_splitter.setSizes([300, 500])
         
-        main_layout.addWidget(splitter)
+        content_layout.addWidget(self.browser_splitter)
         
-        # Store reference to layout for adding browsers
+        self.preview_widget = FilePreviewWidget(self)
+        self.preview_widget.setVisible(False)
+        content_layout.addWidget(self.preview_widget)
+        
+        main_layout.addLayout(content_layout, stretch=1)
+        
         self._local_layout = local_layout
         self._remote_layout = remote_layout
-        self._splitter = splitter
+        self._splitter = self.browser_splitter
         
         self.setLayout(main_layout)
     
@@ -147,21 +156,66 @@ class FileBrowserPanel(QWidget):
         self.right_browser.table.setFocusPolicy(Qt.StrongFocus)
     
     def _connect_signals(self):
-        """Connect browser signals"""
-        # Observer pattern
         self.left_browser.add_observer(self.right_browser)
         self.right_browser.add_observer(self.left_browser)
         
-        # Message signals
         self.left_browser.message_signal.connect(self._handle_message)
         self.right_browser.message_signal.connect(self._handle_message)
         
-        # Transfer started signal (pass through from both browsers)
         self.left_browser.transfer_started.connect(self.transfer_started)
         self.right_browser.transfer_started.connect(self.transfer_started)
+        
+        self.right_browser.table.selectionModel().selectionChanged.connect(
+            self._on_remote_selection_changed
+        )
+    
+    def _on_remote_selection_changed(self, selected, deselected):
+        if not self._preview_visible:
+            return
+        
+        indexes = self.right_browser.table.selectionModel().selectedRows()
+        if not indexes:
+            self.preview_widget.clear_preview()
+            return
+        
+        index = indexes[0]
+        proxy_model = self.right_browser.table.model()
+        source_index = proxy_model.mapToSource(index)
+        row = source_index.row()
+        
+        if row < 0 or row >= len(self.right_browser.model.file_list):
+            return
+        
+        file_info = self.right_browser.model.file_list[row]
+        
+        filename = file_info.get('filename', file_info.get('name', ''))
+        is_dir = file_info.get('is_directory', file_info.get('is_dir', False))
+        
+        if is_dir:
+            self.preview_widget.clear_preview()
+            return
+        
+        creds = self._get_credentials(self.right_browser.session_id)
+        current_dir = creds.get('current_remote_directory', '.')
+        file_path = f"{current_dir}/{filename}".replace('//', '/')
+        
+        file_size = file_info.get('size', file_info.get('st_size', 0))
+        if hasattr(file_info.get('attr'), 'st_size'):
+            file_size = file_info['attr'].st_size
+        
+        modified = file_info.get('modified', file_info.get('mtime', ''))
+        permissions = file_info.get('permissions', file_info.get('mode', ''))
+        
+        self.preview_widget.preview_file(
+            file_path, file_size, modified, permissions,
+            sftp_api=self.right_browser.session_api
+        )
+    
+    def _get_credentials(self, session_id):
+        from sftp_creds import get_credentials
+        return get_credentials(session_id)
     
     def _toggle_local_browser(self):
-        """Toggle local browser visibility"""
         self._local_browser_visible = self.toggle_local_btn.isChecked()
         
         if self._local_browser_visible:
@@ -171,8 +225,18 @@ class FileBrowserPanel(QWidget):
             self.local_container.hide()
             self.toggle_local_btn.setText("▶")
         
-        # Update splitter sizes
         self._update_splitter_sizes()
+    
+    def toggle_preview(self):
+        self._preview_visible = not self._preview_visible
+        self.toggle_preview_btn.setChecked(self._preview_visible)
+        
+        if self._preview_visible:
+            self.preview_widget.show()
+            self._on_remote_selection_changed(None, None)
+        else:
+            self.preview_widget.hide()
+            self.preview_widget.clear_preview()
     
     def _update_splitter_sizes(self):
         """Update splitter sizes based on visibility"""

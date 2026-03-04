@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-03-03
+
+### Fixed
+- **Auto-clear bug**: `get_bool()` in preferences was returning `True` for string "false" (non-empty strings are truthy). Now properly parses string values.
+- **Progress display**: Added `signal_transfer_progress` signal to show transfer progress in status bar
+- **Browser refresh on error**: Added `notify_observees()` call in `transfer_error()` to refresh browsers even when transfers fail
+- **Error feedback**: Transfers tab now focuses when transfers fail so users can see error messages
+- **Case-insensitive sorting**: Already implemented in `DirectoryFirstSortProxyModel` and `FileTableModel`
+
+### Changed
+- Status bar now shows transfer progress, speed (KB/s or MB/s), and ETA during active transfers
+
 ## [2.0.0] - 2026-02-27
 
 ### Added

@@ -7,43 +7,30 @@ _creds_lock = threading.Lock()
 
 def get_home_directory():
     """Get the user's home directory reliably"""
-    import os
     home = os.path.expanduser("~")
     if home and os.path.exists(home):
         return home
-    return "/Users/clint"  # Fallback
+    return os.path.abspath(".")
 
-# Function to retrieve credentials based on session_id
 def get_credentials(session_id):
     with _creds_lock:
         creds = sftp_current_creds.get(session_id, {})
     
     home_dir = get_home_directory()
     
-    # Only return default values if truly no credentials exist
-    if not creds or not isinstance(creds, dict):
-        return {
-            'hostname': 'localhost',
-            'username': 'guest',
-            'password': 'guest',
-            'port': 22,
-            'key': "None",
-            'current_local_directory': home_dir,
-            'current_remote_directory': '.'
-        }
-    
-    # If creds exists but is missing keys, return defaults for missing keys
     defaults = {
-        'hostname': 'localhost',
-        'username': 'guest',
-        'password': 'guest',
+        'hostname': '',
+        'username': '',
+        'password': '',
         'port': 22,
-        'key': "None",
+        'key': '',
         'current_local_directory': home_dir,
         'current_remote_directory': '.'
     }
     
-    # Merge with defaults for any missing keys
+    if not creds or not isinstance(creds, dict):
+        return defaults.copy()
+    
     result = defaults.copy()
     result.update(creds)
     return result

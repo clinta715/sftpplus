@@ -1,6 +1,7 @@
 from PyQt6.QtWidgets import QInputDialog, QMessageBox
-from sftp_creds import get_credentials
-from sftp_downloadworkerclass import add_sftp_job, create_random_integer
+from sftp_qt_compat import Qt
+from sftp_creds import get_credentials, create_random_integer
+from sftp_downloadworkerclass import add_sftp_job
 from sftp_preferences import get_preferences
 import os
 from icecream import ic
@@ -304,18 +305,18 @@ class TransferHandlerMixin:
             String action: 'overwrite', 'skip', 'cancel', 'resume', 'overwrite_all', 'skip_all', 'resume_all'
         """
         msg = QMessageBox(self)
-        msg.setIcon(QMessageBox.Question)
+        msg.setIcon(Qt.MsgIcon_Question)
         msg.setText(f"File already exists:\n{item_path}")
         msg.setWindowTitle("File Exists")
         
-        overwrite_btn = msg.addButton("Overwrite", QMessageBox.ActionRole)
-        skip_btn = msg.addButton("Skip", QMessageBox.ActionRole)
+        overwrite_btn = msg.addButton("Overwrite", Qt.MsgRole_ActionRole)
+        skip_btn = msg.addButton("Skip", Qt.MsgRole_ActionRole)
         cancel_btn = msg.addButton(Qt.MsgBtn_Cancel)
-        resume_btn = msg.addButton("Resume", QMessageBox.ActionRole)
+        resume_btn = msg.addButton("Resume", Qt.MsgRole_ActionRole)
         
-        msg.addButton("Overwrite All", QMessageBox.ActionRole)
-        msg.addButton("Skip All", QMessageBox.ActionRole)
-        msg.addButton("Resume All", QMessageBox.ActionRole)
+        msg.addButton("Overwrite All", Qt.MsgRole_ActionRole)
+        msg.addButton("Skip All", Qt.MsgRole_ActionRole)
+        msg.addButton("Resume All", Qt.MsgRole_ActionRole)
         
         msg.exec()
         
