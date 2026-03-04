@@ -68,6 +68,8 @@ class FileBrowser(Browser):
             if os.path.isfile(local_path):
                 os.remove(local_path)
                 self.message_signal.emit(f"File '{local_path}' removed successfully.")
+                self.model.get_files()
+                self.notify_observers()
                 return
 
             # It's a directory, check if it has child items
@@ -104,6 +106,7 @@ class FileBrowser(Browser):
             # Remove the directory
             shutil.rmtree(local_path)
             self.model.get_files()
+            self.notify_observers()
 
         except (OSError, IOError, RuntimeError) as e:
             self.message_signal.emit(f"remove_directory_with_prompt() {e}")

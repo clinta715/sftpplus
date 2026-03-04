@@ -15,7 +15,8 @@ import threading
 
 from sftp_creds import get_credentials, create_random_integer, set_credentials
 from sftp_downloadworkerclass import (create_response_queue, delete_response_queue,
-                                       check_response_queue, QueueItem, ResponseQueueContext)
+                                       check_response_queue, QueueItem, ResponseQueueContext,
+                                       add_sftp_job)
 from sftp_session_executor import SFTPSessionAPI, create_session_api
 from sftp_session import SFTPCredentials, get_session_manager
 from sftp_browser_mixins import TreeViewMixin, BookmarkMixin, FileOpsMixin
@@ -548,7 +549,8 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         
         for observer in observers_copy:
             try:
-                observer.get_files()  # Notify the observer by calling its update method
+                # Use Qt QueuedConnection to ensure refresh happens on main thread
+                QTimer.singleShot(0, observer.get_files)
             except AttributeError as ae:
                 ic("Observer", observer, "does not implement 'get_files' method.", ae)
             except (AttributeError, RuntimeError) as e:
@@ -1293,10 +1295,21 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                                 queue_item = QueueItem(os.path.basename(selected_path), job_id)
                                 
                                 resume = (action == "resume")
+                                command = "resume" if resume else "upload"
                                 
                                 try:
-                                    ops = self.get_sftp_operations()
-                                    ops.upload(selected_path, remote_entry_path, job_id=str(job_id), resume=resume)
+                                    creds = get_credentials(self.session_id)
+                                    add_sftp_job(
+                                        selected_path, False,  # source is local
+                                        remote_entry_path, True,  # dest is remote
+                                        creds.get('hostname', ''),
+                                        creds.get('username', ''),
+                                        creds.get('password', ''),
+                                        creds.get('port', 22),
+                                        command,
+                                        job_id,
+                                        creds.get('key')
+                                    )
                                     self.transfer_started.emit(str(job_id))
                                 except Exception as e:
                                     self.message_signal.emit(f"Upload failed: {e}")
@@ -1491,11 +1504,19 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                     job_id = create_random_integer()
                     
                     try:
-                        ops = self.get_sftp_operations()
-                        if is_source_remote:
-                            ops.download(source_path, dest_path, job_id=str(job_id), resume=resume)
-                        else:
-                            ops.upload(source_path, dest_path, job_id=str(job_id), resume=resume)
+                        creds = get_credentials(self.session_id)
+                        command = "resume" if resume else ("download" if is_source_remote else "upload")
+                        add_sftp_job(
+                            source_path, is_source_remote,
+                            dest_path, not is_source_remote,
+                            creds.get('hostname', ''),
+                            creds.get('username', ''),
+                            creds.get('password', ''),
+                            creds.get('port', 22),
+                            command,
+                            job_id,
+                            creds.get('key')
+                        )
                         self.transfer_started.emit(str(job_id))
                     except Exception as e:
                         self.message_signal.emit(f"Transfer failed: {e}")

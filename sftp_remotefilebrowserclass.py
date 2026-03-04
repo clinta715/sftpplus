@@ -11,6 +11,7 @@ from sftp_remotefiletablemodel import RemoteFileTableModel
 from sftp_sortfiltermodel import DirectoryFirstSortProxyModel
 from sftp_creds import (get_credentials, create_random_integer, set_credentials,
                         verify_credential_update, verify_directory_consistency)
+from sftp_downloadworkerclass import add_sftp_job
 from sftp_preferences import get_preferences
 
 # SECURITY: Debug logging to /tmp is DISABLED to prevent sensitive information leakage
@@ -553,8 +554,19 @@ class RemoteFileBrowser(FileBrowser):
                                 ic(f"upload_download: DEBUG - resume={resume}")
                                 
                                 try:
-                                    ops = self.get_sftp_operations()
-                                    ops.download(remote_entry_path, local_entry_path, job_id=str(job_id), resume=resume)
+                                    creds = get_credentials(self.session_id)
+                                    command = "resume" if resume else "download"
+                                    add_sftp_job(
+                                        remote_entry_path, True,  # source is remote
+                                        local_entry_path, False,  # dest is local
+                                        creds.get('hostname', ''),
+                                        creds.get('username', ''),
+                                        creds.get('password', ''),
+                                        creds.get('port', 22),
+                                        command,
+                                        job_id,
+                                        creds.get('key')
+                                    )
                                     self.transfer_started.emit(str(job_id))
                                 except Exception as e:
                                     self.message_signal.emit(f"Download failed: {e}")

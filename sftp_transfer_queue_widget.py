@@ -200,21 +200,27 @@ class TransferQueueWidget(QWidget):
         
         for observee in observees_copy:
             try:
-                # Check if this is a remote browser that needs force_refresh
-                if hasattr(observee, 'model') and hasattr(observee.model, 'get_files'):
-                    # RemoteFileTableModel supports force_refresh parameter
-                    import inspect
-                    sig = inspect.signature(observee.model.get_files)
-                    if 'force_refresh' in sig.parameters:
-                        observee.model.get_files(force_refresh=True)
-                    else:
-                        observee.get_files()
+                # Use Qt QueuedConnection to ensure refresh happens on main thread
+                QTimer.singleShot(0, lambda o=observee: self._do_refresh(o))
+            except (AttributeError, RuntimeError) as e:
+                ic("Error queuing observer refresh", observee, e)
+    
+    def _do_refresh(self, observee):
+        """Actually perform the refresh - called on main thread"""
+        try:
+            if hasattr(observee, 'model') and hasattr(observee.model, 'get_files'):
+                import inspect
+                sig = inspect.signature(observee.model.get_files)
+                if 'force_refresh' in sig.parameters:
+                    observee.model.get_files(force_refresh=True)
                 else:
                     observee.get_files()
-            except AttributeError as ae:
-                ic("Observee", observee, "does not implement 'get_files' method.", ae)
-            except (AttributeError, RuntimeError) as e:
-                ic("An error occurred while notifying observee", observee, e)
+            else:
+                observee.get_files()
+        except AttributeError as ae:
+            ic("Observee", observee, "does not implement 'get_files' method.", ae)
+        except (AttributeError, RuntimeError) as e:
+            ic("An error occurred while notifying observee", observee, e)
 
     def update_overall_progress(self):
         """Update the overall progress - no longer displayed in compact UI"""
