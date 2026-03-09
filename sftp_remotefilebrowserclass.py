@@ -452,7 +452,14 @@ class RemoteFileBrowser(FileBrowser):
                 # Use sibling(row, 0) to correctly handle proxy model mapping
                 filename_index = index.sibling(row, 0)
                 selected_item_text = current_browser.model().data(filename_index, Qt.DisplayRole)
-                ic(f"upload_download: row={row}, selected_item_text={repr(selected_item_text)}")
+                attr_item = current_browser.model().data(filename_index, Qt.UserRole)
+                
+                # Check if it's a directory using cached metadata
+                is_dir = False
+                if attr_item:
+                    is_dir = stat.S_ISDIR(attr_item.st_mode)
+                elif selected_item_text == "..":
+                    is_dir = True
                 
                 # Remove type prefix if present ([DIR], [FILE], 📁, 📄, etc.)
                 filename = selected_item_text
@@ -461,11 +468,12 @@ class RemoteFileBrowser(FileBrowser):
                     if filename.startswith(prefix):
                         filename = filename[len(prefix):].lstrip()
                         break
-                
-                ic(f"upload_download: cleaned filename={repr(filename)}")
 
                 if optionalpath:
                     filename = optionalpath
+                    # If optionalpath is provided, we might still need to know if it's a dir
+                    # but usually it's for specific files. For now, assume False if not in model.
+                    if not attr_item: is_dir = self.is_remote_directory(filename)
 
                 if filename:
                     try:
@@ -497,9 +505,7 @@ class RemoteFileBrowser(FileBrowser):
                             local_base_path = creds.get('current_local_directory')
                             local_entry_path = os.path.join(local_base_path, filename)
 
-                        ic(f"upload_download: local_entry_path={repr(local_entry_path)}")
-
-                        if self.is_remote_directory(remote_entry_path):
+                        if is_dir:
                             # For directories, the destination is the PARENT directory (current local dir)
                             # traverse_and_transfer will create the directory inside it.
                             dest_dir = creds.get('current_local_directory')

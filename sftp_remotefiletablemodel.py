@@ -127,6 +127,10 @@ class RemoteFileTableModel(QAbstractTableModel):
             else:
                 return QColor(Qt.Color_darkGray)
 
+        if role == Qt.UserRole:
+            # Return the full attr item if available (file_data[4])
+            return file_data[4] if len(file_data) > 4 else None
+
         return None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
