@@ -11,10 +11,9 @@ import queue
 import time
 import stat
 
-from sftp_downloadworkerclass import Transfer, DownloadWorker, SFTPJob, sftp_queue, clear_sftp_queue
+from sftp_downloadworkerclass import Transfer, DownloadWorker, SFTPJob, sftp_queue, clear_sftp_queue, response_queues, response_queues_lock
 from sftp_theme import (BUTTON_STYLE_DARK, LIST_WIDGET_STYLE_DARK, PROGRESS_BAR_STYLE_DARK,
                         TEXT_EDIT_STYLE_DARK, DARK_THEME)
-from sftp_config import MAX_TRANSFERS
 from sftp_preferences import get_preferences
 
 
@@ -139,6 +138,10 @@ class TransferQueueWidget(QWidget):
 
         # Initialize thread pool
         self.thread_pool = QThreadPool.globalInstance()
+        # Ensure thread pool can handle the maximum number of concurrent transfers
+        # We set it slightly higher than MAX_TRANSFERS to allow for overhead
+        if self.thread_pool.maxThreadCount() < 20:
+            self.thread_pool.setMaxThreadCount(20)
 
         # Setup timers
         self._setup_timers()
@@ -214,9 +217,15 @@ class TransferQueueWidget(QWidget):
                 if 'force_refresh' in sig.parameters:
                     observee.model.get_files(force_refresh=True)
                 else:
-                    observee.get_files()
+                    observee.model.get_files()
             else:
                 observee.get_files()
+            
+            # Force the table view to update
+            if hasattr(observee, 'table'):
+                observee.table.viewport().update()
+                observee.table.repaint()
+                
         except AttributeError as ae:
             ic("Observee", observee, "does not implement 'get_files' method.", ae)
         except (AttributeError, RuntimeError) as e:
@@ -239,11 +248,13 @@ class TransferQueueWidget(QWidget):
                     self.active_transfers = actual_active
             
             # Check if we've reached max transfers
+            prefs = get_preferences()
+            max_concurrent = prefs.get("max_concurrent_transfers", 8)
             with QMutexLocker(self._active_transfers_lock):
-                if self.active_transfers >= MAX_TRANSFERS:
+                if self.active_transfers >= max_concurrent:
                     # Log every 50 ticks (5 seconds) to avoid spam
                     if self._timer_tick_count % 50 == 0:
-                        ic(f"Max transfers reached: {self.active_transfers}/{MAX_TRANSFERS}")
+                        ic(f"Max transfers reached: {self.active_transfers}/{max_concurrent}")
                     return
             
             # Check if queue has items
@@ -597,32 +608,58 @@ class TransferQueueWidget(QWidget):
                 return
 
             transfer.active = False
-            ic(f"transfer_finished: marked transfer {transfer_id} as inactive")
+            
+            # Check if cancelled or errored
+            is_cancelled = False
+            is_error = False
+            
+            with response_queues_lock:
+                if transfer_id in response_queues:
+                    try:
+                        while True:
+                            msg = response_queues[transfer_id].get_nowait()
+                            if msg == "cancelled":
+                                is_cancelled = True
+                            elif msg == "error":
+                                is_error = True
+                    except queue.Empty:
+                        pass
             
             try:
-                if transfer.status_label:
-                    transfer.status_label.setText("✓ Done")
-                    transfer.status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['success']}; font-weight: bold;")
-                if transfer.progress_bar:
-                    transfer.progress_bar.setValue(100)
-                    transfer.progress_bar.setStyleSheet(f"""
-                        QProgressBar {{
-                            border: none;
-                            border-radius: 3px;
-                            background-color: {DARK_THEME['border']};
-                        }}
-                        QProgressBar::chunk {{
-                            background-color: {DARK_THEME['success']};
-                            border-radius: 3px;
-                        }}
-                    """)
+                if is_cancelled:
+                    if transfer.status_label:
+                        transfer.status_label.setText("✗ Cancelled")
+                        transfer.status_label.setStyleSheet("font-size: 10px; color: #FFA500; font-weight: bold;")
+                    if transfer.progress_bar:
+                        transfer.progress_bar.setValue(0)
+                elif is_error:
+                    if transfer.status_label:
+                        transfer.status_label.setText("✗ Error")
+                        transfer.status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['error']}; font-weight: bold;")
+                else:
+                    if transfer.status_label:
+                        transfer.status_label.setText("✓ Done")
+                        transfer.status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['success']}; font-weight: bold;")
+                    if transfer.progress_bar:
+                        transfer.progress_bar.setValue(100)
+                        transfer.progress_bar.setStyleSheet(f"""
+                            QProgressBar {{
+                                border: none;
+                                border-radius: 3px;
+                                background-color: {DARK_THEME['border']};
+                            }}
+                            QProgressBar::chunk {{
+                                background-color: {DARK_THEME['success']};
+                                border-radius: 3px;
+                            }}
+                        """)
             except RuntimeError:
                 pass
 
             # Notify observers
             try:
                 if hasattr(transfer.download_worker, 'command') and \
-                   transfer.download_worker.command in ["upload", "download"]:
+                   transfer.download_worker.command in ["upload", "download", "resume"]:
                     self.notify_observees()
             except (OSError, IOError, RuntimeError):
                 pass
@@ -682,7 +719,7 @@ class TransferQueueWidget(QWidget):
             try:
                 if hasattr(transfer, 'download_worker') and transfer.download_worker and \
                    hasattr(transfer.download_worker, 'command') and \
-                   transfer.download_worker.command in ["upload", "download"]:
+                   transfer.download_worker.command in ["upload", "download", "resume"]:
                     self.notify_observees()
             except (OSError, IOError, RuntimeError):
                 pass
@@ -842,8 +879,8 @@ class TransferQueueWidget(QWidget):
             for transfer in self.transfers[:]:
                 status_text = transfer.status_label.text() if transfer.status_label else ""
                 if (not transfer.active or 
-                    status_text in ["Completed", "Cancelled"] or
-                    status_text.startswith("Error:")):
+                    status_text in ["✓ Done", "✗ Cancelled", "✗ Error", "✗ Failed"] or
+                    "Error:" in status_text):
                     transfers_to_remove.append(transfer.transfer_id)
             
             for transfer_id in transfers_to_remove:

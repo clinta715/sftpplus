@@ -21,7 +21,6 @@ from PyQt6.QtCore import pyqtSignal, QObject, QCoreApplication, QTimer, QEvent, 
 from PyQt6.QtGui import QKeySequence, QShortcut
 import paramiko
 
-from sftp_config import MAX_TRANSFERS
 from sftp_preferences import get_preferences
 from sftp_toolbar_customizer import customize_toolbar
 
@@ -265,9 +264,10 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
 
         # Initialize spin box
         self.spinBox = QSpinBox()
-        self.spinBox.setMinimum(2)
-        self.spinBox.setMaximum(10)
-        self.spinBox.setValue(4)
+        self.spinBox.setMinimum(1)
+        self.spinBox.setMaximum(20)
+        self.spinBox.setValue(prefs.get("max_concurrent_transfers", 8))
+        self.spinBox.setToolTip("Maximum number of concurrent file transfers")
         self.spinBox.valueChanged.connect(self.on_value_changed)  # Ensure this slot is implemented
 
         # Initialize layouts
@@ -391,6 +391,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         # ------------------------------------------------------------------
 
         self.top_bar_layout.addWidget(self.port_selector, 1)
+        self.top_bar_layout.addWidget(QLabel("Concurrent:"), 0)
         self.top_bar_layout.addWidget(self.spinBox)
 
         # keep the existing return-pressed shortcuts
@@ -790,8 +791,9 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             #    self.key_combo.setCurrentIndex(1)  # Select first actual key, not '<none>'
 
     def on_value_changed(self, value):
-        global MAX_TRANSFERS
-        MAX_TRANSFERS = value
+        prefs = get_preferences()
+        prefs.set("max_concurrent_transfers", value)
+        self.update_console(f"Max concurrent transfers set to {value}")
         
     def update_console(self, message):
         # Update status bar with latest message
@@ -1530,8 +1532,22 @@ def main():
     parser.add_argument("-p", "--password", help="Password for the connection")
     parser.add_argument("-P", "--port", type=int, default=22, help="Port for the connection (default: 22)")
     parser.add_argument("-K", "--key", help="SSH key")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode (outputs to debug.log)")
     args = parser.parse_args()
+
+    # Configure icecream based on debug flag
+    _debug_log_file = None
+    if args.debug:
+        # Enable debug output to file
+        log_dir = os.path.expanduser("~/.sftp_client")
+        os.makedirs(log_dir, exist_ok=True)
+        debug_log_path = os.path.join(log_dir, "debug.log")
+        _debug_log_file = open(debug_log_path, 'a')
+        ic.configureOutput(outputFunction=_debug_log_file.write)
+        ic(f"=== Debug session started at {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
+    else:
+        # Disable icecream for performance
+        ic.disable()
 
     app = QApplication(sys.argv)
 

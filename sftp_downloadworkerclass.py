@@ -10,7 +10,6 @@ import time
 import threading
 import shlex
 
-from sftp_config import MAX_TRANSFERS
 from sftp_connection_pool import ConnectionPool
 
 
@@ -506,16 +505,21 @@ class DownloadWorker(QRunnable):
             else:
                 transfer_func(*args, callback=progress_wrapper)
                 
-        except (OSError, IOError, paramiko.SSHException) as exc:
-            ic(f"Transfer {self.transfer_id}: Exception during transfer - {type(exc).__name__}: {exc}")
-            ic(f"Transfer {self.transfer_id}: Full exception traceback:")
-            import traceback
-            traceback.print_exc()
-            self.signals.message.emit(
-                self.transfer_id,
-                f"Transfer {self.transfer_id} was interrupted: {exc}"
-            )
-            raise
+        except (OSError, IOError, Exception) as exc:
+            # Handle cancellation gracefully - don't show scary error messages
+            if self._stop_flag:
+                self.signals.message.emit(
+                    self.transfer_id,
+                    f"Transfer cancelled"
+                )
+                put_response(self.transfer_id, "cancelled", "Transfer cancelled by user")
+            else:
+                self.signals.message.emit(
+                    self.transfer_id,
+                    f"Transfer interrupted"
+                )
+                put_response(self.transfer_id, "error", str(exc))
+            return
         finally:
             # Stop watchdog
             watchdog_running[0] = False
@@ -527,17 +531,21 @@ class DownloadWorker(QRunnable):
             except (AttributeError, RuntimeError) as e:
                 ic(f"_perform_transfer: Error clearing callback: {e}")
 
-    def _cleanup_connections(self):
-        """Release connection references and invalidate the pooled connection after file transfers."""
-        # After file transfers, invalidate the connection so subsequent commands get fresh one
-        # File transfers can leave the SFTP channel in a blocked state
-        if self.is_source_remote != self.is_destination_remote:  # File transfer, not just command
+    def _cleanup_connections(self, error=False):
+        """Release connection references or invalidate pooled connection."""
+        if self.sftp:
             try:
                 pool = ConnectionPool()
-                pool.close_connection(self.hostname, self.port, self.username)
-                ic(f"Invalidated connection after file transfer for {self.hostname}:{self.port}")
+                if error:
+                    # On real connection error, invalidate the whole SSH connection
+                    pool.close_connection(self.hostname, self.port, self.username)
+                    ic(f"Invalidated connection after error for {self.hostname}:{self.port}")
+                else:
+                    # Normal completion, just release this SFTP channel back to idle pool
+                    pool.release_connection(self.hostname, self.port, self.username, self.sftp)
+                    ic(f"Released SFTP channel to pool for {self.hostname}:{self.port}")
             except Exception as e:
-                ic(f"Error invalidating connection: {e}")
+                ic(f"Error during connection cleanup: {e}")
         
         # Clear references
         self.sftp = None
@@ -546,7 +554,7 @@ class DownloadWorker(QRunnable):
 
     def run(self):
         resume = False
-        resume_all = False
+        error_occurred = False
 
         try:
             # Debug: Log worker start
@@ -593,8 +601,10 @@ class DownloadWorker(QRunnable):
                     ic(f"Transfer {self.transfer_id}: Calling sftp.get({clean_source}, {clean_destination})")
                     self._transfer_with_timeout(self.sftp.get, clean_source, clean_destination)
                 
-                # Signal successful download
-                put_response(self.transfer_id, "success", clean_destination)
+                # Only signal success if not already handled (e.g., cancelled)
+                if not self._stop_flag:
+                    # Signal successful download
+                    put_response(self.transfer_id, "success", clean_destination)
 
             elif self.is_destination_remote and not self.is_source_remote:
                 # Upload
@@ -607,8 +617,10 @@ class DownloadWorker(QRunnable):
                 else:
                     self._transfer_with_timeout(self.sftp.put, clean_source, clean_destination)
                 
-                # Signal successful upload
-                put_response(self.transfer_id, "success", clean_destination)
+                # Only signal success if not already handled (e.g., cancelled)
+                if not self._stop_flag:
+                    # Signal successful upload
+                    put_response(self.transfer_id, "success", clean_destination)
 
             elif self.is_source_remote and self.is_destination_remote:
                 # Remote command execution
@@ -619,12 +631,13 @@ class DownloadWorker(QRunnable):
             else:
                 ic(f"No matching transfer type: src_remote={self.is_source_remote}, dst_remote={self.is_destination_remote}")
 
-        except (OSError, IOError, paramiko.SSHException) as e:
+        except Exception as e:
+            error_occurred = True
             self.signals.message.emit(self.transfer_id, f"Transfer failed: {e}")
             put_response(self.transfer_id, "error", str(e))
         finally:
             # Always cleanup and emit finished signal
-            self._cleanup_connections()
+            self._cleanup_connections(error=error_occurred)
             self.signals.finished.emit(self.transfer_id)
 
     def _handle_remote_command(self):
@@ -722,4 +735,4 @@ class DownloadWorker(QRunnable):
         self._stop_flag = True
         self.signals.message.emit(self.transfer_id, f"Transfer {self.transfer_id} stopping...")
         self.signals.finished.emit(self.transfer_id)
-        self._cleanup_connections()
+        self._cleanup_connections(error=False)

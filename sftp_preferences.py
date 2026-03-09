@@ -16,6 +16,7 @@ DEFAULT_PREFERENCES = {
     "confirm_exit": True,
     "focus_transfers_on_start": True,
     "max_transfer_speed": 0,
+    "max_concurrent_transfers": 8,
     "show_hidden_files": False,
     "default_local_directory": "",
     "default_remote_directory": "",
