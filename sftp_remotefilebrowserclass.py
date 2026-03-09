@@ -449,8 +449,9 @@ class RemoteFileBrowser(FileBrowser):
                 processed_rows.add(row)
 
                 # Always get the data from the first column (filename)
-                filename_index = self.model.index(row, 0)
-                selected_item_text = self.model.data(filename_index, Qt.DisplayRole)
+                # Use sibling(row, 0) to correctly handle proxy model mapping
+                filename_index = index.sibling(row, 0)
+                selected_item_text = current_browser.model().data(filename_index, Qt.DisplayRole)
                 # Remove type prefix if present ([DIR], [FILE], 📁, 📄, etc.)
                 filename = selected_item_text
                 prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
