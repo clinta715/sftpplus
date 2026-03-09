@@ -33,8 +33,8 @@ class ConnectionPool:
     Thread-safe connection pool for SSH/SFTP connections.
     
     Connections are keyed by (hostname, port, username).
-    Multiple SFTP channels can be opened over a single SSH connection
-    to support concurrent transfers efficiently.
+    Multiple SSH connections can be opened for the same key to avoid 
+    SSH channel limits (usually 10 per session).
     """
     
     _instance: Optional['ConnectionPool'] = None
@@ -45,9 +45,11 @@ class ConnectionPool:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
-                    cls._instance._pool: Dict[Tuple, ConnectionInfo] = {}
+                    # Key: (hostname, port, username), Value: List of ConnectionInfo
+                    cls._instance._pool: Dict[Tuple, List[ConnectionInfo]] = {}
                     cls._instance._pool_lock = Lock()
                     cls._instance._max_age = 300  # Keep SSH connections for 5 minutes
+                    cls._instance._max_channels_per_ssh = 8 # Safe limit below standard 10
                     cls._instance._cleanup_interval = 60
                     cls._instance._last_cleanup = 0
         return cls._instance
@@ -68,72 +70,77 @@ class ConnectionPool:
         conn_key = self.get_connection_key(hostname, port, username)
         
         with self._pool_lock:
-            # Check for existing valid connection
-            if conn_key in self._pool:
-                conn_info = self._pool[conn_key]
+            if conn_key not in self._pool:
+                self._pool[conn_key] = []
+            
+            conn_list = self._pool[conn_key]
+            
+            # 1. Try to find an existing connection with idle channels or space for new ones
+            valid_connections = []
+            for conn_info in conn_list:
                 age = time.time() - conn_info.created_at
-                
                 # Check if SSH connection is still valid
                 if (age < self._max_age and 
                     conn_info.ssh.get_transport() and 
                     conn_info.ssh.get_transport().is_active()):
                     
-                    conn_info.last_used_at = time.time()
+                    valid_connections.append(conn_info)
                     
-                    # Try to reuse an idle SFTP channel
+                    # A. Reuse idle SFTP channel
                     while conn_info.idle_sftp_channels:
                         sftp = conn_info.idle_sftp_channels.pop()
-                        # Check if channel is still healthy
                         try:
+                            # Verify channel is still healthy
                             sftp.stat('.')
                             conn_info.busy_sftp_channels.append(sftp)
-                            ic(f"ConnectionPool: Reusing idle SFTP channel for {hostname}:{port}")
+                            conn_info.last_used_at = time.time()
                             return conn_info.ssh, sftp
                         except Exception:
-                            ic("ConnectionPool: Idle SFTP channel was stale, closing it")
                             try:
                                 sftp.close()
                             except:
                                 pass
                             continue
                     
-                    # No idle channels, open a new one over existing SSH
-                    ic(f"ConnectionPool: Opening new SFTP channel over existing SSH for {hostname}:{port}")
-                    try:
-                        sftp = conn_info.ssh.open_sftp()
-                        conn_info.busy_sftp_channels.append(sftp)
-                        return conn_info.ssh, sftp
-                    except Exception as e:
-                        ic(f"ConnectionPool: Failed to open new SFTP channel: {e}")
-                        # Fall through to create new connection if this fails
-                
-                # If we're here, the pooled connection is stale or failed
-                self._close_conn_info(conn_info)
-                del self._pool[conn_key]
+                    # B. Open new channel if below limit
+                    total_channels = len(conn_info.busy_sftp_channels) + len(conn_info.idle_sftp_channels)
+                    if total_channels < self._max_channels_per_ssh:
+                        try:
+                            sftp = conn_info.ssh.open_sftp()
+                            conn_info.busy_sftp_channels.append(sftp)
+                            conn_info.last_used_at = time.time()
+                            return conn_info.ssh, sftp
+                        except Exception as e:
+                            ic(f"ConnectionPool: Failed to open new SFTP channel on existing SSH: {e}")
+                            # Keep looking or create new SSH
+                else:
+                    # Stale or dead connection
+                    self._close_conn_info(conn_info)
             
-            # Create new SSH connection
+            # Update pool list to only include valid connections
+            self._pool[conn_key] = valid_connections
+            
+            # 2. Create new SSH connection if none suitable found
             ic(f"ConnectionPool: Creating new SSH connection for {hostname}:{port}")
-            ssh = self._create_ssh_connection(hostname, port, username, password, key)
-            
             try:
+                ssh = self._create_ssh_connection(hostname, port, username, password, key)
                 sftp = ssh.open_sftp()
+                
+                conn_info = ConnectionInfo(
+                    ssh=ssh,
+                    created_at=time.time(),
+                    last_used_at=time.time(),
+                    hostname=hostname,
+                    port=port,
+                    username=username,
+                    busy_sftp_channels=[sftp]
+                )
+                
+                self._pool[conn_key].append(conn_info)
+                return ssh, sftp
             except Exception as e:
-                ic(f"ConnectionPool: Failed to open initial SFTP channel: {e}")
-                ssh.close()
+                ic(f"ConnectionPool: Failed to create new SSH connection: {e}")
                 raise
-            
-            conn_info = ConnectionInfo(
-                ssh=ssh,
-                created_at=time.time(),
-                last_used_at=time.time(),
-                hostname=hostname,
-                port=port,
-                username=username,
-                busy_sftp_channels=[sftp]
-            )
-            
-            self._pool[conn_key] = conn_info
-            return ssh, sftp
     
     def _create_ssh_connection(self, hostname: str, port: int, username: str,
                                 password: Optional[str] = None,
@@ -149,7 +156,9 @@ class ConnectionPool:
             except Exception as e:
                 ic(f"ConnectionPool: Warning: Could not load known_hosts: {e}")
         
-        # Use RejectPolicy for security
+        # Default to interactive policy if we can (simplified for pool)
+        # In actual use, the caller should have already handled policy setup 
+        # for first-time connections. We use RejectPolicy here for safety.
         ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
         
         connect_kwargs = {
@@ -165,9 +174,6 @@ class ConnectionPool:
             key_obj = self._load_private_key(key)
             if key_obj:
                 connect_kwargs['pkey'] = key_obj
-            else:
-                # If key is a path, paramiko might handle it, but we already tried loading it
-                pass
         
         if password:
             connect_kwargs['password'] = password
@@ -190,10 +196,9 @@ class ConnectionPool:
             paramiko.DSSKey,
             paramiko.ECDSAKey,
             paramiko.Ed25519Key,
-            paramiko.PKey # Generic fallback
+            paramiko.PKey
         ]
         
-        # Try as raw data first if it looks like a PEM file
         if key_data.startswith('-----BEGIN'):
             import io
             key_file = io.StringIO(key_data)
@@ -204,7 +209,6 @@ class ConnectionPool:
                 except:
                     continue
         
-        # Try as file path
         expanded_path = os.path.expanduser(key_data)
         if os.path.exists(expanded_path):
             for key_type in key_types:
@@ -223,24 +227,18 @@ class ConnectionPool:
         
         with self._pool_lock:
             if conn_key in self._pool:
-                conn_info = self._pool[conn_key]
-                if sftp in conn_info.busy_sftp_channels:
-                    conn_info.busy_sftp_channels.remove(sftp)
-                    conn_info.idle_sftp_channels.append(sftp)
-                    conn_info.last_used_at = time.time()
-                    ic(f"ConnectionPool: Released SFTP channel for {hostname}:{port} to idle pool")
-                else:
-                    # If it wasn't in busy, maybe it was already closed or from old connection
-                    try:
-                        sftp.close()
-                    except:
-                        pass
-            else:
-                # Connection no longer in pool, close the channel
-                try:
-                    sftp.close()
-                except:
-                    pass
+                for conn_info in self._pool[conn_key]:
+                    if sftp in conn_info.busy_sftp_channels:
+                        conn_info.busy_sftp_channels.remove(sftp)
+                        conn_info.idle_sftp_channels.append(sftp)
+                        conn_info.last_used_at = time.time()
+                        return
+            
+            # If not found in any active ConnectionInfo, just close it
+            try:
+                sftp.close()
+            except:
+                pass
     
     def close_connection(self, hostname: str, port: int, username: str):
         """Close and remove all connections for this host from the pool"""
@@ -248,14 +246,14 @@ class ConnectionPool:
         
         with self._pool_lock:
             if conn_key in self._pool:
-                conn_info = self._pool[conn_key]
-                self._close_conn_info(conn_info)
+                for conn_info in self._pool[conn_key]:
+                    self._close_conn_info(conn_info)
                 del self._pool[conn_key]
-                ic(f"ConnectionPool: Closed all channels and SSH for {hostname}:{port}")
     
     def _close_conn_info(self, conn_info: ConnectionInfo):
         """Helper to close all channels in a ConnectionInfo"""
-        for sftp in conn_info.idle_sftp_channels + conn_info.busy_sftp_channels:
+        all_channels = conn_info.idle_sftp_channels + conn_info.busy_sftp_channels
+        for sftp in all_channels:
             try:
                 sftp.close()
             except:
@@ -270,44 +268,41 @@ class ConnectionPool:
     def cleanup_stale(self):
         """Remove connections that are too old or no longer active"""
         current_time = time.time()
-        
         if current_time - self._last_cleanup < self._cleanup_interval:
             return
-        
         self._last_cleanup = current_time
         
         with self._pool_lock:
-            stale_keys = []
-            
-            for conn_key, conn_info in self._pool.items():
-                age = current_time - conn_info.created_at
-                idle_time = current_time - conn_info.last_used_at
-                is_active = (conn_info.ssh.get_transport() and 
-                           conn_info.ssh.get_transport().is_active())
+            for conn_key in list(self._pool.keys()):
+                valid_list = []
+                for conn_info in self._pool[conn_key]:
+                    age = current_time - conn_info.created_at
+                    idle_time = current_time - conn_info.last_used_at
+                    is_active = (conn_info.ssh.get_transport() and 
+                               conn_info.ssh.get_transport().is_active())
+                    
+                    if age > self._max_age or not is_active or (idle_time > 120 and not conn_info.busy_sftp_channels):
+                        self._close_conn_info(conn_info)
+                    else:
+                        valid_list.append(conn_info)
                 
-                # Cleanup if: SSH connection stale, inactive, OR idle for too long with no busy channels
-                if age > self._max_age or not is_active or (idle_time > 120 and not conn_info.busy_sftp_channels):
-                    stale_keys.append(conn_key)
-            
-            for conn_key in stale_keys:
-                conn_info = self._pool[conn_key]
-                ic(f"ConnectionPool: Cleaning up stale connection for {conn_info.hostname}:{conn_info.port}")
-                self._close_conn_info(conn_info)
-                del self._pool[conn_key]
+                if valid_list:
+                    self._pool[conn_key] = valid_list
+                else:
+                    del self._pool[conn_key]
 
     def close_all(self):
         """Close all connections in the pool"""
         with self._pool_lock:
             for conn_key in list(self._pool.keys()):
-                conn_info = self._pool[conn_key]
-                self._close_conn_info(conn_info)
+                for conn_info in self._pool[conn_key]:
+                    self._close_conn_info(conn_info)
             self._pool.clear()
-            ic("ConnectionPool: All connections closed")
     
     def get_pool_size(self) -> int:
-        """Get the number of pooled SSH connections"""
+        """Get the total number of pooled SSH connections"""
         with self._pool_lock:
-            return len(self._pool)
+            return sum(len(conns) for conns in self._pool.values())
 
 
 # Global connection pool instance

@@ -500,6 +500,9 @@ class RemoteFileBrowser(FileBrowser):
                         ic(f"upload_download: local_entry_path={repr(local_entry_path)}")
 
                         if self.is_remote_directory(remote_entry_path):
+                            # For directories, the destination is the PARENT directory (current local dir)
+                            # traverse_and_transfer will create the directory inside it.
+                            dest_dir = creds.get('current_local_directory')
                             if not skip_all and not overwrite_all and not resume_all and os.path.exists(local_entry_path):
                                 prefs = get_preferences()
                                 if prefs.get_bool("overwrite_on_transfer", False):
@@ -519,7 +522,7 @@ class RemoteFileBrowser(FileBrowser):
                                         resume_all = True
 
                             if not skip_all:
-                                self.download_directory(remote_entry_path, local_entry_path, skip_all, overwrite_all, resume_all)
+                                self.download_directory(remote_entry_path, dest_dir, skip_all, overwrite_all, resume_all)
                         else:
                             # Handle individual file
                             if not skip_all and not overwrite_all and not resume_all and os.path.exists(local_entry_path):
