@@ -23,6 +23,13 @@ class RemoteFileBrowser(FileBrowser):
     def __init__(self, title, session_id, parent=None):
         super().__init__(title, session_id, parent)  # Initialize the FileBrowser parent class
         self.model = RemoteFileTableModel(self.session_id)
+        
+        # Connect model signals for status and loading feedback
+        self.model.status_message.connect(self.message_signal.emit)
+        self.model.loading_started.connect(lambda: self.progressBar.setRange(0, 0))
+        self.model.loading_finished.connect(lambda: self.progressBar.setRange(0, 100))
+        self.model.loading_finished.connect(lambda: self.progressBar.setValue(100))
+        
         self.proxy_model = DirectoryFirstSortProxyModel()
         self.proxy_model.setSourceModel(self.model)
         self.table.setModel(self.proxy_model)
@@ -46,6 +53,10 @@ class RemoteFileBrowser(FileBrowser):
         # Add these lines to enable full row selection
         self.table.setSelectionBehavior(Qt.TableView_SelectRows)
         self.table.setSelectionMode(Qt.TableView_ExtendedSelection)  # Allow Ctrl+Click and Shift+Click multi-select
+
+        # Enable sorting and set initial sort column
+        self.table.setSortingEnabled(True)
+        self.table.sortByColumn(0, Qt.AscendingOrder)
 
         # Don't initialize model here - defer until explicitly called
         # This allows credentials to be fully set before making SFTP calls
@@ -173,31 +184,26 @@ class RemoteFileBrowser(FileBrowser):
     def change_directory(self, path, force_refresh=True):
         """Change to a directory - handles both relative and complete paths"""
         creds = get_credentials(self.session_id)
-        ic(f"change_directory: session_id={self.session_id}, path={path}, current_dir={creds.get('current_remote_directory')}")
         
         try:
             if path == "..":
                 head, tail = self.split_path(creds.get('current_remote_directory'))
                 new_path = head
-                ic(f"change_directory: parent directory, new_path={new_path}")
             elif self.is_complete_path(path):
                 new_path = path
-                ic(f"change_directory: complete path, new_path={new_path}")
             else:
                 current_dir = creds.get('current_remote_directory', '.')
                 new_path = self.get_normalized_remote_path(current_dir, path)
-                ic(f"change_directory: relative path, current_dir={current_dir}, new_path={new_path}")
 
             if not force_refresh and new_path in self.model.cache and time.time() - self.model.cache_time.get(new_path, 0) < self.model.cache_duration:
                 set_credentials(self.session_id, 'current_remote_directory', new_path)
                 self.model.file_list = self.model.cache[new_path]
-                self.model.layoutChanged.emit()
+                self.model.layoutChanged.emit()  # Notify view of data change
+                self.proxy_model.invalidate()  # Force proxy to re-sort
                 self.message_signal.emit(f"{new_path}")
                 self.notify_observers()
                 self.table.viewport().update()
                 return True
-
-            ic(f"change_directory: submitting chdir to {new_path}")
             
             self.progressBar.setRange(0, 0)
             
@@ -205,38 +211,34 @@ class RemoteFileBrowser(FileBrowser):
                 ops = self.get_sftp_operations()
                 ops.chdir(new_path.replace("\\", "/"))
             except Exception as e:
-                ic(f"change_directory: ERROR - {e}")
                 self.progressBar.setRange(0, 100)
                 self.message_signal.emit(f"change_directory() failed: {e}")
                 return False
             
             self.progressBar.setRange(0, 100)
 
-            ic(f"change_directory: success! updating credentials to {new_path}")
             set_credentials(self.session_id, 'current_remote_directory', new_path)
             
             if not verify_credential_update(self.session_id, 'current_remote_directory', new_path, "change_directory"):
-                ic(f"change_directory: CRITICAL - Failed to update credentials to {new_path}")
+                ic(f"CRITICAL: Failed to update credentials to {new_path}")
             
             is_valid, current_dir = verify_directory_consistency(self.session_id, "change_directory")
             if not is_valid:
-                ic(f"change_directory: WARNING - Directory '{current_dir}' may be invalid")
+                ic(f"WARNING: Directory '{current_dir}' may be invalid")
             
             self.message_signal.emit(f"{new_path}")
             self.model.invalidate_cache(new_path)
-            ic(f"change_directory: calling get_files for {new_path}")
             self.model.get_files(force_refresh=True, directory=new_path)
             
-            final_creds = get_credentials(self.session_id)
-            ic(f"change_directory: final current_remote_directory={final_creds.get('current_remote_directory')}")
+            # Invalidate proxy to force re-sort with new data
+            self.proxy_model.invalidate()
             
             self.notify_observers()
             self.table.viewport().update()
-            ic(f"change_directory: completed successfully")
             return True
 
         except (OSError, IOError, RuntimeError) as e:
-            ic(f"change_directory: EXCEPTION - {e}")
+            ic(f"change_directory EXCEPTION: {e}")
             self.message_signal.emit(f"change_directory() {e}")
             return False
 
@@ -246,10 +248,12 @@ class RemoteFileBrowser(FileBrowser):
             if not index.isValid():
                 return False
 
-            # Always get the data from the first column (filename)
-            filename_index = self.model.index(index.row(), 0)
+            # IMPORTANT: Map the visual index to source model index since proxy model sorts rows
+            source_index = self.proxy_model.mapToSource(index)
+            
+            # Get the data from the source model
+            filename_index = self.model.index(source_index.row(), 0)
             filename = self.model.data(filename_index, Qt.DisplayRole)
-            ic(f"double_click_handler: raw filename={repr(filename)}")
 
             # Remove type prefix if present ([DIR], [FILE], 📁, 📄, etc.)
             prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
@@ -257,50 +261,30 @@ class RemoteFileBrowser(FileBrowser):
                 if filename.startswith(prefix):
                     filename = filename[len(prefix):].lstrip()
                     break
-            ic(f"double_click_handler: cleaned filename={repr(filename)}")
             
-            # Debug: Show current credentials state
-            ic(f"double_click_handler: session_id={self.session_id}")
-            ic(f"double_click_handler: all_creds_keys={list(creds.keys())}")
-            ic(f"double_click_handler: current_remote_directory={creds.get('current_remote_directory')}")
-
             # Early return for parent directory navigation
             if filename == "..":
                 return self.change_directory("..")
 
             # Determine the full path
-            # Use credentials to track current directory - this is the source of truth
             current_dir = creds.get('current_remote_directory', '.')
             
-            # If current_dir is relative, we need to resolve it
-            # This shouldn't happen after connection, but safeguard just in case
+            # If current_dir is relative, resolve it
             if current_dir == '.':
-                ic("double_click_handler: WARNING - current_dir is '.', attempting to resolve")
                 home_dir = self.sftp_getcwd()
                 if home_dir:
                     current_dir = home_dir
                     set_credentials(self.session_id, 'current_remote_directory', current_dir)
-                    ic(f"double_click_handler: resolved to {current_dir}")
-            
-            ic(f"double_click_handler: using current_dir from credentials={current_dir}")
-            
-            ic(f"double_click_handler: session_id={self.session_id}, current_dir={current_dir}, is_complete_path={self.is_complete_path(filename)}")
-            ic(f"double_click_handler: hostname={creds.get('hostname')}")
             
             if self.is_complete_path(filename):
                 path = filename
-                ic(f"double_click_handler: treating as complete path: {path}")
             else:
                 path = self.get_normalized_remote_path(current_dir, filename)
-                ic(f"double_click_handler: constructed path: {path} from current_dir={current_dir} + filename={filename}")
 
             # Check if the path is a directory or a file
-            ic(f"double_click_handler: checking if directory: {path}")
             if self.is_remote_directory(path):
-                ic(f"double_click_handler: is directory, changing to: {path}")
                 return self.change_directory(path)
             elif self.is_remote_file(path):
-                ic(f"double_click_handler: is file, downloading: {path}")
                 local_path, _ = QFileDialog.getSaveFileName(self, "Save File", filename)
                 if local_path:
                     self.upload_download(path, local_path)
@@ -350,11 +334,16 @@ class RemoteFileBrowser(FileBrowser):
             if current_browser is not None and isinstance(current_browser, QTableView):
                 current_index = current_browser.currentIndex()
                 if current_index.isValid():
-                    # Always get the data from the first column (filename)
-                    filename_index = current_browser.model().index(current_index.row(), 0)
+                    # ALWAYS use column 0 for filename
+                    filename_index = current_index.sibling(current_index.row(), 0)
                     selected_item = current_browser.model().data(filename_index, Qt.DisplayRole)
-                    # Remove the icon prefix if present
-                    selected_item = selected_item.split(' ', 1)[-1] if ' ' in selected_item else selected_item
+                    
+                    # Remove type prefix if present
+                    prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
+                    for prefix in prefixes:
+                        if selected_item.startswith(prefix):
+                            selected_item = selected_item[len(prefix):].lstrip()
+                            break
 
                     if creds.get('current_remote_directory') == '.':
                         temp_path = self.sftp_getcwd()
@@ -545,17 +534,29 @@ class RemoteFileBrowser(FileBrowser):
                                         overwrite_all = True
                                     elif action == "resume_all":
                                         resume_all = True
+                                    # Note: "overwrite" (single) and "resume" (single) don't set flags,
+                                    # so user will be prompted again for next file - this is intentional
 
                             if not skip_all:
-                                resume = (not overwrite_all and locals().get('action') == "resume")
+                                # Check action set by prompt - overwrite_all or resume_all set flags,
+                                # but single "overwrite" or "resume" is stored in action
+                                action_result = locals().get('action', '')
+                                resume = (not overwrite_all and action_result == "resume")
+                                overwrite = (not overwrite_all and action_result == "overwrite")
                                 
                                 ic(f"upload_download: DEBUG - remote_entry_path={repr(remote_entry_path)}")
                                 ic(f"upload_download: DEBUG - local_entry_path={repr(local_entry_path)}")
-                                ic(f"upload_download: DEBUG - resume={resume}")
+                                ic(f"upload_download: DEBUG - resume={resume}, overwrite={overwrite}")
                                 
                                 try:
                                     creds = get_credentials(self.session_id)
-                                    command = "resume" if resume else "download"
+                                    if resume:
+                                        command = "resume"
+                                    elif overwrite:
+                                        command = "download"  # Overwrite means re-download
+                                    else:
+                                        command = "download"
+                                    ic(f"upload_download: Adding job to queue with command={command}")
                                     add_sftp_job(
                                         remote_entry_path, True,  # source is remote
                                         local_entry_path, False,  # dest is local
@@ -567,6 +568,7 @@ class RemoteFileBrowser(FileBrowser):
                                         job_id,
                                         creds.get('key')
                                     )
+                                    ic(f"upload_download: Job added successfully")
                                     self.transfer_started.emit(str(job_id))
                                 except Exception as e:
                                     self.message_signal.emit(f"Download failed: {e}")

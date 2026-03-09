@@ -526,6 +526,13 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
 
     def get_files(self):
         self.model.get_files()
+        
+        # Force the view to re-sort after data is loaded
+        if hasattr(self, 'proxy_model') and self.proxy_model:
+            self.proxy_model.invalidate()
+            # Use view's sortByColumn to trigger actual sorting
+            current_order = self.table.horizontalHeader().sortIndicatorOrder()
+            self.table.sortByColumn(0, current_order)
 
     def add_observer(self, observer):
         """Add an observer with thread-safe lock protection."""
@@ -1003,11 +1010,17 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         if current_browser is not None:
             indexes = current_browser.selectedIndexes()
             if indexes:
-                row = indexes[0].row()
-                filename_index = current_browser.model().index(row, 0)
+                # Use sibling to get column 0 for the first selected index
+                filename_index = indexes[0].sibling(indexes[0].row(), 0)
                 selected_item = current_browser.model().data(filename_index, Qt.DisplayRole)
-                selected_item = selected_item.split(' ', 1)[-1] if ' ' in selected_item else selected_item
-                
+
+                # Remove type prefix if present
+                prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
+                for prefix in prefixes:
+                    if selected_item.startswith(prefix):
+                        selected_item = selected_item[len(prefix):].lstrip()
+                        break
+
                 new_name, ok = QInputDialog.getText(
                     None,
                     "Rename",
@@ -1016,11 +1029,21 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                 )
                 if ok and new_name and new_name != selected_item:
                     creds = get_credentials(self.session_id)
-                    remote_path = os.path.join(creds.get('current_remote_directory'), selected_item)
-                    self.sftp_rename(remote_path, new_name)
+                    # Use current remote or local directory depending on view type
+                    if self.is_local_view:
+                        old_path = os.path.join(creds.get('current_local_directory'), selected_item)
+                        new_path = os.path.join(creds.get('current_local_directory'), new_name)
+                        try:
+                            os.rename(old_path, new_path)
+                            self.model.get_files()
+                            self.notify_observers()
+                        except OSError as e:
+                            self.message_signal.emit(f"Rename failed: {e}")
+                    else:
+                        remote_path = os.path.join(creds.get('current_remote_directory'), selected_item)
+                        self.sftp_rename(remote_path, new_name)
                 elif ok and new_name == selected_item:
-                    QMessageBox.information(None, "Rename", "New name is the same as current name.")
-            else:
+                    QMessageBox.information(None, "Rename", "New name is the same as current name.")            else:
                 QMessageBox.information(None, "Rename", "Please select a file or folder to rename.")
 
     def prompt_and_create_directory(self):
@@ -1086,8 +1109,11 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
     def double_click_handler(self, index):
         creds = get_credentials(self.session_id)
         if index.isValid():
-            # Always get the data from the first column (filename)
-            filename_index = self.model.index(index.row(), 0)
+            # IMPORTANT: Map the visual index to source model index since proxy model sorts rows
+            source_index = self.proxy_model.mapToSource(index)
+            
+            # Get the data from the source model
+            filename_index = self.model.index(source_index.row(), 0)
             filename = self.model.data(filename_index, Qt.DisplayRole)
 
             # Remove type prefix if present ([DIR], [FILE], 📁, 📄, etc.)
@@ -1224,7 +1250,8 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                     filename = ""
                     if isinstance(index, QModelIndex):
                         if index.isValid():
-                            filename_index = current_browser.model().index(row, 0)
+                            # ALWAYS use column 0 for filename, regardless of which column was selected
+                            filename_index = index.sibling(row, 0)
                             filename = current_browser.model().data(filename_index, Qt.DisplayRole)
                             # Remove type prefix if present ([DIR], [FILE], 📁, 📄, etc.)
                             prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
@@ -1277,6 +1304,8 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                                     overwrite_all = True
                                 elif action == "resume_all":
                                     resume_all = True
+                                # Note: "overwrite" (single) and "resume" (single) don't set flags,
+                                # so user will be prompted again for next file - this is intentional
                             elif not file_exists:
                                 action = "upload"
                             
@@ -1287,6 +1316,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                                 action = "overwrite"
                             elif resume_all and file_exists:
                                 action = "resume"
+                            # If action was set to "overwrite" or "resume" by prompt, use it as-is
 
                             # Execute the upload if not skipping
                             if not skip_all:
@@ -1294,8 +1324,11 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                                 job_id = create_random_integer()
                                 queue_item = QueueItem(os.path.basename(selected_path), job_id)
                                 
-                                resume = (action == "resume")
-                                command = "resume" if resume else "upload"
+                                # Handle overwrite, resume, or upload
+                                action_result = action if 'action' in dir() else ''
+                                resume = (action_result == "resume")
+                                overwrite = (action_result == "overwrite")
+                                command = "resume" if resume else ("download" if overwrite else "upload")
                                 
                                 try:
                                     creds = get_credentials(self.session_id)
@@ -1595,10 +1628,11 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         if current_browser is not None and isinstance(current_browser, QTableView):
             indexes = current_browser.selectedIndexes()
             if indexes:
-                index = indexes[0]
+                # Use sibling to ensure we always look at column 0 for the filename
+                index = indexes[0].sibling(indexes[0].row(), 0)
                 selected_item_text = current_browser.model().data(index, Qt.DisplayRole)
                 # Remove emoji prefixes
-                prefixes = ['📁', '📄', '🔗']
+                prefixes = ['📁', '📄', '🔗', '[DIR]', '[FILE]', '[LINK]']
                 for prefix in prefixes:
                     if selected_item_text.startswith(prefix):
                         selected_item_text = selected_item_text[len(prefix):].lstrip()

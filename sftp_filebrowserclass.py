@@ -32,6 +32,10 @@ class FileBrowser(Browser):
         self.table.setSelectionBehavior(Qt.TableView_SelectRows)
         self.table.setSelectionMode(Qt.TableView_ExtendedSelection)  # Allow Ctrl+Click and Shift+Click multi-select
 
+        # Enable sorting and set initial sort column
+        self.table.setSortingEnabled(True)
+        self.table.sortByColumn(0, Qt.AscendingOrder)
+
         # Set column widths to prevent text truncation
         self.table.setColumnWidth(0, 250)  # Name column - wide enough for most filenames
         self.table.setColumnWidth(1, 80)   # Size column
@@ -52,9 +56,16 @@ class FileBrowser(Browser):
                     # Get the same row but first column (column 0)
                     first_col_index = current_index.sibling(current_index.row(), 0)
                     selected_item = current_browser.model().data(first_col_index, Qt.DisplayRole)
-                    local_path = selected_item.lstrip(" 📁📄")
-                    if selected_item is not None:
-                        local_path = os.path.join(creds.get('current_local_directory'), selected_item.lstrip(" 📁📄"))
+                    
+                    # Remove type prefix if present
+                    filename = selected_item
+                    prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
+                    for prefix in prefixes:
+                        if filename.startswith(prefix):
+                            filename = filename[len(prefix):].lstrip()
+                            break
+                    
+                    local_path = os.path.join(creds.get('current_local_directory'), filename)
             else:
                 return
 
