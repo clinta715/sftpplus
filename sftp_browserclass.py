@@ -1043,7 +1043,8 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                         remote_path = os.path.join(creds.get('current_remote_directory'), selected_item)
                         self.sftp_rename(remote_path, new_name)
                 elif ok and new_name == selected_item:
-                    QMessageBox.information(None, "Rename", "New name is the same as current name.")            else:
+                    QMessageBox.information(None, "Rename", "New name is the same as current name.")
+            else:
                 QMessageBox.information(None, "Rename", "Please select a file or folder to rename.")
 
     def prompt_and_create_directory(self):
