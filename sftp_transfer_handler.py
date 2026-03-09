@@ -1,166 +1,217 @@
-from PyQt6.QtWidgets import QInputDialog, QMessageBox
+from PyQt6.QtWidgets import QInputDialog, QMessageBox, QApplication
+from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool, QMutex, QWaitCondition
 from sftp_qt_compat import Qt
 from sftp_creds import get_credentials, create_random_integer
 from sftp_downloadworkerclass import add_sftp_job
 from sftp_preferences import get_preferences
 import os
 import stat
+import threading
 from icecream import ic
 
 
-class TransferHandlerMixin:
-    """Mixin class providing file transfer functionality.
+class TraversalSignals(QObject):
+    """Signals for the directory traversal worker"""
+    status = pyqtSignal(str)
+    job_added = pyqtSignal(str)
+    prompt_overwrite = pyqtSignal(str)
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+
+
+class TraversalWorker(QRunnable):
+    """Worker that recursively traverses directories in the background"""
     
-    This class handles:
-    - Directory traversal and batch transfers
-    - Overwrite prompts and conflict resolution
-    """
-
-    transfer_started = None
-
-    def _get_transfer_action(self, target_path, skip_all, overwrite_all, resume_all, is_directory=False):
-        """Determine the transfer action based on user choice and flags."""
-        if skip_all:
-            return ("skip", skip_all, overwrite_all, resume_all)
-        if overwrite_all:
-            return ("overwrite" if not is_directory else "overwrite_dir", skip_all, overwrite_all, resume_all)
-        if resume_all:
-            return ("resume", skip_all, overwrite_all, resume_all)
-            
-        action = self.prompt_overwrite(target_path)
+    def __init__(self, session_id, source_dir, dest_dir, is_source_remote, is_dest_remote,
+                 skip_all=False, overwrite_all=False, resume_all=False):
+        super().__init__()
+        self.session_id = session_id
+        self.source_dir = source_dir
+        self.dest_dir = dest_dir
+        self.is_source_remote = is_source_remote
+        self.is_dest_remote = is_dest_remote
+        self.skip_all = skip_all
+        self.overwrite_all = overwrite_all
+        self.resume_all = resume_all
+        self.signals = TraversalSignals()
         
-        if action == "skip":
-            return ("skip", skip_all, overwrite_all, resume_all)
-        elif action == "skip_all":
-            return ("skip", True, overwrite_all, resume_all)
-        elif action == "overwrite":
-            return ("overwrite", skip_all, overwrite_all, resume_all)
-        elif action == "overwrite_all":
-            return ("overwrite", skip_all, True, resume_all)
-        elif action == "resume":
-            return ("resume", skip_all, overwrite_all, resume_all)
-        elif action == "resume_all":
-            return ("resume", skip_all, overwrite_all, True)
-        else:
-            return (None, skip_all, overwrite_all, resume_all)
+        # For cross-thread prompting
+        self.prompt_mutex = QMutex()
+        self.prompt_cond = QWaitCondition()
+        self.prompt_result = None
+        
+        # Credentials for jobs
+        self.creds = get_credentials(session_id)
+        
+        # SFTPOperations for listing
+        from sftp_operations import SFTPOperations
+        self.ops = SFTPOperations(
+            hostname=self.creds.get('hostname', ''),
+            username=self.creds.get('username', ''),
+            password=self.creds.get('password', ''),
+            port=self.creds.get('port', 22),
+            key=self.creds.get('key')
+        )
+
+    def set_prompt_result(self, result):
+        """Called by UI thread to provide result of overwrite prompt"""
+        self.prompt_mutex.lock()
+        self.prompt_result = result
+        self.prompt_cond.wakeAll()
+        self.prompt_mutex.unlock()
+
+    def run(self):
+        try:
+            self.signals.status.emit(f"Starting traversal of {self.source_dir}...")
+            self._traverse(self.source_dir, self.dest_dir)
+            self.signals.finished.emit()
+        except Exception as e:
+            ic(f"TraversalWorker error: {e}")
+            self.signals.error.emit(str(e))
+        finally:
+            if self.ops:
+                self.ops.close()
 
     def _ensure_directory_exists(self, directory_path, is_remote=False):
-        """Ensure a directory exists, creating it if necessary."""
         if is_remote:
-            if not self.sftp_exists(directory_path):
-                # We need to handle nested directories
+            if not self.ops.exists(directory_path):
                 parts = directory_path.strip('/').split('/')
                 current = ""
                 for part in parts:
                     current += '/' + part
-                    if not self.sftp_exists(current):
-                        self.sftp_mkdir(current)
+                    if not self.ops.exists(current):
+                        self.ops.mkdir(current)
         else:
             os.makedirs(directory_path, exist_ok=True)
 
-    def traverse_and_transfer(self, source_dir, dest_dir, is_source_remote, is_dest_remote,
-                              skip_all=False, overwrite_all=False, resume_all=False,
-                              always=0, is_top_level=True):
-        """Traverse a directory and transfer all files recursively.
-        
-        Args:
-            source_dir: Source directory path
-            dest_dir: Destination directory path
-            is_source_remote: Whether source is remote
-            is_dest_remote: Whether destination is remote
-            skip_all: Skip all conflicts
-            overwrite_all: Overwrite all conflicts
-            resume_all: Resume all transfers
-            always: Recursive depth tracker
-            is_top_level: Whether this is the initial call
-        """
-        creds = get_credentials(self.session_id)
-        
+    def _traverse(self, source_dir, dest_dir):
         # Ensure destination exists
-        self._ensure_directory_exists(dest_dir, is_remote=is_dest_remote)
+        self._ensure_directory_exists(dest_dir, is_remote=self.is_dest_remote)
         
-        if is_source_remote:
-            files = self.sftp_listdir_attr(source_dir)
+        self.signals.status.emit(f"Scanning: {source_dir}")
+        
+        if self.is_source_remote:
+            try:
+                files = self.ops.list_attr(source_dir)
+            except Exception as e:
+                ic(f"Error listing remote dir {source_dir}: {e}")
+                return
         else:
-            files = os.listdir(source_dir)
+            try:
+                files = os.listdir(source_dir)
+            except Exception as e:
+                ic(f"Error listing local dir {source_dir}: {e}")
+                return
             
         for entry in files:
-            if is_source_remote:
+            if self.is_source_remote:
                 filename = entry.filename
-                # Skip . and ..
-                if filename in ['.', '..']:
-                    continue
+                if filename in ['.', '..']: continue
                 is_dir = stat.S_ISDIR(entry.st_mode)
             else:
                 filename = entry
-                if filename in ['.', '..']:
-                    continue
+                if filename in ['.', '..']: continue
                 is_dir = os.path.isdir(os.path.join(source_dir, filename))
                 
             source_path = os.path.join(source_dir, filename)
             dest_path = os.path.join(dest_dir, filename)
             
             if is_dir:
-                # Recurse into directory
-                skip_all, overwrite_all, resume_all = self.traverse_and_transfer(
-                    source_path, dest_path,
-                    is_source_remote, is_dest_remote,
-                    skip_all, overwrite_all, resume_all,
-                    always + 1, is_top_level=False
-                )
+                self._traverse(source_path, dest_path)
                 continue
                 
             # Handle file conflict
-            exists = self.sftp_exists(dest_path) if is_dest_remote else os.path.exists(dest_path)
+            exists = self.ops.exists(dest_path) if self.is_dest_remote else os.path.exists(dest_path)
+            command = "upload" if self.is_dest_remote else "download"
             
-            command = "upload" if is_dest_remote else "download"
-            
-            if exists and not skip_all and not overwrite_all and not resume_all:
-                action = self.prompt_overwrite(dest_path)
+            if exists and not self.skip_all and not self.overwrite_all and not self.resume_all:
+                # Request prompt from UI thread
+                self.prompt_mutex.lock()
+                self.prompt_result = None
+                self.signals.prompt_overwrite.emit(dest_path)
+                # Wait for UI thread to respond
+                while self.prompt_result is None:
+                    self.prompt_cond.wait(self.prompt_mutex)
+                
+                action = self.prompt_result
+                self.prompt_mutex.unlock()
+                
                 if action == "cancel":
-                    return skip_all, overwrite_all, resume_all
+                    return
                 elif action == "skip":
                     continue
                 elif action == "skip_all":
-                    skip_all = True
+                    self.skip_all = True
                     continue
                 elif action == "overwrite_all":
-                    overwrite_all = True
+                    self.overwrite_all = True
                 elif action == "resume_all":
-                    resume_all = True
+                    self.resume_all = True
                 elif action == "resume":
                     command = "resume"
-                # If action is 'overwrite', we proceed with default command
                     
-            if skip_all:
+            if self.skip_all:
                 continue
             
-            if resume_all:
+            if self.resume_all:
                 command = "resume"
                 
             job_id = create_random_integer()
+            add_sftp_job(source_path, self.is_source_remote, dest_path, self.is_dest_remote,
+                        self.creds.get('hostname', ''),
+                        self.creds.get('username', ''),
+                        self.creds.get('password', ''),
+                        self.creds.get('port', 22),
+                        command, job_id, self.creds.get('key'))
             
-            add_sftp_job(source_path, is_source_remote, dest_path, is_dest_remote,
-                        creds.get('hostname', ''),
-                        creds.get('username', ''),
-                        creds.get('password', ''),
-                        creds.get('port', 22),
-                        command, job_id, creds.get('key'))
-                            
-            if self.transfer_started:
-                self.transfer_started.emit(str(job_id))
+            self.signals.job_added.emit(str(job_id))
+
+
+class TransferHandlerMixin:
+    """Mixin class providing file transfer functionality."""
+
+    transfer_started = None
+
+    def download_directory(self, source_directory, destination_directory, 
+                         skip_all=False, overwrite_all=False, resume_all=False):
+        """Start a background worker to traverse and download a directory."""
+        worker = TraversalWorker(
+            self.session_id, source_directory, destination_directory,
+            is_source_remote=True, is_dest_remote=False,
+            skip_all=skip_all, overwrite_all=overwrite_all, resume_all=resume_all
+        )
         
-        return skip_all, overwrite_all, resume_all
+        # Connect signals
+        worker.signals.status.connect(lambda msg: self.message_signal.emit(msg))
+        worker.signals.job_added.connect(lambda jid: self.transfer_started.emit(jid) if self.transfer_started else None)
+        worker.signals.prompt_overwrite.connect(lambda path: self._handle_worker_prompt(worker, path))
+        worker.signals.error.connect(lambda err: self.message_signal.emit(f"Traversal error: {err}"))
+        
+        # Run in thread pool
+        QThreadPool.globalInstance().start(worker)
+        self.message_signal.emit(f"Started background scan of {source_directory}")
 
     def upload_directory(self, source_directory, destination_directory, 
                          skip_all=False, overwrite_all=False, resume_all=False):
-        """Upload a directory to remote server."""
-        self.traverse_and_transfer(
-            source_directory, destination_directory,
+        """Start a background worker to traverse and upload a directory."""
+        worker = TraversalWorker(
+            self.session_id, source_directory, destination_directory,
             is_source_remote=False, is_dest_remote=True,
             skip_all=skip_all, overwrite_all=overwrite_all, resume_all=resume_all
         )
-        self.message_signal.emit(f"Directory upload started: {source_directory}")
+        
+        worker.signals.status.connect(lambda msg: self.message_signal.emit(msg))
+        worker.signals.job_added.connect(lambda jid: self.transfer_started.emit(jid) if self.transfer_started else None)
+        worker.signals.prompt_overwrite.connect(lambda path: self._handle_worker_prompt(worker, path))
+        worker.signals.error.connect(lambda err: self.message_signal.emit(f"Traversal error: {err}"))
+        
+        QThreadPool.globalInstance().start(worker)
+        self.message_signal.emit(f"Started background scan of {source_directory}")
+
+    def _handle_worker_prompt(self, worker, path):
+        """Handle overwrite prompt request from background worker"""
+        action = self.prompt_overwrite(path)
+        worker.set_prompt_result(action)
 
     def prompt_overwrite(self, item_path):
         """Prompt user for overwrite action."""
