@@ -179,7 +179,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         self._create_tree_container()
         
         self.table = QTableView()
-        self.active_table = self.table
+        # self.active_table = self.table
 
         self.table.setSizePolicy(Qt.SizePolicy_Expanding, Qt.SizePolicy_Expanding)
         self.table.verticalHeader().setVisible(False)
@@ -1006,7 +1006,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
 
     def prompt_and_rename(self):
         """Prompt user for new name and rename the selected file"""
-        current_browser = self.active_table
+        current_browser = self.table
         if current_browser is not None:
             indexes = current_browser.selectedIndexes()
             if indexes:
@@ -1163,10 +1163,20 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
 
         # Get the currently focused widget
         # current_browser = self.focusWidget()
-        current_browser = self.active_table
+        current_browser = self.table
         ic(f"context_menu_handler: current_browser={current_browser}")
         
         if current_browser is not None:
+            # If we have a point, ensure the item at that point is selected
+            if point:
+                index_at_point = current_browser.indexAt(point)
+                if index_at_point.isValid():
+                    # If the item at point is not already selected, select it exclusively
+                    if not current_browser.selectionModel().isSelected(index_at_point):
+                        current_browser.setCurrentIndex(index_at_point)
+                        # For multi-select, we might want to keep others, but standard behavior
+                        # is usually to select the right-clicked item.
+            
             # Debug: check what's selected
             indexes = current_browser.selectedIndexes()
             ic(f"context_menu_handler: selected rows = {[i.row() for i in indexes]}")
@@ -1226,7 +1236,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
     def upload_download(self):
         creds = get_credentials(self.session_id)
         # current_browser = self.focusWidget()
-        current_browser = self.active_table
+        current_browser = self.table
         if current_browser is not None and isinstance(current_browser, QTableView):
             # Get unique rows from selected indexes to avoid processing the same item multiple times
             indexes = current_browser.selectedIndexes()
@@ -1625,7 +1635,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         from sftp_textviewer import TextViewerWindow, is_text_file, MAX_FILE_SIZE
         
         creds = get_credentials(self.session_id)
-        current_browser = self.active_table
+        current_browser = self.table
         if current_browser is not None and isinstance(current_browser, QTableView):
             indexes = current_browser.selectedIndexes()
             if indexes:

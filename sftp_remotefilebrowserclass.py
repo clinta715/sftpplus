@@ -330,7 +330,7 @@ class RemoteFileBrowser(FileBrowser):
         creds = get_credentials(self.session_id)
         if remote_path is None or remote_path is False:
             # current_browser = self.focusWidget()
-            current_browser = self.active_table
+            current_browser = self.table
             if current_browser is not None and isinstance(current_browser, QTableView):
                 current_index = current_browser.currentIndex()
                 if current_index.isValid():
@@ -430,7 +430,7 @@ class RemoteFileBrowser(FileBrowser):
 
         # current_browser = self.focusWidget()
         ic("remoterfilebrowserclass - upload_download")
-        current_browser = self.active_table
+        current_browser = self.table
         if current_browser is not None and isinstance(current_browser, QTableView):
             indexes = current_browser.selectedIndexes()
             processed_rows = set()  # Track processed rows to avoid duplicates
@@ -452,6 +452,8 @@ class RemoteFileBrowser(FileBrowser):
                 # Use sibling(row, 0) to correctly handle proxy model mapping
                 filename_index = index.sibling(row, 0)
                 selected_item_text = current_browser.model().data(filename_index, Qt.DisplayRole)
+                ic(f"upload_download: row={row}, selected_item_text={repr(selected_item_text)}")
+                
                 # Remove type prefix if present ([DIR], [FILE], 📁, 📄, etc.)
                 filename = selected_item_text
                 prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
@@ -459,6 +461,8 @@ class RemoteFileBrowser(FileBrowser):
                     if filename.startswith(prefix):
                         filename = filename[len(prefix):].lstrip()
                         break
+                
+                ic(f"upload_download: cleaned filename={repr(filename)}")
 
                 if optionalpath:
                     filename = optionalpath

@@ -49,7 +49,7 @@ class FileBrowser(Browser):
         # for removing LOCAL directories
         if local_path is None or local_path is False:
             # current_browser = self.focusWidget()
-            current_browser = self.active_table
+            current_browser = self.table
             if current_browser is not None:
                 current_index = current_browser.currentIndex()
                 if current_index.isValid():
