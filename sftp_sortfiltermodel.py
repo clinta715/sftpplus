@@ -5,58 +5,67 @@ import os
 
 
 class DirectoryFirstSortProxyModel(QSortFilterProxyModel):
+    """
+    Proxy model that ensures directories always appear at the top of the list,
+    followed by files, with both groups sorted according to the current sort column.
+    """
+    
     def lessThan(self, left, right):
+        # Get data from source model
         left_data = self.sourceModel().data(left, Qt.DisplayRole)
         right_data = self.sourceModel().data(right, Qt.DisplayRole)
 
-        if not left_data or not right_data:
+        if left_data is None or right_data is None:
             return super().lessThan(left, right)
 
-        left_text = left_data if isinstance(left_data, str) else str(left_data)
-        right_text = right_data if isinstance(right_data, str) else str(right_data)
+        left_text = str(left_data)
+        right_text = str(right_data)
 
-        source_model = self.sourceModel()
-        left_is_dir = False
-        right_is_dir = False
+        # 1. Handle ".." (parent directory) - always first
+        if left_text == "..":
+            return self.sortOrder() == Qt.AscendingOrder
+        if right_text == "..":
+            return self.sortOrder() != Qt.AscendingOrder
 
-        if hasattr(source_model, 'file_list') and source_model.file_list:
-            if 0 <= left.row() < len(source_model.file_list):
-                left_file = source_model.file_list[left.row()]
-                if hasattr(source_model, 'is_remote_browser') and source_model.is_remote_browser():
-                    left_is_dir = stat.S_ISDIR(left_file[2]) if len(left_file) > 2 else False
-                else:
-                    name = left_file[0] if isinstance(left_file, list) else str(left_file)
-                    if name == "..":
-                        left_is_dir = True
-                    elif hasattr(source_model, 'directory'):
-                        full_path = os.path.join(str(source_model.directory), name)
-                        left_is_dir = os.path.isdir(full_path)
+        # 2. Identify if items are directories
+        # Remote model uses [DIR] prefix, local model uses 📁 prefix
+        left_is_dir = left_text.startswith('[DIR]') or left_text.startswith('📁')
+        right_is_dir = right_text.startswith('[DIR]') or right_text.startswith('📁')
 
-            if 0 <= right.row() < len(source_model.file_list):
-                right_file = source_model.file_list[right.row()]
-                if hasattr(source_model, 'is_remote_browser') and source_model.is_remote_browser():
-                    right_is_dir = stat.S_ISDIR(right_file[2]) if len(right_file) > 2 else False
-                else:
-                    name = right_file[0] if isinstance(right_file, list) else str(right_file)
-                    if name == "..":
-                        right_is_dir = True
-                    elif hasattr(source_model, 'directory'):
-                        full_path = os.path.join(str(source_model.directory), name)
-                        right_is_dir = os.path.isdir(full_path)
-
-        left_is_dir = left_is_dir or left_text.startswith('[DIR]') or left_text.startswith('📁')
-        right_is_dir = right_is_dir or right_text.startswith('[DIR]') or right_text.startswith('📁')
-
+        # 3. Directory vs File logic
         if left_is_dir and not right_is_dir:
-            return True
+            return self.sortOrder() == Qt.AscendingOrder
         if not left_is_dir and right_is_dir:
-            return False
+            return self.sortOrder() != Qt.AscendingOrder
 
-        left_clean = left_text.lstrip('[DIR] ').lstrip('📁 ').lstrip('📄 ')
-        right_clean = right_text.lstrip('[DIR] ').lstrip('📁 ').lstrip('📄 ')
+        # 4. Both are same type (both dirs or both files) - sort by the active column
+        sort_column = self.sortColumn()
+        
+        # Get raw data for comparison if it's not the name column
+        if sort_column != 0:
+            left_val = self.sourceModel().data(left.sibling(left.row(), sort_column), Qt.DisplayRole)
+            right_val = self.sourceModel().data(right.sibling(right.row(), sort_column), Qt.DisplayRole)
+            
+            if left_val is not None and right_val is not None:
+                # Size column - numeric sort
+                if sort_column == 1:
+                    try:
+                        return int(left_val) < int(right_val)
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Other columns - string sort
+                return str(left_val).lower() < str(right_val).lower()
 
-        ascending = self.sortOrder() == Qt.AscendingOrder
-        if ascending:
-            return left_clean.lower() < right_clean.lower()
-        else:
-            return left_clean.lower() > right_clean.lower()
+        # Name column (or fallback) - remove prefixes and compare
+        left_clean = left_text
+        right_clean = right_text
+        
+        prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
+        for prefix in prefixes:
+            if left_clean.startswith(prefix):
+                left_clean = left_clean[len(prefix):].lstrip()
+            if right_clean.startswith(prefix):
+                right_clean = right_clean[len(prefix):].lstrip()
+
+        return left_clean.lower() < right_clean.lower()
