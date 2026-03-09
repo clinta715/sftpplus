@@ -1,4 +1,5 @@
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QTimer, QDateTime, QEventLoop
+from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QTimer, QDateTime, QEventLoop, pyqtSignal
+from PyQt6.QtWidgets import QApplication
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 import base64
 import queue
@@ -49,6 +50,11 @@ def _safe_decode(s, encoding='utf-8', errors='replace'):
 
 
 class RemoteFileTableModel(QAbstractTableModel):
+    # Signals for status updates and loading state
+    status_message = pyqtSignal(str)
+    loading_started = pyqtSignal()
+    loading_finished = pyqtSignal()
+
     def __init__(self, session_id, parent=None):
         super().__init__(parent)
         self.session_id = session_id
@@ -82,27 +88,32 @@ class RemoteFileTableModel(QAbstractTableModel):
             return None
 
         try:
-            file = self.file_list[index.row()]
-        except (OSError, IOError, RuntimeError) as e:
+            file_data = self.file_list[index.row()]
+            name = file_data[0]
+            size = file_data[1]
+            mode = file_data[2]
+            mtime_str = file_data[3]
+            # Parent directory doesn't have an attr item (file_data[4])
+            is_directory = stat.S_ISDIR(mode) if name != ".." else True
+        except (Exception) as e:
             return None
 
         column = index.column()
-        is_directory = stat.S_ISDIR(file[2])  # Use stat.S_ISDIR to check if it's a directory
 
         if role == Qt.DisplayRole:
             if column == 0:
                 # Safely decode filename
-                filename = _safe_decode(file[0])
-                if is_directory:
-                    return f"[DIR] {filename}"  # Fast text indicator for directories
+                filename = _safe_decode(name)
+                if is_directory and filename != "..":
+                    return f"[DIR] {filename}"
                 else:
-                    return filename  # No indicator needed for files
+                    return filename
             elif column == 1:
-                return str(file[1])  # size
+                return str(size)
             elif column == 2:
-                return oct(file[2])[-4:]  # permissions as a string
+                return oct(mode)[-4:] if name != ".." else ""
             elif column == 3:
-                return _safe_decode(file[3])  # modified_date
+                return _safe_decode(mtime_str)
 
         if role == Qt.FontRole:
             font = QFont()
@@ -124,88 +135,65 @@ class RemoteFileTableModel(QAbstractTableModel):
         return None
 
     def sort(self, column, order):
-        # Skip sorting for very large directories to keep UI responsive
-        if len(self.file_list) > 10000:
-            return
-            
-        self.layoutAboutToBeChanged.emit()
-
-        if column == 0:
-            try:
-                self.file_list.sort(key=lambda x: _safe_decode(x[0]), reverse=(order == Qt.DescendingOrder))
-            except (OSError, IOError, RuntimeError) as e:
-                pass
-        elif column == 1:
-            try:
-                self.file_list.sort(key=lambda x: x[1], reverse=(order == Qt.DescendingOrder))
-            except (OSError, IOError, RuntimeError) as e:
-                pass
-        elif column == 2:
-            try:
-                self.file_list.sort(key=lambda x: x[2], reverse=(order == Qt.DescendingOrder))
-            except (OSError, IOError, RuntimeError) as e:
-                pass
-        elif column == 3:
-            try:
-                self.file_list.sort(key=lambda x: _safe_decode(x[3]), reverse=(order == Qt.DescendingOrder))
-            except (OSError, IOError, RuntimeError) as e:
-                pass
-
-        self.layoutChanged.emit()
+        # Don't sort here - let DirectoryFirstSortProxyModel handle sorting
+        pass
 
     def get_files(self, force_refresh=False, directory=None):
         """
         Get files for the specified directory.
-
-        Args:
-            force_refresh: If True, bypass cache and fetch fresh data
-            directory: Optional directory path. If provided, uses this instead of fetching from credentials.
-                      This prevents race conditions during directory navigation.
         """
         if directory is not None:
-            # Use provided directory (avoids race condition during navigation)
             current_dir = directory
-            ic(f"RemoteFileTableModel.get_files: using provided directory={current_dir}, force_refresh={force_refresh}")
         else:
-            # Fetch from credentials (may be stale during navigation)
             creds = get_credentials(self.session_id)
             current_dir = creds.get('current_remote_directory', '.')
-            ic(f"RemoteFileTableModel.get_files: session_id={self.session_id}, current_dir={current_dir}, force_refresh={force_refresh}")
 
         # Validate directory path
         if not current_dir or current_dir == '.':
             current_dir = '/'
 
         if not force_refresh and current_dir in self.cache and time.time() - self.cache_time.get(current_dir, 0) < self.cache_duration:
-            if self.file_list == self.cache[current_dir]:
+            cached = self.cache[current_dir]
+            if self.file_list == cached:
                 return
-            self.file_list = self.cache[current_dir]
-            self.layoutChanged.emit()
+            self.beginResetModel()
+            self.file_list = list(cached)
+            self.endResetModel()
             return
 
-        items = self.sftp_listdir_attr(current_dir)
+        # Notify that we're starting a fetch
+        self.loading_started.emit()
+        self.status_message.emit(f"Fetching file list for {current_dir}...")
+        QApplication.processEvents()
 
-        self.beginResetModel()
-        new_file_list = [("..", 0, 0, "----")]  # Parent directory entry
+        try:
+            items = self.sftp_listdir_attr(current_dir)
 
-        for item in items:
-            try:
-                # Safely decode filename
-                name = _safe_decode(item.filename)
-                size = item.st_size
-                permissions = item.st_mode  # Store st_mode as an integer
-                modified_time = QDateTime.fromSecsSinceEpoch(item.st_mtime).toString(Qt.ISODate)
-                new_file_list.append((name, size, permissions, modified_time))
-            except (OSError, IOError, RuntimeError) as e:
-                ic(f"Error processing file {item.filename if hasattr(item, 'filename') else 'unknown'}: {str(e)}")
+            self.beginResetModel()
+            # Format: (name, size, mode, modified_time, attr_item)
+            new_file_list = [("..", 0, stat.S_IFDIR | 0o755, "----", None)]
 
-        self.file_list = new_file_list
-        self.cache[current_dir] = self.file_list
-        self.cache_time[current_dir] = time.time()
-        self.endResetModel()
+            for item in items:
+                try:
+                    name = _safe_decode(item.filename)
+                    size = item.st_size
+                    mode = item.st_mode
+                    modified_time = QDateTime.fromSecsSinceEpoch(item.st_mtime).toString(Qt.ISODate)
+                    new_file_list.append((name, size, mode, modified_time, item))
+                    
+                    if len(new_file_list) % 50 == 0:
+                        QApplication.processEvents()
+                except (Exception):
+                    continue
 
-        # Debug: verify what we loaded
-        ic(f"RemoteFileTableModel.get_files: loaded {len(new_file_list)-1} items from {current_dir}")
+            self.file_list = new_file_list
+            self.cache[current_dir] = self.file_list
+            self.cache_time[current_dir] = time.time()
+            self.endResetModel()
+            
+            self.status_message.emit(f"Loaded {len(new_file_list)-1} items from {current_dir}")
+        finally:
+            self.loading_finished.emit()
 
     def non_blocking_sleep(self, ms):
         loop = QEventLoop()
