@@ -46,6 +46,86 @@ class FileBrowser(Browser):
         self.always = always
         creds = get_credentials(self.session_id)
 
+        # Get selected items
+        current_browser = self.table
+        if current_browser is None:
+            return
+            
+        indexes = current_browser.selectedIndexes()
+        if not indexes:
+            return
+            
+        # Get unique rows from selected indexes
+        processed_rows = set()
+        selected_paths = []
+        
+        for index in indexes:
+            row = index.row()
+            if row in processed_rows:
+                continue
+            processed_rows.add(row)
+            
+            # Get filename from first column
+            filename_index = index.sibling(row, 0)
+            selected_item = current_browser.model().data(filename_index, Qt.DisplayRole)
+            
+            # Remove type prefix if present
+            filename = selected_item
+            prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
+            for prefix in prefixes:
+                if filename.startswith(prefix):
+                    filename = filename[len(prefix):].lstrip()
+                    break
+            
+            full_path = os.path.join(creds.get('current_local_directory'), filename)
+            selected_paths.append(full_path)
+        
+        if not selected_paths:
+            return
+        
+        # Prompt for confirmation for all selected items
+        if not self.always:
+            if len(selected_paths) == 1:
+                prompt_msg = f"Are you sure you want to delete the directory '{selected_paths[0]}'?"
+            else:
+                prompt_msg = f"Are you sure you want to delete {len(selected_paths)} directories?"
+                
+            response = QMessageBox.question(
+                None,
+                'Confirm Delete',
+                prompt_msg,
+                Qt.MsgBtn_Yes | Qt.MsgBtn_No,
+                Qt.MsgBtn_No
+            )
+            if response != Qt.MsgBtn_Yes:
+                return
+        
+        # Remove each selected directory
+        for local_path in selected_paths:
+            try:
+                # Check if path exists
+                if not os.path.exists(local_path):
+                    self.message_signal.emit(f"Path '{local_path}' not found locally.")
+                    continue
+                
+                # Check if it's a file (not directory)
+                if os.path.isfile(local_path):
+                    os.remove(local_path)
+                    self.message_signal.emit(f"File '{local_path}' removed successfully.")
+                    continue
+                
+                # It's a directory - recursively remove
+                shutil.rmtree(local_path)
+                self.message_signal.emit(f"Directory '{local_path}' removed successfully.")
+            except (OSError, IOError, RuntimeError) as e:
+                self.message_signal.emit(f"remove_directory_with_prompt() {e}")
+                ic(e)
+        
+        # Refresh the browser
+        self.model.get_files()
+        self.notify_observers()
+        creds = get_credentials(self.session_id)
+
         # for removing LOCAL directories
         if local_path is None or local_path is False:
             # current_browser = self.focusWidget()

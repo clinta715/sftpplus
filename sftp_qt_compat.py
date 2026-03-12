@@ -163,6 +163,10 @@ class QtCompat:
     Key_Right = QtCore.Qt.Key.Key_Right
     Key_Left = QtCore.Qt.Key.Key_Left
     Key_Tab = QtCore.Qt.Key.Key_Tab
+    
+    # ItemSelectionModel flags
+    Select = QtCore.QItemSelectionModel.SelectionFlag.Select
+    Rows = QtCore.QItemSelectionModel.SelectionFlag.Rows
 
 # Add QApplication for convenience
 def get_qapplication():

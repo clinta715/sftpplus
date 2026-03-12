@@ -7,10 +7,12 @@ Or quick tests: python test_sftp.py
 
 import sys
 import os
+import inspect
 from unittest.mock import Mock, patch, MagicMock
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 # Only import pytest if available
 try:
@@ -178,8 +180,8 @@ class TestSecurityFixes:
         # Port should be between 1 and 65535
         assert 1 <= 22 <= 65535  # Valid SSH port
         assert 1 <= 8080 <= 65535  # Valid HTTP alternate port
-        assert not (0 <= 65535)  # 0 is invalid
-        assert not (65536 <= 65535)  # 65536 is invalid
+        assert not (1 <= 0 <= 65535)  # 0 is invalid
+        assert not (1 <= 65536 <= 65535)  # 65536 is invalid
     
     def test_shlex_imported(self):
         """Test that shlex is imported for command sanitization"""
@@ -188,6 +190,25 @@ class TestSecurityFixes:
         # Check that shlex is imported in download worker
         import shlex
         assert 'shlex' in dir(sftp_downloadworkerclass) or 'shlex' in str(sftp_downloadworkerclass)
+
+    def test_auto_add_policy_removed_from_pool(self):
+        """Test that AutoAddPolicy is not used in connection pool"""
+        from sftp_connection_pool import ConnectionPool
+        
+        # Inspect source code of _create_ssh_connection
+        source = inspect.getsource(ConnectionPool._create_ssh_connection)
+        assert "AutoAddPolicy" not in source, "AutoAddPolicy should not be used in ConnectionPool"
+        assert "RejectPolicy" in source, "RejectPolicy should be used in ConnectionPool"
+
+    def test_terminal_policy_secure(self):
+        """Test that terminal widget uses secure policy"""
+        from sftp_terminal_widget import SSHTerminalWidget
+        
+        # Inspect source code of connect_ssh
+        source = inspect.getsource(SSHTerminalWidget.connect_ssh)
+        assert "AutoAddPolicy" not in source, "AutoAddPolicy should not be used in SSHTerminalWidget"
+        assert "_setup_host_key_policy" in source, "Should call _setup_host_key_policy"
+
 
 
 class TestSFTPOperations:
@@ -279,6 +300,15 @@ def run_quick_tests():
     test_thread.test_response_queues_lock_exists()
     test_thread.test_creds_lock_exists()
     print("  ✓ Thread safety tests passed")
+    
+    # Test security fixes
+    print("✓ Testing security fixes...")
+    test_sec = TestSecurityFixes()
+    test_sec.test_port_range_validation()
+    test_sec.test_shlex_imported()
+    test_sec.test_auto_add_policy_removed_from_pool()
+    test_sec.test_terminal_policy_secure()
+    print("  ✓ Security fix tests passed")
     
     # Test SFTPOperations
     print("✓ Testing SFTPOperations...")

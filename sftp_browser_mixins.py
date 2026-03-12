@@ -11,8 +11,9 @@ from PyQt6.QtWidgets import QMenu, QInputDialog, QMessageBox
 from sftp_qt_compat import Qt
 from icecream import ic
 import os
+import threading
 
-from sftp_creds import get_credentials
+from sftp_creds import get_credentials, sanitize_error_message
 from sftp_hostdataeditor import load_connection_data, save_connection_data
 from sftp_operations import SFTPOperations
 
@@ -107,8 +108,8 @@ class BookmarkMixin:
                 self.message_signal.emit("Failed to save bookmark")
                 return False
                 
-        except Exception as e:
-            self.message_signal.emit(f"Error adding bookmark: {e}")
+        except (OSError, IOError, RuntimeError) as e:
+            self.message_signal.emit(f"Error adding bookmark: {sanitize_error_message(str(e))}")
             return False
     
     def get_bookmarks(self):
@@ -126,7 +127,7 @@ class BookmarkMixin:
                 else:
                     normalized.append(b)
             return normalized
-        except Exception:
+        except (OSError, IOError, RuntimeError):
             return []
     
     def navigate_to_bookmark(self, path):
@@ -193,36 +194,41 @@ class BookmarkMixin:
 class FileOpsMixin:
     """Mixin for SFTP file operations using SFTPOperations API with caching"""
     
-    _sftp_ops_cache = None
-    _sftp_ops_session_id = None
-    
-    def get_sftp_operations(self):
-        """Get cached SFTPOperations instance"""
-        creds = get_credentials(self.session_id)
-        
-        if (self._sftp_ops_cache is not None and 
-            self._sftp_ops_session_id == self.session_id):
-            return self._sftp_ops_cache
-        
-        self._sftp_ops_cache = SFTPOperations(
-            hostname=creds.get('hostname', ''),
-            username=creds.get('username', ''),
-            password=creds.get('password', ''),
-            port=creds.get('port', 22),
-            key=creds.get('key')
-        )
-        self._sftp_ops_session_id = self.session_id
-        return self._sftp_ops_cache
-    
-    def clear_sftp_cache(self):
-        """Clear cached SFTPOperations instance"""
-        if self._sftp_ops_cache is not None:
-            try:
-                self._sftp_ops_cache.close()
-            except Exception:
-                pass
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self._sftp_ops_cache = None
         self._sftp_ops_session_id = None
+        self._sftp_ops_lock = threading.Lock()
+    
+    def get_sftp_operations(self):
+        """Get cached SFTPOperations instance (thread-safe)"""
+        with self._sftp_ops_lock:
+            creds = get_credentials(self.session_id)
+            
+            if (self._sftp_ops_cache is not None and 
+                self._sftp_ops_session_id == self.session_id):
+                return self._sftp_ops_cache
+            
+            self._sftp_ops_cache = SFTPOperations(
+                hostname=creds.get('hostname', ''),
+                username=creds.get('username', ''),
+                password=creds.get('password', ''),
+                port=creds.get('port', 22),
+                key=creds.get('key')
+            )
+            self._sftp_ops_session_id = self.session_id
+            return self._sftp_ops_cache
+    
+    def clear_sftp_cache(self):
+        """Clear cached SFTPOperations instance (thread-safe)"""
+        with self._sftp_ops_lock:
+            if self._sftp_ops_cache is not None:
+                try:
+                    self._sftp_ops_cache.close()
+                except (OSError, IOError, RuntimeError):
+                    pass
+            self._sftp_ops_cache = None
+            self._sftp_ops_session_id = None
     
     def sftp_mkdir(self, remote_path):
         """Create remote directory"""
@@ -231,8 +237,8 @@ class FileOpsMixin:
             ops.mkdir(remote_path)
             self.message_signal.emit(f"Created directory: {remote_path}")
             return True
-        except Exception as e:
-            self.message_signal.emit(f"Error creating directory: {e}")
+        except (OSError, IOError, RuntimeError) as e:
+            self.message_signal.emit(f"Error creating directory: {sanitize_error_message(str(e))}")
             return False
     
     def sftp_rmdir(self, remote_path):
@@ -242,8 +248,8 @@ class FileOpsMixin:
             ops.rmdir(remote_path)
             self.message_signal.emit(f"Removed directory: {remote_path}")
             return True
-        except Exception as e:
-            self.message_signal.emit(f"Error removing directory: {e}")
+        except (OSError, IOError, RuntimeError) as e:
+            self.message_signal.emit(f"Error removing directory: {sanitize_error_message(str(e))}")
             return False
     
     def sftp_remove(self, remote_path):
@@ -253,8 +259,8 @@ class FileOpsMixin:
             ops.remove(remote_path)
             self.message_signal.emit(f"Deleted: {remote_path}")
             return True
-        except Exception as e:
-            self.message_signal.emit(f"Error deleting file: {e}")
+        except (OSError, IOError, RuntimeError) as e:
+            self.message_signal.emit(f"Error deleting file: {sanitize_error_message(str(e))}")
             return False
     
     def sftp_rename(self, remote_path, new_name):
@@ -270,8 +276,8 @@ class FileOpsMixin:
             self.message_signal.emit(f"Renamed to: {new_name}")
             self.refresh_files()
             return True
-        except Exception as e:
-            self.message_signal.emit(f"Error renaming: {e}")
+        except (OSError, IOError, RuntimeError) as e:
+            self.message_signal.emit(f"Error renaming: {sanitize_error_message(str(e))}")
             return False
     
     def sftp_exists(self, path):
@@ -279,7 +285,7 @@ class FileOpsMixin:
         try:
             ops = self.get_sftp_operations()
             return ops.exists(path)
-        except Exception:
+        except (OSError, IOError, RuntimeError):
             return False
     
     def is_remote_directory(self, partial_remote_path):
@@ -287,7 +293,7 @@ class FileOpsMixin:
         try:
             ops = self.get_sftp_operations()
             return ops.is_directory(partial_remote_path)
-        except Exception:
+        except (OSError, IOError, RuntimeError):
             return False
     
     def is_remote_file(self, partial_remote_path):
@@ -295,7 +301,7 @@ class FileOpsMixin:
         try:
             ops = self.get_sftp_operations()
             return ops.is_file(partial_remote_path)
-        except Exception:
+        except (OSError, IOError, RuntimeError):
             return False
     
     def sftp_listdir(self, remote_path):
@@ -303,8 +309,8 @@ class FileOpsMixin:
         try:
             ops = self.get_sftp_operations()
             return ops.list(remote_path)
-        except Exception as e:
-            ic(f"Error listing directory: {e}")
+        except (OSError, IOError, RuntimeError) as e:
+            ic(f"Error listing directory: {sanitize_error_message(str(e))}")
             return []
     
     def sftp_listdir_attr(self, remote_path):
@@ -312,8 +318,8 @@ class FileOpsMixin:
         try:
             ops = self.get_sftp_operations()
             return ops.list_attr(remote_path)
-        except Exception as e:
-            ic(f"Error listing directory attrs: {e}")
+        except (OSError, IOError, RuntimeError) as e:
+            ic(f"Error listing directory attrs: {sanitize_error_message(str(e))}")
             return []
     
     def get_normalized_remote_path(self, current_remote_directory, partial_remote_path=None):

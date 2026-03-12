@@ -797,6 +797,12 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         
     def update_console(self, message):
         # Update status bar with latest message
+        # Truncate long messages based on window width to prevent resizing
+        # Rough estimate: each character ~7px, reserve 200px for other status bar elements
+        window_width = self.width() if hasattr(self, 'width') and self.width() > 0 else 800
+        max_chars = max(50, min(200, (window_width - 200) // 7))
+        if len(message) > max_chars:
+            message = message[:max_chars] + "..."
         self.status_message.setText(message)
         # Reset to normal style (in case it was showing an error)
         self.status_message.setStyleSheet("""
@@ -1501,15 +1507,24 @@ Do you want to trust this host and add it to known_hosts?"""
                 total = active_count + queued_count
                 msg = f'There are {total} pending file transfers ({active_count} active, {queued_count} queued).\n\n'
                 msg += 'Unfinished transfers will be saved and resumed on next launch.\n\n'
-                msg += 'Exit and save transfers?'
-                reply = QMessageBox.question(
-                    self, 'Confirm Exit',
-                    msg,
-                    Qt.MsgBtn_Yes | Qt.MsgBtn_No, Qt.MsgBtn_No
-                )
-                if reply == Qt.MsgBtn_No:
+                msg += 'What would you like to do?'
+                reply = QMessageBox(self)
+                reply.setWindowTitle("Confirm Exit")
+                reply.setText(msg)
+                save_button = reply.addButton("Exit and Save Transfers", QMessageBox.ButtonRole.ActionRole)
+                discard_button = reply.addButton("Exit and Discard Transfers", QMessageBox.ButtonRole.DestructiveRole)
+                cancel_button = reply.addButton(QMessageBox.StandardButton.Cancel)
+                reply.setDefaultButton(save_button)
+                reply.exec()
+                
+                if reply.clickedButton() == cancel_button or reply.clickedButton() == cancel_button:
                     event.ignore()
                     return
+                elif reply.clickedButton() == discard_button:
+                    self.transfer_queue_widget.clear_all_transfers()
+                    from sftp_downloadworkerclass import clear_sftp_queue
+                    clear_sftp_queue()
+                    self.message_signal.emit("Transfers discarded")
 
             event.accept()
         except (OSError, IOError, RuntimeError) as e:

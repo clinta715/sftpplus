@@ -15,6 +15,7 @@ from sftp_downloadworkerclass import Transfer, DownloadWorker, SFTPJob, sftp_que
 from sftp_theme import (BUTTON_STYLE_DARK, LIST_WIDGET_STYLE_DARK, PROGRESS_BAR_STYLE_DARK,
                         TEXT_EDIT_STYLE_DARK, DARK_THEME)
 from sftp_preferences import get_preferences
+from sftp_transfer_handler import cancel_active_directory_transfer
 
 
 QUEUE_FILE_PATH = os.path.join(os.path.expanduser('~'), '.sftp_client_transfer_queue.json')
@@ -53,6 +54,9 @@ class TransferQueueWidget(QWidget):
         self._transfer_lock = QMutex()
         self._released_transfers = set()
         self._active_transfers_lock = QMutex()
+        
+        # Debounce timer for refresh - prevents excessive refreshing during bulk transfers
+        self._refresh_debounce_timer = None
         
         self.init_ui()
 
@@ -126,12 +130,19 @@ class TransferQueueWidget(QWidget):
         
         self.main_layout.addLayout(self.control_layout)
 
-        # Add text console
+        # Add text console with dynamic width based on window size
         self.text_console = QTextEdit()
         self.text_console.setReadOnly(True)
         self.text_console.setMaximumHeight(80)
         self.text_console.setStyleSheet(TEXT_EDIT_STYLE_DARK)
         self.main_layout.addWidget(self.text_console)
+        
+        # Ensure console width is reasonable but not constraining
+        self.text_console.setMinimumWidth(300)
+        self.text_console.setSizePolicy(
+            QSizePolicy.Policy.Expanding, 
+            QSizePolicy.Policy.Fixed
+        )
 
         # Set the main layout
         self.setLayout(self.main_layout)
@@ -196,7 +207,23 @@ class TransferQueueWidget(QWidget):
                 self._observees.remove(observee)
 
     def notify_observees(self):
-        """Notify all observers that transfers completed. Thread-safe."""
+        """Notify all observers that transfers completed. Thread-safe.
+        Uses debouncing to prevent excessive refreshing during bulk transfers."""
+        # Cancel any pending refresh
+        if self._refresh_debounce_timer is not None:
+            self._refresh_debounce_timer.stop()
+        
+        # Schedule a refresh after a short delay to batch multiple rapid updates
+        from PyQt6.QtCore import QTimer
+        self._refresh_debounce_timer = QTimer()
+        self._refresh_debounce_timer.setSingleShot(True)
+        self._refresh_debounce_timer.timeout.connect(self._do_notify_observees)
+        self._refresh_debounce_timer.start(500)  # 500ms debounce
+    
+    def _do_notify_observees(self):
+        """Actually notify observers - called after debounce delay"""
+        self._refresh_debounce_timer = None
+        
         # Copy list under lock to avoid holding lock during callbacks
         with QMutexLocker(self._observees_lock):
             observees_copy = list(self._observees)
@@ -859,14 +886,21 @@ class TransferQueueWidget(QWidget):
     def stop_all_transfers(self):
         """Cancel all active transfers"""
         try:
+            # Cancel any active directory traversal
+            cancel_active_directory_transfer()
+            
+            # Clear the transfer queue to stop new transfers from starting
+            clear_sftp_queue()
+            
+            # Stop all active transfers
             for transfer in self.transfers:
                 if transfer.active:
                     if hasattr(transfer.download_worker, '_stop_flag'):
                         transfer.download_worker._stop_flag = True
-                    if hasattr(transfer.download_worker, 'cancel'):
-                        transfer.download_worker.cancel()
+                    if hasattr(transfer.download_worker, 'stop_transfer'):
+                        transfer.download_worker.stop_transfer()
             
-            self.text_console.append("Cancelling all transfers...")
+            self.text_console.append("Cancelling all transfers and clearing queue...")
             
         except (OSError, IOError, RuntimeError) as e:
             self.text_console.append(f"Error stopping transfers: {e}")
@@ -888,6 +922,20 @@ class TransferQueueWidget(QWidget):
                 
         except (OSError, IOError, RuntimeError) as e:
             self.text_console.append(f"Error clearing completed transfers: {e}")
+    
+    def clear_all_transfers(self):
+        """Remove all transfers without saving"""
+        try:
+            for transfer in self.transfers[:]:
+                if transfer.active:
+                    if hasattr(transfer.download_worker, '_stop_flag'):
+                        transfer.download_worker._stop_flag = True
+                    if hasattr(transfer.download_worker, 'cancel'):
+                        transfer.download_worker.cancel()
+                self.cleanup_transfer(transfer.transfer_id)
+            self.transfer_list.clear()
+        except (OSError, IOError, RuntimeError) as e:
+            ic(f"Error clearing all transfers: {e}")
 
     def cleanup(self):
         """Cleanup resources when widget is destroyed"""

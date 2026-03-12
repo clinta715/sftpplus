@@ -1,4 +1,4 @@
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QTimer, QDateTime, QEventLoop, pyqtSignal
+from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QTimer, QDateTime, QEventLoop, pyqtSignal, QThreadPool
 from PyQt6.QtWidgets import QApplication
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 import base64
@@ -9,6 +9,7 @@ from PyQt6.QtGui import QFont, QColor
 from sftp_creds import get_credentials, create_random_integer
 from sftp_downloadworkerclass import create_response_queue, delete_response_queue
 from sftp_operations import SFTPOperations
+from sftp_transfer_handler import FileListWorker
 import stat
 
 
@@ -144,7 +145,7 @@ class RemoteFileTableModel(QAbstractTableModel):
 
     def get_files(self, force_refresh=False, directory=None):
         """
-        Get files for the specified directory.
+        Get files for the specified directory (Non-blocking).
         """
         if directory is not None:
             current_dir = directory
@@ -168,11 +169,16 @@ class RemoteFileTableModel(QAbstractTableModel):
         # Notify that we're starting a fetch
         self.loading_started.emit()
         self.status_message.emit(f"Fetching file list for {current_dir}...")
-        QApplication.processEvents()
+        
+        worker = FileListWorker(self.session_id, current_dir, is_remote=self.is_remote_browser())
+        worker.signals.finished.connect(self._on_files_ready)
+        worker.signals.error.connect(self._on_files_error)
+        
+        QThreadPool.globalInstance().start(worker)
 
+    def _on_files_ready(self, path, items):
+        """Callback for when file list is ready (Called from background thread via signal)"""
         try:
-            items = self.sftp_listdir_attr(current_dir)
-
             self.beginResetModel()
             # Format: (name, size, mode, modified_time, attr_item)
             new_file_list = [("..", 0, stat.S_IFDIR | 0o755, "----", None)]
@@ -184,20 +190,23 @@ class RemoteFileTableModel(QAbstractTableModel):
                     mode = item.st_mode
                     modified_time = QDateTime.fromSecsSinceEpoch(item.st_mtime).toString(Qt.ISODate)
                     new_file_list.append((name, size, mode, modified_time, item))
-                    
-                    if len(new_file_list) % 50 == 0:
-                        QApplication.processEvents()
-                except (Exception):
+                except (Exception) as e:
+                    ic(f"Error parsing item: {e}")
                     continue
 
             self.file_list = new_file_list
-            self.cache[current_dir] = self.file_list
-            self.cache_time[current_dir] = time.time()
+            self.cache[path] = self.file_list
+            self.cache_time[path] = time.time()
             self.endResetModel()
             
-            self.status_message.emit(f"Loaded {len(new_file_list)-1} items from {current_dir}")
+            self.status_message.emit(f"Loaded {len(new_file_list)-1} items from {path}")
         finally:
             self.loading_finished.emit()
+
+    def _on_files_error(self, path, error_msg):
+        """Callback for when file listing fails"""
+        self.status_message.emit(f"Error loading {path}: {error_msg}")
+        self.loading_finished.emit()
 
     def non_blocking_sleep(self, ms):
         loop = QEventLoop()

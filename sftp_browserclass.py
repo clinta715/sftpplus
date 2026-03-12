@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import QTableView, QApplication, QWidget, QVBoxLayout, QLabel, QFileDialog, QMessageBox, QInputDialog, QMenu, QHeaderView, QProgressBar, QSizePolicy, QTreeWidget, QTreeWidgetItem, QPushButton, QHBoxLayout, QProgressDialog, QLineEdit, QToolButton
-from PyQt6.QtCore import pyqtSignal, QTimer, QEventLoop, QModelIndex
+from PyQt6.QtCore import pyqtSignal, QTimer, QEventLoop, QModelIndex, QThreadPool
 from sftp_qt_compat import Qt
 import stat
 import os
@@ -15,7 +15,7 @@ import threading
 
 from sftp_creds import get_credentials, create_random_integer, set_credentials
 from sftp_downloadworkerclass import (create_response_queue, delete_response_queue,
-                                       check_response_queue, QueueItem, ResponseQueueContext,
+                                       check_response_queue, wait_for_response, QueueItem, ResponseQueueContext,
                                        add_sftp_job)
 from sftp_session_executor import SFTPSessionAPI, create_session_api
 from sftp_session import SFTPCredentials, get_session_manager
@@ -31,6 +31,8 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         self.model = None
         self.session_id = session_id
         self._notifying = False
+        self._current_traversal_worker = None
+        self._current_traversal_thread = None
         
         # THREAD SAFETY: Cancel flag with lock
         self._cancel_lock = threading.Lock()
@@ -938,22 +940,17 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         self.reset_cancel_flag()
         self.progressBar.setRange(0, 100)
         self.progressBar.setValue(0)
-        progress_value = 0
-        start_time = time.time()
         
         try:
-            while not check_response_queue(job_id):
-                if time.time() - start_time > timeout:
-                    raise TimeoutError("Job timed out")
-                
-                # Check for user cancellation (thread-safe)
-                if self.is_canceled():
-                    raise KeyboardInterrupt("User canceled the transfer")
-                    
-                progress_value = min(progress_value + 10, 100)
-                self.progressBar.setValue(progress_value)
-                self.non_blocking_sleep(100)
-                QApplication.processEvents()
+            # Use blocking wait instead of busy-polling
+            success, response = wait_for_response(job_id, timeout=timeout)
+            
+            if not success:
+                raise TimeoutError("Job timed out")
+            
+            # Check for user cancellation (thread-safe)
+            if self.is_canceled():
+                raise KeyboardInterrupt("User canceled the transfer")
 
         except (TimeoutError, KeyboardInterrupt) as e:
             self.message_signal.emit(f"Job interrupted: {str(e)}")
@@ -1030,7 +1027,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                 if ok and new_name and new_name != selected_item:
                     creds = get_credentials(self.session_id)
                     # Use current remote or local directory depending on view type
-                    if self.is_local_view:
+                    if hasattr(self, 'is_remote_browser') and not self.is_remote_browser():
                         old_path = os.path.join(creds.get('current_local_directory'), selected_item)
                         new_path = os.path.join(creds.get('current_local_directory'), new_name)
                         try:
@@ -1139,7 +1136,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                 self.change_directory(new_path)
             else:
                 # Handle file upload/download
-                if self.is_local_view:
+                if hasattr(self, 'is_remote_browser') and not self.is_remote_browser():
                     # Upload the file to the remote server
                     remote_path, _ = QFileDialog.getSaveFileName(self, "Select Remote Location", filename)
                     if remote_path:
@@ -1148,23 +1145,21 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                     # Download the file from the remote server
                     local_path, _ = QFileDialog.getSaveFileName(self, "Select Local Location", filename)
                     if local_path:
+                        self.upload_download(filename, local_path)
+                    if local_path:
                         self.upload_download(new_path)
 
         except (OSError, IOError, RuntimeError) as e:
             self.message_signal.emit(f"double_click_handler() error: {e}")
 
     def context_menu_handler(self, point):
-        ic(f"context_menu_handler: called on {self.__class__.__name__}, title={self.title}")
-        
         # If point is not provided, use the center of the list widget
         if not point:
             point = self.table.rect().center()
-            ic("context_menu_handler: using center of widget")
 
         # Get the currently focused widget
         # current_browser = self.focusWidget()
         current_browser = self.table
-        ic(f"context_menu_handler: current_browser={current_browser}")
         
         if current_browser is not None:
             # If we have a point, ensure the item at that point is selected
@@ -1173,16 +1168,16 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                 if index_at_point.isValid():
                     # If the item at point is not already selected, select it exclusively
                     if not current_browser.selectionModel().isSelected(index_at_point):
+                        # Clear existing selection and select the clicked item
+                        current_browser.clearSelection()
+                        current_browser.selectionModel().select(index_at_point, 
+                            Qt.Select | Qt.Rows)
                         current_browser.setCurrentIndex(index_at_point)
-                        # For multi-select, we might want to keep others, but standard behavior
-                        # is usually to select the right-clicked item.
             
             # Debug: check what's selected
             indexes = current_browser.selectedIndexes()
-            ic(f"context_menu_handler: selected rows = {[i.row() for i in indexes]}")
             
             if not indexes:
-                ic("context_menu_handler: WARNING - no rows selected!")
                 # Don't show menu if nothing selected
                 return
             
@@ -1216,22 +1211,22 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                 no_bookmarks_action = bookmarks_menu.addAction("No bookmarks")
                 no_bookmarks_action.setEnabled(False)
 
-            # Connect the actions to corresponding methods
-            rename_action.triggered.connect(self.prompt_and_rename)
-            remove_dir_action.triggered.connect(self.remove_directory_with_prompt)
-            change_dir_action.triggered.connect(self.change_directory_handler)
-            upload_download_action.triggered.connect(self.upload_download)
-            prompt_and_create_directory.triggered.connect(self.prompt_and_create_directory)
-            view_edit_action.triggered.connect(self.view_edit_file)
-            
-            # Connect the new Refresh action
-            refresh_action.triggered.connect(self.refresh_files)
-            
-            # Connect bookmark action
-            add_bookmark_action.triggered.connect(lambda: self.add_bookmark())
+        # Connect actions
+        rename_action.triggered.connect(self.prompt_and_rename)
+        remove_dir_action.triggered.connect(self.remove_directory_with_prompt)
+        change_dir_action.triggered.connect(self.change_directory_handler)
+        upload_download_action.triggered.connect(self.upload_download)
+        prompt_and_create_directory.triggered.connect(self.prompt_and_create_directory)
+        view_edit_action.triggered.connect(self.view_edit_file)
+        
+        # Connect the new Refresh action
+        refresh_action.triggered.connect(self.refresh_files)
+        
+        # Connect bookmark action
+        add_bookmark_action.triggered.connect(lambda: self.add_bookmark())
 
-            # Show the menu at the cursor position
-            menu.exec(current_browser.mapToGlobal(point))
+        # Show the menu at the cursor position
+        menu.exec(current_browser.mapToGlobal(point))
 
     def upload_download(self):
         creds = get_credentials(self.session_id)
@@ -1450,7 +1445,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
 
     def traverse_and_transfer(self, source_dir, dest_dir, is_source_remote, is_dest_remote,
                              skip_all=False, overwrite_all=False, resume_all=False,
-                             always=0, is_top_level=True):
+                             always=0, is_top_level=True, cancel_flag=None):
         """
         Unified directory traversal and transfer method.
         
@@ -1464,10 +1459,15 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             resume_all: Resume all existing files flag
             always: Flag for directory overwrite confirmation (0=ask, 1=always)
             is_top_level: True if this is the initial call
+            cancel_flag: Optional callable that returns True if cancelled
             
         Returns:
             tuple: (skip_all, overwrite_all, resume_all) - updated flags
         """
+        if cancel_flag and cancel_flag():
+            self.message_signal.emit("Transfer cancelled")
+            return skip_all, overwrite_all, resume_all
+        
         creds = get_credentials(self.session_id)
         action = None
         
@@ -1524,10 +1524,15 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                     if action == "skip":
                         continue
                     
+                    if cancel_flag and cancel_flag():
+                        self.message_signal.emit("Transfer cancelled")
+                        return skip_all, overwrite_all, resume_all
+                    
                     self.message_signal.emit(f"Processing directory: {source_path}")
                     skip_all, overwrite_all, resume_all = self.traverse_and_transfer(
                         source_path, dest_path, is_source_remote, is_dest_remote,
-                        skip_all, overwrite_all, resume_all, always, is_top_level=False
+                        skip_all, overwrite_all, resume_all, always, is_top_level=False,
+                        cancel_flag=cancel_flag
                     )
                 else:
                     # Handle files
@@ -1540,6 +1545,10 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                         return skip_all, overwrite_all, resume_all
                     if action == "skip":
                         continue
+                    
+                    if cancel_flag and cancel_flag():
+                        self.message_signal.emit("Transfer cancelled")
+                        return skip_all, overwrite_all, resume_all
                     
                     resume = (action == "resume" or resume_all)
                     
@@ -1579,14 +1588,50 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                         skip_all=False, overwrite_all=False, resume_all=False, always=0):
         """
         Upload a directory and its contents to the remote server.
-        Uses unified traverse_and_transfer method.
+        Runs in background thread to avoid UI hang.
         """
-        return self.traverse_and_transfer(
-            source_directory, destination_directory,
+        from sftp_transfer_handler import DirectoryTransferTask
+        from PyQt6.QtCore import QThread
+        
+        thread = QThread()
+        worker = DirectoryTransferTask(
+            self.session_id, source_directory, destination_directory,
             is_source_remote=False, is_dest_remote=True,
             skip_all=skip_all, overwrite_all=overwrite_all, resume_all=resume_all,
-            always=always, is_top_level=True
+            browser=self
         )
+        worker.moveToThread(thread)
+        
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        
+        # Store reference for cleanup
+        self._current_traversal_worker = worker
+        self._current_traversal_thread = thread
+        
+        # Also clean up previous thread if one exists
+        if hasattr(self, '_previous_traversal_thread') and self._previous_traversal_thread:
+            self._previous_traversal_thread.quit()
+            self._previous_traversal_thread.wait()
+        self._previous_traversal_thread = thread
+        
+        thread.start()
+        self.message_signal.emit(f"Started upload of {source_directory}")
+        return skip_all, overwrite_all, resume_all
+
+    def _handle_worker_prompt(self, worker, path):
+        """Handle overwrite prompt request from background worker on UI thread"""
+        action = self.prompt_overwrite(path)
+        worker.set_prompt_result(action)
+
+    def cancel_current_transfer(self):
+        """Cancel the current directory transfer"""
+        if hasattr(self, '_current_traversal_worker') and self._current_traversal_worker:
+            self._current_traversal_worker.cancel()
+            self.message_signal.emit("Cancelling transfer...")
+            self._current_traversal_worker = None
 
     def prompt_overwrite(self, item_path):
         """Prompt user for overwrite action - should be implemented in base class"""
@@ -1819,16 +1864,21 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             })
             
             if save_connection_data(host_data):
-                self.message_signal.emit(f"Bookmark added: {name} ({current_dir})")
+                self.message_signal.emit(f"Bookmark '{name}' deleted")
                 return True
-            else:
-                self.message_signal.emit("Failed to save bookmark")
-                return False
-                
-        except (OSError, IOError, RuntimeError) as e:
-            self.message_signal.emit(f"Error adding bookmark: {e}")
+        except Exception as e:
+            self.message_signal.emit(f"Error removing bookmark: {e}")
             return False
-
+    
+    def cleanup(self):
+        """Cleanup browser resources including running threads"""
+        # Stop any running directory traversal
+        if hasattr(self, '_current_traversal_worker') and self._current_traversal_worker:
+            self._current_traversal_worker.cancel()
+        if hasattr(self, '_current_traversal_thread') and self._current_traversal_thread:
+            self._current_traversal_thread.quit()
+            self._current_traversal_thread.wait()
+    
     def get_bookmarks(self):
         """Get bookmarks for current hostname"""
         try:

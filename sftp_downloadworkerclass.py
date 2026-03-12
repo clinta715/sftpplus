@@ -172,6 +172,23 @@ def check_response_queue(job_id):
     except queue.Empty:
         return None
 
+def wait_for_response(job_id, timeout=30.0):
+    """
+    Wait for response from queue with blocking (efficient, no busy-polling).
+    Returns (success, response) tuple.
+    Thread-safe.
+    """
+    with response_queues_lock:
+        if job_id not in response_queues:
+            return (False, None)
+        q = response_queues[job_id]
+    
+    try:
+        response = q.get(timeout=timeout)
+        return (True, response)
+    except queue.Empty:
+        return (False, None)
+
 def put_response(transfer_id, *items):
     """Thread-safe function to put items into response queue"""
     with response_queues_lock:
@@ -731,8 +748,8 @@ class DownloadWorker(QRunnable):
             put_response(self.transfer_id, "error", str(e))
 
     def stop_transfer(self):
-        """Stop the transfer gracefully"""
+        """Stop the transfer by closing the connection to abort ongoing transfer"""
         self._stop_flag = True
         self.signals.message.emit(self.transfer_id, f"Transfer {self.transfer_id} stopping...")
         self.signals.finished.emit(self.transfer_id)
-        self._cleanup_connections(error=False)
+        self._cleanup_connections(error=True)

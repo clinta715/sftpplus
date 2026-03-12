@@ -98,7 +98,7 @@ class ConnectionPool:
                         except Exception:
                             try:
                                 sftp.close()
-                            except:
+                            except (OSError, IOError):
                                 pass
                             continue
                     
@@ -206,7 +206,7 @@ class ConnectionPool:
                 try:
                     key_file.seek(0)
                     return key_type.from_private_key(key_file)
-                except:
+                except (OSError, IOError, ValueError):
                     continue
         
         expanded_path = os.path.expanduser(key_data)
@@ -214,7 +214,7 @@ class ConnectionPool:
             for key_type in key_types:
                 try:
                     return key_type.from_private_key_file(expanded_path)
-                except:
+                except (OSError, IOError, ValueError):
                     continue
         
         return None
@@ -237,7 +237,7 @@ class ConnectionPool:
             # If not found in any active ConnectionInfo, just close it
             try:
                 sftp.close()
-            except:
+            except (OSError, IOError):
                 pass
     
     def close_connection(self, hostname: str, port: int, username: str):
@@ -256,11 +256,11 @@ class ConnectionPool:
         for sftp in all_channels:
             try:
                 sftp.close()
-            except:
+            except (OSError, IOError):
                 pass
         try:
             conn_info.ssh.close()
-        except:
+        except (OSError, IOError):
             pass
         conn_info.idle_sftp_channels.clear()
         conn_info.busy_sftp_channels.clear()

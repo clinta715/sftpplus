@@ -1,6 +1,41 @@
 import os
+import re
 import threading
 from icecream import ic
+
+_SENSITIVE_PATTERNS = [
+    (re.compile(r'password[\'"]?\s*[:=]\s*[\'"][^\'"]*[\'"]', re.IGNORECASE), 'password=***'),
+    (re.compile(r'password[\'"]?\s*[:=]\s*\S+', re.IGNORECASE), 'password=***'),
+    (re.compile(r'-----BEGIN.*PRIVATE KEY-----.*-----END.*PRIVATE KEY-----', re.DOTALL), '[PRIVATE KEY REMOVED]'),
+    (re.compile(r'key[\'"]?\s*[:=]\s*[\'"][^\'"]{20,}[\'"]', re.IGNORECASE), 'key=***'),
+]
+
+def sanitize_error_message(message, max_length=500):
+    """
+    Remove sensitive data from error messages.
+    
+    Removes:
+    - Passwords and credentials
+    - Private key content
+    - Long key strings
+    
+    Args:
+        message: The error message to sanitize
+        max_length: Maximum length for the message (truncates if longer)
+    
+    Returns:
+        Sanitized message string
+    """
+    if not isinstance(message, str):
+        message = str(message)
+    
+    for pattern, replacement in _SENSITIVE_PATTERNS:
+        message = pattern.sub(replacement, message)
+    
+    if len(message) > max_length:
+        message = message[:max_length] + '...'
+    
+    return message
 
 sftp_current_creds = {}
 _creds_lock = threading.Lock()

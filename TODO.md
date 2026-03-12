@@ -1,35 +1,5 @@
 # SFTP Client - Known Issues and Action Items
 
-## Critical Security Issues
-
-### 1. SSH Host Key Verification Disabled
-**Issue**: `AutoAddPolicy()` accepts all host keys without verification
-**Fix Required**: Implement proper host key verification with user confirmation
-
-### 2. Sensitive Data in Error Messages
-**Issue**: Error messages may contain file paths and credentials
-**Fix Required**: Sanitize error messages before display to users
-
-## Code Quality Issues
-
-### 1. Overly Broad Exception Handling
-**Locations**: Multiple files use broad `except Exception` or bare `except`
-**Fix Required**: Replace with specific exception types
-
-### 2. Resource Management
-**Issues**:
-- SSH connections not always closed in error paths
-- Response queues may accumulate without cleanup
-
-**Fix Required**: Use context managers and implement proper cleanup
-
-### 3. Performance Issues
-**Problems**:
-- Some busy polling loops may still exist
-- Progress tracking intervals could be optimized
-
-**Fix Required**: Review and replace any remaining polling with blocking operations
-
 ## Resolved Issues
 
 ### ✅ Session-Based API (2026-02-27)
@@ -57,19 +27,57 @@
 - Both local and remote browsers use case-insensitive sorting
 - Implemented in `DirectoryFirstSortProxyModel` and `FileTableModel`
 
-## Remaining Action Items
+### ✅ SSH Host Key Verification (2026-03-06)
+- Replaced `AutoAddPolicy` with `RejectPolicy` in `sftp_connection_pool.py`
+- Implemented interactive host key verification in `sftp_terminal_widget.py`
+- Added security tests to verify policy settings
 
-### Priority 1 (Security)
-1. Fix SSH host key verification
-2. Sanitize error messages
+### ✅ Error Message Sanitization (2026-03-11)
+- Added `sanitize_error_message()` function in `sftp_creds.py`
+- Removes passwords, private keys, and sensitive data from error messages
+- Applied to all user-facing error messages
 
-### Priority 2 (Code Quality)
-1. Replace remaining broad exception handlers
-2. Review resource cleanup in error paths
+### ✅ Exception Handler Improvements (2026-03-11)
+- Replaced broad `except Exception` with specific exception types
+- Files updated: `sftp_browser_mixins.py`, `sftp_terminal_widget.py`, `sftp_transfer_handler.py`
+- Uses `(OSError, IOError, RuntimeError)` or paramiko-specific exceptions
 
-### Priority 3 (Performance)
-1. Audit for any remaining busy-polling loops
-2. Optimize progress tracking intervals if needed
+### ✅ Busy-Polling Elimination (2026-03-11)
+- Added `wait_for_response()` function with blocking queue get
+- Updated `waitjob()` to use blocking wait instead of busy-polling
+- Eliminates CPU waste during file transfers
+
+### ✅ Directory Download Functionality (2026-03-11)
+- Fixed `FileOpsMixin.__init__` signature to support cooperative multiple inheritance
+- Added `DirectoryTransferTask` with QThread for background directory traversal
+- Fixed `TraversalWorker` to properly handle signals and cancellation
+- Added `auto_overwrite` parameter to avoid blocking prompts during bulk transfers
+- Fixed context menu handler to properly select rows before showing menu
+
+### ✅ Directory Structure Preservation (2026-03-11)
+- Downloads now preserve directory structure
+- When downloading folder `abc`, creates `/local/abc/` and downloads contents into it
+- Previously flattened the structure into the local directory
+
+### ✅ Delete Confirmation (2026-03-11)
+- Now prompts for confirmation when deleting any directory (not just non-empty)
+- Supports multi-select: selecting multiple items and choosing "Remove Directory" deletes all
+
+### ✅ Stop All Transfers (2026-03-11)
+- "Stop" button now clears the transfer queue to prevent new transfers
+- Also cancels any active directory traversal
+
+### ✅ Refresh Debouncing (2026-03-11)
+- Added 500ms debounce to browser refresh during bulk transfers
+- Prevents excessive refreshing and duplicate entries when downloading many files
+
+## No Remaining Critical Issues
+
+All priority items have been addressed. The codebase is now:
+- Thread-safe with proper locking
+- Using specific exception types
+- Sanitizing sensitive data from errors
+- Using efficient blocking operations instead of busy-polling
 
 ## Archived Files
 

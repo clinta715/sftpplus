@@ -5,15 +5,16 @@ A simple terminal widget for SSH connections using QPlainTextEdit and paramiko.
 No additional dependencies beyond PyQt6 and paramiko.
 """
 import threading
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit
+import os
+import re
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QMessageBox
 from sftp_qt_compat import Qt
 from PyQt6.QtCore import pyqtSignal, QObject, QEvent
 from PyQt6.QtGui import QTextCursor
 import paramiko
 from icecream import ic
 
-
-import re
+from sftp_creds import sanitize_error_message
 
 
 # Comprehensive ANSI escape code regex pattern
@@ -125,14 +126,62 @@ class SSHTerminalWidget(QWidget):
         if isinstance(event, _TerminalOutputEvent):
             try:
                 event.callback()
-            except Exception as e:
-                ic(f"Error executing terminal output callback: {e}")
+            except (RuntimeError, AttributeError) as e:
+                ic(f"Error executing terminal output callback: {sanitize_error_message(str(e))}")
+
+    def _setup_host_key_policy(self, ssh):
+        """
+        Setup SSH host key verification policy.
+        Loads known_hosts and prompts user for unknown hosts.
+        """
+        known_hosts_path = os.path.expanduser('~/.ssh/known_hosts')
+        
+        # Try to load existing known_hosts
+        if os.path.exists(known_hosts_path):
+            try:
+                ssh.load_host_keys(known_hosts_path)
+            except (OSError, IOError, paramiko.SSHException) as e:
+                self.terminal.appendPlainText(f"Warning: Could not load known_hosts: {sanitize_error_message(str(e))}\n")
+        
+        # Set up policy to warn about unknown hosts
+        class InteractivePolicy(paramiko.MissingHostKeyPolicy):
+            def __init__(self, parent):
+                self.parent = parent
+                self.known_hosts_path = known_hosts_path
+                
+            def missing_host_key(self, client, hostname, key):
+                # Check if this is a new host
+                key_type = key.get_name()
+                fingerprint = key.get_fingerprint().hex()
+                
+                msg = f"Unknown host: {hostname}\n\nKey type: {key_type}\nFingerprint: {fingerprint}\n\nDo you want to trust this host and add it to known_hosts?"
+                
+                reply = QMessageBox.question(
+                    self.parent,
+                    "Unknown Host Key",
+                    msg,
+                    Qt.MsgBtn_Yes | Qt.MsgBtn_No,
+                    Qt.MsgBtn_No
+                )
+                
+                if reply == Qt.MsgBtn_Yes:
+                    # Add to known_hosts
+                    try:
+                        client.save_host_keys(self.known_hosts_path)
+                        return
+                    except (OSError, IOError) as e:
+                        self.parent.terminal.appendPlainText(f"Warning: Could not save host key: {sanitize_error_message(str(e))}\n")
+                        return
+                else:
+                    raise paramiko.SSHException(f"Host key verification failed for {hostname}")
+        
+        ssh.set_missing_host_key_policy(InteractivePolicy(self))
     
     def connect_ssh(self, hostname, username, password=None, port=22, key=None, ssh_commands=""):
         """Connect to SSH server and start interactive shell"""
         try:
             self.ssh = paramiko.SSHClient()
-            self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self._setup_host_key_policy(self.ssh)
             
             connect_kwargs = {
                 'hostname': hostname,
@@ -143,8 +192,8 @@ class SSHTerminalWidget(QWidget):
             if key:
                 try:
                     connect_kwargs['key_filename'] = key
-                except Exception as e:
-                    ic(f"Error loading key: {e}")
+                except (OSError, IOError) as e:
+                    ic(f"Error loading key: {sanitize_error_message(str(e))}")
             
             if password:
                 connect_kwargs['password'] = password
@@ -176,8 +225,8 @@ class SSHTerminalWidget(QWidget):
                         self.send_command(command)
                         time.sleep(0.3)
             
-        except Exception as e:
-            error_msg = f"Connection failed: {str(e)}"
+        except (paramiko.SSHException, OSError, IOError) as e:
+            error_msg = f"Connection failed: {sanitize_error_message(str(e))}"
             ic(error_msg)
             self.terminal.setPlaceholderText(error_msg)
             self.signals.error.emit(error_msg)
@@ -200,9 +249,9 @@ class SSHTerminalWidget(QWidget):
                 else:
                     import time
                     time.sleep(0.05)
-            except Exception as e:
+            except (paramiko.SSHException, OSError, IOError) as e:
                 if self._running:
-                    ic(f"Error reading from shell: {e}")
+                    ic(f"Error reading from shell: {sanitize_error_message(str(e))}")
                 break
         
         if self._running:
@@ -223,30 +272,30 @@ class SSHTerminalWidget(QWidget):
                 cursor.insertText(text)
                 self.terminal.setTextCursor(cursor)
                 self.terminal.ensureCursorVisible()
-            except Exception as e:
-                ic(f"Error in append_text: {e}")
+            except (RuntimeError, AttributeError) as e:
+                ic(f"Error in append_text: {sanitize_error_message(str(e))}")
         
         try:
             from PyQt6.QtWidgets import QApplication
             QApplication.instance().postEvent(self, _TerminalOutputEvent(append_text))
-        except Exception as e:
-            ic(f"Error posting terminal output event: {e}")
+        except (RuntimeError, AttributeError) as e:
+            ic(f"Error posting terminal output event: {sanitize_error_message(str(e))}")
     
     def _send_input(self, text):
         """Send keyboard input to SSH channel"""
         if self.channel and self.channel.send_ready():
             try:
                 self.channel.send(text)
-            except Exception as e:
-                ic(f"Error sending input: {e}")
+            except (paramiko.SSHException, OSError, IOError) as e:
+                ic(f"Error sending input: {sanitize_error_message(str(e))}")
     
     def send_command(self, command):
         """Send a command string to the shell"""
         if self.channel and self.channel.send_ready():
             try:
                 self.channel.send(command + '\n')
-            except Exception as e:
-                ic(f"Error sending command: {e}")
+            except (paramiko.SSHException, OSError, IOError) as e:
+                ic(f"Error sending command: {sanitize_error_message(str(e))}")
     
     def disconnect_ssh(self):
         """Disconnect from SSH"""
@@ -255,13 +304,13 @@ class SSHTerminalWidget(QWidget):
         if self.channel:
             try:
                 self.channel.close()
-            except Exception:
+            except (paramiko.SSHException, OSError, IOError):
                 pass
         
         if self.ssh:
             try:
                 self.ssh.close()
-            except Exception:
+            except (paramiko.SSHException, OSError, IOError):
                 pass
         
         self.channel = None

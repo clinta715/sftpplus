@@ -1,4 +1,5 @@
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex
+from PyQt6.QtWidgets import QApplication
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 from PyQt6.QtGui import QFont, QColor
 from pathlib import Path
@@ -40,9 +41,6 @@ class FileTableModel(QAbstractTableModel):
         creds = get_credentials(self.session_id)
 
         self.directory = Path(creds.get('current_local_directory'))
-        
-        ic(f"FileTableModel.get_files: directory={self.directory}")
-        ic(f"FileTableModel.get_files: exists={self.directory.exists()}, is_dir={self.directory.is_dir()}")
 
         self.beginResetModel()
         self.file_list = []  # Clear the list completely
@@ -52,7 +50,6 @@ class FileTableModel(QAbstractTableModel):
 
         try:
             all_items = list(self.directory.iterdir())
-            ic(f"FileTableModel.get_files: total items in directory: {len(all_items)}")
             
             for item in all_items:
                 try:
@@ -61,19 +58,14 @@ class FileTableModel(QAbstractTableModel):
                     size = stat_result.st_size
                     permissions = oct(stat_result.st_mode)[-4:]
                     modified_time = datetime.datetime.fromtimestamp(stat_result.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
-                    self.file_list.append([name, size, permissions, modified_time])
+                    self.file_list.append([name, size, permissions, modified_time, item.is_dir()])
+                    # Keep UI responsive during long listings
+                    if len(self.file_list) % 50 == 0:
+                        QApplication.processEvents()
                 except (OSError, PermissionError) as stat_error:
-                    # Skip files that can't be stat'd
-                    ic(f"Skipping {item.name}: {stat_error}")
                     continue
 
-            # Sort the file list by name, ignoring case
-            self.file_list[1:] = sorted(self.file_list[1:], key=lambda x: x[0].lower())
-            
-            # Debug: show first 10 files loaded
-            file_names = [f[0] for f in self.file_list[1:10]]
-            ic(f"FileTableModel.get_files: sample files: {file_names}")
-            ic(f"FileTableModel.get_files: loaded {len(self.file_list)-1} items total")
+            # Don't sort here - let DirectoryFirstSortProxyModel handle sorting
         except (OSError, IOError, RuntimeError) as e:
             ic(f"Error getting files: {str(e)}")
 

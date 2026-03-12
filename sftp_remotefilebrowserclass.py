@@ -1,13 +1,15 @@
 from sftp_filebrowserclass import FileBrowser
 from PyQt6.QtWidgets import QTableView, QFileDialog, QMessageBox, QInputDialog, QHeaderView, QMenu, QProgressDialog, QApplication
-from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
-from PyQt6.QtCore import QModelIndex, QTimer
+from PyQt6.QtCore import QModelIndex, QTimer, QThread
 from icecream import ic
 import os
 import stat
 import time
 
 from sftp_remotefiletablemodel import RemoteFileTableModel
+from sftp_qt_compat import Qt
+from sftp_transfer_handler import TreePopulateWorker, DirectoryTransferTask, TraversalWorker
+from sftp_creds import get_credentials
 from sftp_sortfiltermodel import DirectoryFirstSortProxyModel
 from sftp_creds import (get_credentials, create_random_integer, set_credentials,
                         verify_credential_update, verify_directory_consistency)
@@ -328,6 +330,120 @@ class RemoteFileBrowser(FileBrowser):
     def remove_directory_with_prompt(self, remote_path=None, always=0):
         self.always = always
         creds = get_credentials(self.session_id)
+        
+        # Get selected items
+        current_browser = self.table
+        if current_browser is None or not isinstance(current_browser, QTableView):
+            return
+            
+        indexes = current_browser.selectedIndexes()
+        if not indexes:
+            return
+            
+        # Get unique rows from selected indexes
+        processed_rows = set()
+        selected_paths = []
+        
+        for index in indexes:
+            row = index.row()
+            if row in processed_rows:
+                continue
+            processed_rows.add(row)
+            
+            # Get filename from first column
+            filename_index = index.sibling(row, 0)
+            selected_item = current_browser.model().data(filename_index, Qt.DisplayRole)
+            
+            # Remove type prefix if present
+            filename = selected_item
+            prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
+            for prefix in prefixes:
+                if filename.startswith(prefix):
+                    filename = filename[len(prefix):].lstrip()
+                    break
+            
+            # Get current remote directory
+            if creds.get('current_remote_directory') == '.':
+                temp_path = self.sftp_getcwd()
+                if temp_path:
+                    set_credentials(self.session_id, 'current_remote_directory', self.remove_trailing_dot(temp_path))
+            
+            full_path = os.path.join(creds.get('current_remote_directory'), filename)
+            selected_paths.append(full_path)
+        
+        if not selected_paths:
+            return
+        
+        # Prompt for confirmation for all selected items
+        if not self.always:
+            if len(selected_paths) == 1:
+                prompt_msg = f"Are you sure you want to delete '{selected_paths[0]}'?"
+            else:
+                prompt_msg = f"Are you sure you want to delete {len(selected_paths)} items?"
+                
+            response = QMessageBox.question(
+                None,
+                'Confirm Delete',
+                prompt_msg,
+                Qt.MsgBtn_Yes | Qt.MsgBtn_No,
+                Qt.MsgBtn_No
+            )
+            if response != Qt.MsgBtn_Yes:
+                return
+        
+        # Remove each selected item
+        for remote_path in selected_paths:
+            try:
+                # Check if the remote path exists
+                if not self.sftp_exists(remote_path):
+                    self.message_signal.emit(f"Remote path '{remote_path}' does not exist.")
+                    continue
+                
+                # Check if it's a file
+                if self.is_remote_file(remote_path):
+                    self.sftp_remove(remote_path)
+                    self.message_signal.emit(f"File '{remote_path}' removed successfully.")
+                    continue
+                
+                # It's a directory - recursively remove
+                self._remove_remote_directory_recursive(remote_path)
+                self.message_signal.emit(f"Directory '{remote_path}' removed successfully.")
+            except (OSError, IOError, RuntimeError) as e:
+                self.message_signal.emit(f"remove_directory_with_prompt() error: {e}")
+        
+        # Refresh the browser
+        self.model.get_files(force_refresh=True)
+    
+    def _remove_remote_directory_recursive(self, remote_path):
+        """Recursively remove a remote directory and its contents"""
+        # Check if directory exists
+        if not self.sftp_exists(remote_path):
+            return
+            
+        # Get directory contents
+        directory_contents_attr = self.sftp_listdir_attr(remote_path)
+        if directory_contents_attr is False:
+            # Empty directory, just remove it
+            self.sftp_rmdir(remote_path)
+            return
+        
+        # Separate files and subdirectories
+        subdirectories = [entry for entry in directory_contents_attr if stat.S_ISDIR(entry.st_mode)]
+        files = [entry for entry in directory_contents_attr if stat.S_ISREG(entry.st_mode)]
+        
+        # Remove files
+        for entry in files:
+            entry_path = os.path.join(remote_path, entry.filename)
+            self.sftp_remove(entry_path)
+        
+        # Recursively remove subdirectories
+        for entry in subdirectories:
+            entry_path = os.path.join(remote_path, entry.filename)
+            self._remove_remote_directory_recursive(entry_path)
+        
+        # Remove the directory itself
+        self.sftp_rmdir(remote_path)
+        creds = get_credentials(self.session_id)
         if remote_path is None or remote_path is False:
             # current_browser = self.focusWidget()
             current_browser = self.table
@@ -410,8 +526,6 @@ class RemoteFileBrowser(FileBrowser):
         """Upload or download files. When optionalpath and local_destination are provided,
         downloads the specific remote file to the specific local destination."""
         job_id = create_random_integer()
-        ic(job_id)
-
         creds = get_credentials(self.session_id)
 
         # Handle current remote directory initialization - get REAL CWD from server
@@ -419,189 +533,188 @@ class RemoteFileBrowser(FileBrowser):
             current_remote_directory = self.sftp_getcwd()
             if current_remote_directory:
                 set_credentials(self.session_id, 'current_remote_directory', current_remote_directory)
-                ic(f"upload_download: Initialized current_remote_directory to {current_remote_directory}")
             else:
                 current_remote_directory = '/'
-                ic(f"upload_download: Failed to get CWD, using '/'")
         else:
             current_remote_directory = creds.get('current_remote_directory')
 
-        ic(f"upload_download: Using current_remote_directory={current_remote_directory}")
-
-        # current_browser = self.focusWidget()
-        ic("remoterfilebrowserclass - upload_download")
         current_browser = self.table
-        if current_browser is not None and isinstance(current_browser, QTableView):
-            indexes = current_browser.selectedIndexes()
-            processed_rows = set()  # Track processed rows to avoid duplicates
-            has_valid_item = False
-            action = None
+        
+        if current_browser is None:
+            ic("ERROR: current_browser is None!")
+            self.message_signal.emit("Error: No table browser found")
+            return
+            
+        if not isinstance(current_browser, QTableView):
+            self.message_signal.emit("Error: Browser is not a table view")
+            return
+            
+        indexes = current_browser.selectedIndexes()
+        
+        if not indexes:
+            self.message_signal.emit("No files selected for transfer")
+            return
+            
+        processed_rows = set()  # Track processed rows to avoid duplicates
+        has_valid_item = False
+        action = None
 
-            # Move these outside the loop so they persist across iterations
-            skip_all = False
-            overwrite_all = False
-            resume_all = False
+        # Move these outside the loop so they persist across iterations
+        skip_all = False
+        overwrite_all = False
+        resume_all = False
 
-            for index in indexes:
-                row = index.row()
-                if row in processed_rows:
-                    continue
-                processed_rows.add(row)
+        for index in indexes:
+            row = index.row()
+            if row in processed_rows:
+                continue
+            processed_rows.add(row)
 
-                # Always get the data from the first column (filename)
-                # Use sibling(row, 0) to correctly handle proxy model mapping
-                filename_index = index.sibling(row, 0)
-                selected_item_text = current_browser.model().data(filename_index, Qt.DisplayRole)
-                attr_item = current_browser.model().data(filename_index, Qt.UserRole)
-                
-                # Check if it's a directory using cached metadata
-                is_dir = False
-                if attr_item:
-                    is_dir = stat.S_ISDIR(attr_item.st_mode)
-                elif selected_item_text == "..":
-                    is_dir = True
-                
-                # Remove type prefix if present ([DIR], [FILE], 📁, 📄, etc.)
-                filename = selected_item_text
-                prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
-                for prefix in prefixes:
-                    if filename.startswith(prefix):
-                        filename = filename[len(prefix):].lstrip()
-                        break
+            # Always get the data from the first column (filename)
+            # Use sibling(row, 0) to correctly handle proxy model mapping
+            filename_index = index.sibling(row, 0)
+            selected_item_text = current_browser.model().data(filename_index, Qt.DisplayRole)
+            attr_item = current_browser.model().data(filename_index, Qt.UserRole)
+            
+            # Check if it's a directory using cached metadata
+            is_dir = False
+            if attr_item:
+                is_dir = stat.S_ISDIR(attr_item.st_mode)
+            elif selected_item_text == "..":
+                is_dir = True
+            
+            # Remove type prefix if present ([DIR], [FILE], 📁, 📄, etc.)
+            filename = selected_item_text
+            prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
+            for prefix in prefixes:
+                if filename.startswith(prefix):
+                    filename = filename[len(prefix):].lstrip()
+                    break
 
-                if optionalpath:
-                    filename = optionalpath
-                    # If optionalpath is provided, we might still need to know if it's a dir
-                    # but usually it's for specific files. For now, assume False if not in model.
-                    if not attr_item: is_dir = self.is_remote_directory(filename)
+            if optionalpath:
+                filename = optionalpath
+                # If optionalpath is provided, we might still need to know if it's a dir
+                # but usually it's for specific files. For now, assume False if not in model.
+                if not attr_item: is_dir = self.is_remote_directory(filename)
 
-                if filename:
-                    try:
-                        # Determine if we should use optionalpath or filename
-                        use_optional_path = optionalpath and isinstance(optionalpath, str)
+            if filename:
+                try:
+                    # Determine if we should use optionalpath or filename
+                    use_optional_path = optionalpath and isinstance(optionalpath, str)
 
-                        if use_optional_path:
-                            # optionalpath is provided, use it directly
-                            remote_entry_path = optionalpath
+                    if use_optional_path:
+                        # optionalpath is provided, use it directly
+                        remote_entry_path = optionalpath
+                    else:
+                        # Normal case - use filename, join with current directory
+                        is_complete = self.is_complete_path(filename)
+                        if is_complete:
+                            remote_entry_path = filename
                         else:
-                            # Normal case - use filename, join with current directory
-                            is_complete = self.is_complete_path(filename)
-                            if is_complete:
-                                remote_entry_path = filename
+                            # Join with current directory
+                            if current_remote_directory == '/':
+                                remote_entry_path = '/' + filename
                             else:
-                                # Join with current directory
-                                if current_remote_directory == '/':
-                                    remote_entry_path = '/' + filename
-                                else:
-                                    remote_entry_path = current_remote_directory + '/' + filename
+                                remote_entry_path = current_remote_directory + '/' + filename
 
-                        # Normalize to remove any double slashes or trailing slashes
-                        remote_entry_path = remote_entry_path.replace('//', '/').rstrip('/')
+                    # Normalize to remove any double slashes or trailing slashes
+                    remote_entry_path = remote_entry_path.replace('//', '/').rstrip('/')
 
-                        # Use provided local_destination or construct from current local directory
-                        if local_destination:
-                            local_entry_path = local_destination
-                        else:
-                            local_base_path = creds.get('current_local_directory')
-                            local_entry_path = os.path.join(local_base_path, filename)
+                    # Use provided local_destination or construct from current local directory
+                    if local_destination:
+                        local_entry_path = local_destination
+                    else:
+                        local_base_path = creds.get('current_local_directory')
+                        local_entry_path = os.path.join(local_base_path, filename)
 
-                        if is_dir:
-                            # For directories, the destination is the PARENT directory (current local dir)
-                            # traverse_and_transfer will create the directory inside it.
-                            dest_dir = creds.get('current_local_directory')
-                            if not skip_all and not overwrite_all and not resume_all and os.path.exists(local_entry_path):
-                                prefs = get_preferences()
-                                if prefs.get_bool("overwrite_on_transfer", False):
+                    if is_dir:
+                        # For directories, destination should be local_base_path + directory name
+                        # This preserves the directory structure: e.g., /mnt/f/__Drivers -> /Downloads/__Drivers
+                        dest_dir = os.path.join(local_base_path, filename)
+                        if not skip_all and not overwrite_all and not resume_all and os.path.exists(local_entry_path):
+                            prefs = get_preferences()
+                            if prefs.get_bool("overwrite_on_transfer", False):
+                                overwrite_all = True
+                            else:
+                                action = self.prompt_overwrite(local_entry_path)
+                                if action == "cancel":
+                                    return
+                                elif action == "skip":
+                                    continue
+                                elif action == "skip_all":
+                                    skip_all = True
+                                    continue
+                                elif action == "overwrite_all":
                                     overwrite_all = True
-                                else:
-                                    action = self.prompt_overwrite(local_entry_path)
-                                    if action == "cancel":
-                                        return
-                                    elif action == "skip":
-                                        continue
-                                    elif action == "skip_all":
-                                        skip_all = True
-                                        continue
-                                    elif action == "overwrite_all":
-                                        overwrite_all = True
-                                    elif action == "resume_all":
-                                        resume_all = True
+                                elif action == "resume_all":
+                                    resume_all = True
 
-                            if not skip_all:
-                                self.download_directory(remote_entry_path, dest_dir, skip_all, overwrite_all, resume_all)
-                        else:
-                            # Handle individual file
-                            if not skip_all and not overwrite_all and not resume_all and os.path.exists(local_entry_path):
-                                prefs = get_preferences()
-                                if prefs.get_bool("overwrite_on_transfer", False):
+                        if not skip_all:
+                            self.download_directory(remote_entry_path, dest_dir, skip_all, overwrite_all, resume_all)
+                    else:
+                        # Handle individual file
+                        if not skip_all and not overwrite_all and not resume_all and os.path.exists(local_entry_path):
+                            prefs = get_preferences()
+                            if prefs.get_bool("overwrite_on_transfer", False):
+                                overwrite_all = True
+                            else:
+                                action = self.prompt_overwrite(local_entry_path)
+                                if action == "cancel":
+                                    return
+                                elif action == "skip":
+                                    continue
+                                elif action == "skip_all":
+                                    skip_all = True
+                                    continue
+                                elif action == "overwrite_all":
                                     overwrite_all = True
+                                elif action == "resume_all":
+                                    resume_all = True
+                                # Note: "overwrite" (single) and "resume" (single) don't set flags,
+                                # so user will be prompted again for next file - this is intentional
+
+                        if not skip_all:
+                            # Check action set by prompt - overwrite_all or resume_all set flags,
+                            # but single "overwrite" or "resume" is stored in action
+                            action_result = locals().get('action', '')
+                            resume = (not overwrite_all and action_result == "resume")
+                            overwrite = (not overwrite_all and action_result == "overwrite")
+                            
+                            try:
+                                creds = get_credentials(self.session_id)
+                                if resume:
+                                    command = "resume"
+                                elif overwrite:
+                                    command = "download"  # Overwrite means re-download
                                 else:
-                                    action = self.prompt_overwrite(local_entry_path)
-                                    if action == "cancel":
-                                        return
-                                    elif action == "skip":
-                                        continue
-                                    elif action == "skip_all":
-                                        skip_all = True
-                                        continue
-                                    elif action == "overwrite_all":
-                                        overwrite_all = True
-                                    elif action == "resume_all":
-                                        resume_all = True
-                                    # Note: "overwrite" (single) and "resume" (single) don't set flags,
-                                    # so user will be prompted again for next file - this is intentional
+                                    command = "download"
+                                add_sftp_job(
+                                    remote_entry_path, True,  # source is remote
+                                    local_entry_path, False,  # dest is local
+                                    creds.get('hostname', ''),
+                                    creds.get('username', ''),
+                                    creds.get('password', ''),
+                                    creds.get('port', 22),
+                                    command,
+                                    job_id,
+                                    creds.get('key')
+                                )
+                                self.transfer_started.emit(str(job_id))
+                            except Exception as e:
+                                self.message_signal.emit(f"Download failed: {e}")
+                            
+                            self.message_signal.emit(f"Starting transfer: {remote_entry_path}")
 
-                            if not skip_all:
-                                # Check action set by prompt - overwrite_all or resume_all set flags,
-                                # but single "overwrite" or "resume" is stored in action
-                                action_result = locals().get('action', '')
-                                resume = (not overwrite_all and action_result == "resume")
-                                overwrite = (not overwrite_all and action_result == "overwrite")
-                                
-                                ic(f"upload_download: DEBUG - remote_entry_path={repr(remote_entry_path)}")
-                                ic(f"upload_download: DEBUG - local_entry_path={repr(local_entry_path)}")
-                                ic(f"upload_download: DEBUG - resume={resume}, overwrite={overwrite}")
-                                
-                                try:
-                                    creds = get_credentials(self.session_id)
-                                    if resume:
-                                        command = "resume"
-                                    elif overwrite:
-                                        command = "download"  # Overwrite means re-download
-                                    else:
-                                        command = "download"
-                                    ic(f"upload_download: Adding job to queue with command={command}")
-                                    add_sftp_job(
-                                        remote_entry_path, True,  # source is remote
-                                        local_entry_path, False,  # dest is local
-                                        creds.get('hostname', ''),
-                                        creds.get('username', ''),
-                                        creds.get('password', ''),
-                                        creds.get('port', 22),
-                                        command,
-                                        job_id,
-                                        creds.get('key')
-                                    )
-                                    ic(f"upload_download: Job added successfully")
-                                    self.transfer_started.emit(str(job_id))
-                                except Exception as e:
-                                    self.message_signal.emit(f"Download failed: {e}")
-                                    ic(e)
-                                
-                                self.message_signal.emit(f"Starting transfer: {remote_entry_path}")
+                    has_valid_item = True
 
-                        has_valid_item = True
+                except (OSError, IOError, RuntimeError) as e:
+                    error_message = f"upload_download() encountered an error: {str(e)}"
+                    self.message_signal.emit(error_message)
+            else:
+                self.message_signal.emit("No valid path provided.")
 
-                    except (OSError, IOError, RuntimeError) as e:
-                        error_message = f"upload_download() encountered an error: {str(e)}"
-                        self.message_signal.emit(error_message)
-                else:
-                    self.message_signal.emit("No valid path provided.")
-
-            if not has_valid_item:
-                self.message_signal.emit("No valid items selected.")
-        else:
-            self.message_signal.emit("Current browser is not a valid QTableView.")
+        if not has_valid_item:
+            self.message_signal.emit("No valid items selected.")
 
         # Force refresh after operations
         # Note: invalidate_cache is redundant since get_files with force_refresh=True bypasses cache
@@ -615,14 +728,59 @@ class RemoteFileBrowser(FileBrowser):
                         resume_all: bool = False) -> None:
         """
         Download a directory and its contents from the remote server.
-        Uses unified traverse_and_transfer method from parent class.
+        Uses DirectoryTransferTask for thread-safe background execution.
         """
-        self.traverse_and_transfer(
-            source_directory, destination_directory,
+        ic(f"download_directory called: source={source_directory}, dest={destination_directory}")
+        
+        # Cancel any existing transfer before starting a new one
+        if hasattr(self, '_current_traversal_thread') and self._current_traversal_thread:
+            if self._current_traversal_thread.isRunning():
+                self.cancel_current_transfer()
+        
+        thread = QThread()
+        worker = DirectoryTransferTask(
+            self.session_id, source_directory, destination_directory,
             is_source_remote=True, is_dest_remote=False,
             skip_all=skip_all, overwrite_all=overwrite_all, resume_all=resume_all,
-            always=0, is_top_level=True
+            browser=self,
+            auto_overwrite=True  # Auto-overwrite to avoid blocking on prompts
         )
+        worker.moveToThread(thread)
+        
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        
+        # Connect signals
+        worker.job_added.connect(lambda jid: self.transfer_started.emit(jid) if hasattr(self, 'transfer_started') and self.transfer_started else None)
+        worker.error.connect(lambda err: self.message_signal.emit(f"Download error: {err}"))
+        
+        self._current_traversal_worker = worker
+        self._current_traversal_thread = thread
+        
+        thread.start()
+        self.message_signal.emit(f"Started download of {source_directory}")
+
+    def cancel_current_transfer(self):
+        """Cancel the current directory transfer"""
+        if hasattr(self, '_current_traversal_worker') and self._current_traversal_worker:
+            self._current_traversal_worker.cancel()
+            self.message_signal.emit("Cancelling transfer...")
+            self._current_traversal_worker = None
+        if hasattr(self, '_current_traversal_thread') and self._current_traversal_thread:
+            self._current_traversal_thread.quit()
+            self._current_traversal_thread.wait()
+            self._current_traversal_thread = None
+    
+    def cleanup(self):
+        """Cleanup browser resources including running threads"""
+        if hasattr(self, '_current_traversal_worker') and self._current_traversal_worker:
+            self._current_traversal_worker.cancel()
+        if hasattr(self, '_current_traversal_thread') and self._current_traversal_thread:
+            self._current_traversal_thread.quit()
+            self._current_traversal_thread.wait()
+        super().cleanup()
 
     def get_current_directory(self):
         """Get the current remote directory"""
@@ -696,59 +854,28 @@ class RemoteFileBrowser(FileBrowser):
     def _populate_tree_children(self, parent_item, path):
         """Populate tree with subdirectories of the given remote path (lazy loading) using paramiko"""
         from PyQt6.QtWidgets import QTreeWidgetItem
+        from PyQt6.QtCore import QThreadPool
         
-        item_count = 0
-        
-        try:
-            # Show loading feedback
-            self.tree_status_label.setText(f"⏳ Loading {path}...")
-            QApplication.processEvents()
-            
-            # Get directory contents via SFTP
-            directory_contents_attr = self.sftp_listdir_attr(path)
-            
-            if not directory_contents_attr:
-                self.tree_status_label.setText(f"📂 {path} (empty or inaccessible)")
-                return 0
-            
-            # Filter and sort only directories
-            dirs = []
-            for attr in directory_contents_attr:
-                filename = attr.filename
-                try:
-                    if stat.S_ISDIR(attr.st_mode):
-                        dirs.append(attr)
-                except (OSError, PermissionError):
-                    continue
-            
-            dirs.sort(key=lambda x: x.filename.lower())
-            
-            for attr in dirs:
+        def on_finished(pop_path, directories):
+            self.tree_status_label.setText(f"✅ {pop_path} - {len(directories)} subdirectories")
+            for attr in directories:
                 child_item = QTreeWidgetItem(parent_item)
                 child_item.setText(0, "📁 " + attr.filename)
-                full_path = os.path.join(path, attr.filename) if path != '/' else '/' + attr.filename
+                full_path = os.path.join(pop_path, attr.filename) if pop_path != '/' else '/' + attr.filename
                 child_item.setData(0, Qt.UserRole, {'path': full_path, 'is_dir': True, 'is_root': False})
-                
-                # Add placeholder for lazy loading - this allows expansion
                 dummy_child = QTreeWidgetItem(child_item)
                 dummy_child.setText(0, "⏳ Loading...")
-                
-                item_count += 1
-            
-            # Refresh tree to show newly added items
             self.tree_widget.update()
         
-        except (OSError, IOError, RuntimeError) as e:
-            self.tree_status_label.setText(f"❌ Error: {str(e)[:50]}")
-            return 0
+        def on_error(pop_path, error_msg):
+            self.tree_status_label.setText(f"❌ Error: {error_msg[:50]}")
         
-        # Update status with success message
-        if item_count == 0:
-            self.tree_status_label.setText(f"📂 {path} (no subdirectories)")
-        else:
-            self.tree_status_label.setText(f"✅ {path} - {item_count} subdirectories")
+        worker = TreePopulateWorker(self.session_id, path, is_remote=True)
+        worker.signals.finished.connect(on_finished)
+        worker.signals.error.connect(on_error)
         
-        return item_count
+        self.tree_status_label.setText(f"⏳ Loading {path}...")
+        QThreadPool.globalInstance().start(worker)
 
     def tree_double_click_handler(self, item, column):
         """Handle double-click on tree item - navigate to that directory"""

@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextBrowser,
     QToolButton, QScrollArea, QSizePolicy
 )
-from PyQt6.QtCore import QSize
+from PyQt6.QtCore import QSize, QThreadPool
 from PyQt6.QtGui import QPixmap
 from sftp_qt_compat import Qt
 from icecream import ic
@@ -10,6 +10,7 @@ import os
 import tempfile
 import atexit
 import stat
+from sftp_transfer_handler import FilePreviewWorker
 
 _temp_files_registry = []
 _registry_lock = None
@@ -196,7 +197,7 @@ class FilePreviewWidget(QWidget):
             _unregister_temp_file(self._temp_file)
             self._temp_file = None
 
-    def preview_file(self, file_path, file_size, modified, permissions, sftp_api=None):
+    def preview_file(self, file_path, file_size, modified, permissions, sftp_api=None, session_id=None):
         if file_path == self._current_path:
             return
         
@@ -222,9 +223,9 @@ class FilePreviewWidget(QWidget):
             if file_size > self.MAX_IMAGE_SIZE:
                 self._show_too_large(file_path, "image", self.MAX_IMAGE_SIZE)
                 return
-            self._preview_image(file_path, sftp_api)
+            self._preview_image(file_path, session_id)
         elif ext in self.TEXT_EXTENSIONS or not ext:
-            self._preview_text(file_path, sftp_api)
+            self._preview_text(file_path, session_id)
         else:
             self._show_binary_info(file_path, ext)
 
@@ -251,13 +252,33 @@ class FilePreviewWidget(QWidget):
             f"• Images: PNG, JPG, GIF, BMP, SVG (max 5MB)"
         )
 
-    def _preview_text(self, file_path, sftp_api):
-        if not sftp_api:
-            self.text_preview.setPlainText("Preview not available - no SFTP connection")
+    def _preview_text(self, file_path, session_id=None):
+        if not session_id:
+            self.text_preview.setPlainText("Preview not available - no session")
             return
         
         filename = os.path.basename(file_path)
         self.title_label.setText(f"📄 {filename}")
+        self.text_preview.setPlainText("⏳ Downloading...")
+        
+        def on_finished(temp_path, original_path):
+            try:
+                self._cleanup_temp_file()
+                self._temp_file = temp_path
+                
+                with open(temp_path, 'r', encoding='utf-8', errors='replace') as f:
+                    content = f.read(self.MAX_TEXT_SIZE + 1)
+                
+                if len(content) > self.MAX_TEXT_SIZE:
+                    content = content[:self.MAX_TEXT_SIZE] + "\n\n... [truncated - file too large]"
+                
+                self.text_preview.setPlainText(content)
+            except Exception as e:
+                ic(f"Preview read error: {e}")
+                self.text_preview.setPlainText(f"Error reading file:\n{str(e)}")
+        
+        def on_error(original_path, error_msg):
+            self.text_preview.setPlainText(f"Error downloading file:\n{error_msg}")
         
         try:
             fd, temp_path = tempfile.mkstemp(suffix='.txt', prefix='.sftp_preview_')
@@ -265,28 +286,18 @@ class FilePreviewWidget(QWidget):
             os.chmod(temp_path, stat.S_IRUSR | stat.S_IWUSR)
             _register_temp_file(temp_path)
             
-            sftp_api.download(file_path, temp_path)
-            self._cleanup_temp_file()
-            self._temp_file = temp_path
-            
-            with open(temp_path, 'r', encoding='utf-8', errors='replace') as f:
-                content = f.read(self.MAX_TEXT_SIZE + 1)
-            
-            if len(content) > self.MAX_TEXT_SIZE:
-                content = content[:self.MAX_TEXT_SIZE] + "\n\n... [truncated - file too large]"
-            
-            self.text_preview.setVisible(True)
-            self.image_label.setVisible(False)
-            self.content_area.setWidget(self.text_preview)
-            self.text_preview.setPlainText(content)
+            worker = FilePreviewWorker(session_id, file_path, temp_path, is_remote=True)
+            worker.signals.finished.connect(on_finished)
+            worker.signals.error.connect(on_error)
+            QThreadPool.globalInstance().start(worker)
             
         except Exception as e:
-            ic(f"Preview error: {e}")
-            self.text_preview.setPlainText(f"Error previewing file:\n{str(e)}")
+            ic(f"Preview setup error: {e}")
+            self.text_preview.setPlainText(f"Error setting up preview:\n{str(e)}")
 
-    def _preview_image(self, file_path, sftp_api):
-        if not sftp_api:
-            self.text_preview.setPlainText("Preview not available - no SFTP connection")
+    def _preview_image(self, file_path, session_id=None):
+        if not session_id:
+            self.text_preview.setPlainText("Preview not available - no session")
             self.text_preview.setVisible(True)
             self.image_label.setVisible(False)
             self.content_area.setWidget(self.text_preview)
@@ -294,6 +305,44 @@ class FilePreviewWidget(QWidget):
         
         filename = os.path.basename(file_path)
         self.title_label.setText(f"🖼️ {filename}")
+        self.text_preview.setPlainText("⏳ Downloading...")
+        
+        def on_finished(temp_path, original_path):
+            try:
+                self._cleanup_temp_file()
+                self._temp_file = temp_path
+                
+                pixmap = QPixmap(temp_path)
+                if pixmap.isNull():
+                    raise ValueError("Failed to load image")
+                
+                max_width = self.content_area.width() - 20
+                max_height = self.content_area.height() - 20
+                
+                if pixmap.width() > max_width or pixmap.height() > max_height:
+                    pixmap = pixmap.scaled(
+                        max_width, max_height,
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation
+                    )
+                
+                self.image_label.setPixmap(pixmap)
+                self.text_preview.setVisible(False)
+                self.image_label.setVisible(True)
+                self.content_area.setWidget(self.image_label)
+                
+            except Exception as e:
+                ic(f"Image preview error: {e}")
+                self.text_preview.setPlainText(f"Error loading image:\n{str(e)}")
+                self.text_preview.setVisible(True)
+                self.image_label.setVisible(False)
+                self.content_area.setWidget(self.text_preview)
+        
+        def on_error(original_path, error_msg):
+            self.text_preview.setPlainText(f"Error downloading image:\n{error_msg}")
+            self.text_preview.setVisible(True)
+            self.image_label.setVisible(False)
+            self.content_area.setWidget(self.text_preview)
         
         try:
             fd, temp_path = tempfile.mkstemp(suffix=os.path.splitext(file_path)[1], prefix='.sftp_preview_')
@@ -301,31 +350,14 @@ class FilePreviewWidget(QWidget):
             os.chmod(temp_path, stat.S_IRUSR | stat.S_IWUSR)
             _register_temp_file(temp_path)
             
-            sftp_api.download(file_path, temp_path)
-            self._cleanup_temp_file()
-            self._temp_file = temp_path
-            
-            pixmap = QPixmap(temp_path)
-            if pixmap.isNull():
-                raise ValueError("Failed to load image")
-            
-            max_width = self.content_area.width() - 20
-            max_height = self.content_area.height() - 20
-            
-            if pixmap.width() > max_width or pixmap.height() > max_height:
-                pixmap = pixmap.scaled(
-                    max_width, max_height,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
-                )
-            
-            self.image_label.setPixmap(pixmap)
-            self.text_preview.setVisible(False)
-            self.image_label.setVisible(True)
-            self.content_area.setWidget(self.image_label)
+            worker = FilePreviewWorker(session_id, file_path, temp_path, is_remote=True)
+            worker.signals.finished.connect(on_finished)
+            worker.signals.error.connect(on_error)
+            QThreadPool.globalInstance().start(worker)
             
         except Exception as e:
-            ic(f"Image preview error: {e}")
+            ic(f"Image preview setup error: {e}")
+            self.text_preview.setPlainText(f"Error setting up preview:\n{str(e)}")
             self.text_preview.setPlainText(f"Error previewing image:\n{str(e)}")
             self.text_preview.setVisible(True)
             self.image_label.setVisible(False)
