@@ -1144,5 +1144,7 @@ class RemoteFileBrowser(FileBrowser):
             self.populate_tree_view()
         elif action == download_action:
             creds = get_credentials(self.session_id)
-            local_dir = creds.get('current_local_directory', os.path.expanduser('~'))
+            local_base = creds.get('current_local_directory', os.path.expanduser('~'))
+            folder_name = os.path.basename(path.rstrip('/'))
+            local_dir = os.path.join(local_base, folder_name)
             self.download_directory(path, local_dir)
