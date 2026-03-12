@@ -147,6 +147,9 @@ class FileBrowserPanel(QWidget):
         self.left_browser = FileBrowser("Local Files", self.session_id)
         self.right_browser = RemoteFileBrowser("Remote Files", self.session_id)
         
+        # Track last active browser
+        self._last_active_browser = self.right_browser  # Default to remote
+        
         # Add to containers
         self._local_layout.addWidget(self.left_browser)
         self._remote_layout.addWidget(self.right_browser)
@@ -154,6 +157,32 @@ class FileBrowserPanel(QWidget):
         # Focus policy
         self.left_browser.table.setFocusPolicy(Qt.StrongFocus)
         self.right_browser.table.setFocusPolicy(Qt.StrongFocus)
+        
+        # Install event filters on viewports to track clicks
+        self.left_browser.table.viewport().installEventFilter(self)
+        self.right_browser.table.viewport().installEventFilter(self)
+        
+        # Also track focus events on the tables
+        self.left_browser.table.focusInEvent = lambda e: self._on_browser_focused(self.left_browser)
+        self.right_browser.table.focusInEvent = lambda e: self._on_browser_focused(self.right_browser)
+    
+    def _on_browser_focused(self, browser):
+        """Called when a browser table gains focus"""
+        self._last_active_browser = browser
+    
+    def eventFilter(self, obj, event):
+        """Track which browser table viewport was last clicked"""
+        from PyQt6.QtCore import QEvent
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if obj == self.left_browser.table.viewport():
+                self._last_active_browser = self.left_browser
+            elif obj == self.right_browser.table.viewport():
+                self._last_active_browser = self.right_browser
+        return super().eventFilter(obj, event)
+    
+    def get_active_browser(self):
+        """Return the last active browser (local or remote)"""
+        return self._last_active_browser
     
     def _connect_signals(self):
         self.left_browser.add_observer(self.right_browser)

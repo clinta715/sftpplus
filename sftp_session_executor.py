@@ -11,6 +11,7 @@ from stat import S_ISDIR
 import queue
 import time
 import os
+import errno
 import paramiko
 from icecream import ic
 
@@ -113,17 +114,27 @@ class CommandExecutor(QObject):
                 
             except (OSError, IOError, RuntimeError, paramiko.SSHException) as e:
                 put_response(job_id, "error", str(e))
-                # Invalidate the connection so a fresh one is created next time
-                self._pool.close_connection(
-                    self.credentials.hostname,
-                    self.credentials.port,
-                    self.credentials.username
+                # Don't retry on permission errors - they're not transient
+                # Check both PermissionError and OSError with EACCES/EPERM
+                is_permission_error = (
+                    isinstance(e, PermissionError) or
+                    (isinstance(e, OSError) and e.errno in (errno.EACCES, errno.EPERM))
                 )
-                # Retry once with a fresh connection if this was the first attempt
-                if retry:
-                    ic(f"Executor: Retrying command {command.command_type} with fresh connection")
-                    return self.execute(command, timeout, retry=False)
-                raise
+                if is_permission_error:
+                    ic(f"Executor: Permission denied for {command.command_type}, not retrying: {e}")
+                    raise
+                else:
+                    # Invalidate the connection so a fresh one is created next time
+                    self._pool.close_connection(
+                        self.credentials.hostname,
+                        self.credentials.port,
+                        self.credentials.username
+                    )
+                    # Retry once with a fresh connection if this was the first attempt
+                    if retry:
+                        ic(f"Executor: Retrying command {command.command_type} with fresh connection")
+                        return self.execute(command, timeout, retry=False)
+                    raise
     
     def _progress_callback(self, job_id: str, transferred: int, total: int):
         """Progress callback with rate limiting"""
@@ -528,7 +539,8 @@ class SFTPSessionAPI(QObject):
             job_id = self.session.get_next_job_id()
         
         command = RmDirCommand(job_id=job_id, remote_path=remote_path)
-        return self.executor.execute(command)
+        # Don't retry rmdir operations - permission errors are not transient
+        return self.executor.execute(command, retry=False)
     
     def remove(self, remote_path: str,
                job_id: Optional[str] = None) -> Any:
@@ -537,7 +549,8 @@ class SFTPSessionAPI(QObject):
             job_id = self.session.get_next_job_id()
         
         command = RemoveCommand(job_id=job_id, remote_path=remote_path)
-        return self.executor.execute(command)
+        # Don't retry remove operations - permission errors are not transient
+        return self.executor.execute(command, retry=False)
     
     def rename(self, remote_path: str, new_name: str,
                job_id: Optional[str] = None) -> Any:

@@ -89,9 +89,9 @@ class FileBrowser(Browser):
         # Prompt for confirmation for all selected items
         if not self.always:
             if len(selected_paths) == 1:
-                prompt_msg = f"Are you sure you want to delete the directory '{selected_paths[0]}'?"
+                prompt_msg = f"Are you sure you want to delete '{selected_paths[0]}'?"
             else:
-                prompt_msg = f"Are you sure you want to delete {len(selected_paths)} directories?"
+                prompt_msg = f"Are you sure you want to delete {len(selected_paths)} items?"
                 
             response = QMessageBox.question(
                 None,
@@ -103,111 +103,55 @@ class FileBrowser(Browser):
             if response != Qt.MsgBtn_Yes:
                 return
         
-        # Remove each selected directory
-        for local_path in selected_paths:
+        # Remove each selected item
+        for path in selected_paths:
             try:
                 # Check if path exists
-                if not os.path.exists(local_path):
-                    self.message_signal.emit(f"Path '{local_path}' not found locally.")
+                if not os.path.exists(path):
+                    self.message_signal.emit(f"Path '{path}' not found locally.")
                     continue
                 
                 # Check if it's a file (not directory)
-                if os.path.isfile(local_path):
-                    os.remove(local_path)
-                    self.message_signal.emit(f"File '{local_path}' removed successfully.")
-                    continue
-                
-                # It's a directory - recursively remove
-                shutil.rmtree(local_path)
-                self.message_signal.emit(f"Directory '{local_path}' removed successfully.")
+                if os.path.isfile(path):
+                    os.remove(path)
+                    self.message_signal.emit(f"File '{path}' removed successfully.")
+                else:
+                    # It's a directory - recursively remove
+                    shutil.rmtree(path)
+                    self.message_signal.emit(f"Directory '{path}' removed successfully.")
             except (OSError, IOError, RuntimeError) as e:
-                self.message_signal.emit(f"remove_directory_with_prompt() {e}")
+                self.message_signal.emit(f"Error deleting '{path}': {e}")
                 ic(e)
         
         # Refresh the browser
         self.model.get_files()
         self.notify_observers()
-        creds = get_credentials(self.session_id)
-
-        # for removing LOCAL directories
-        if local_path is None or local_path is False:
-            # current_browser = self.focusWidget()
-            current_browser = self.table
-            if current_browser is not None:
-                current_index = current_browser.currentIndex()
-                if current_index.isValid():
-                    # Get the same row but first column (column 0)
-                    first_col_index = current_index.sibling(current_index.row(), 0)
-                    selected_item = current_browser.model().data(first_col_index, Qt.DisplayRole)
-                    
-                    # Remove type prefix if present
-                    filename = selected_item
-                    prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
-                    for prefix in prefixes:
-                        if filename.startswith(prefix):
-                            filename = filename[len(prefix):].lstrip()
-                            break
-                    
-                    local_path = os.path.join(creds.get('current_local_directory'), filename)
-            else:
-                return
-
-        try:
-            # Check if the path exists locally
-            if not os.path.exists(local_path):
-                self.message_signal.emit(f"Path '{local_path}' not found locally.")
-                return
-
-            # Check if it's a file
-            if os.path.isfile(local_path):
-                os.remove(local_path)
-                self.message_signal.emit(f"File '{local_path}' removed successfully.")
-                self.model.get_files()
-                self.notify_observers()
-                return
-
-            # It's a directory, check if it has child items
-            directory_contents = os.listdir(local_path)
-            subdirectories = [entry for entry in directory_contents if os.path.isdir(os.path.join(local_path, entry))]
-            files = [entry for entry in directory_contents if os.path.isfile(os.path.join(local_path, entry))]
-
-            if subdirectories or files and not self.always:
-                # Directory has child items, prompt for confirmation using QMessageBox
-                response = QMessageBox.question(
-                    None,
-                    'Confirmation',
-                    f"The directory '{local_path}' contains subdirectories or files. Do you want to remove them all?",
-                    Qt.MsgBtn_Yes | Qt.MsgBtn_No | Qt.MsgBtn_YesToAll,
-                    Qt.MsgBtn_No
-                )
-
-                if response == Qt.MsgBtn_YesToAll:
-                    self.always = 1
-
-                if response == Qt.MsgBtn_No:
-                    return
-
-                # Recursively remove subdirectories
-                for entry in subdirectories:
-                    entry_path = os.path.join(local_path, entry)
-                    self.remove_directory_with_prompt(entry_path, self.always)
-
-                # Remove files
-                for entry in files:
-                    entry_path = os.path.join(local_path, entry)
-                    os.remove(entry_path)
-
-            # Remove the directory
-            shutil.rmtree(local_path)
-            self.model.get_files()
-            self.notify_observers()
-
-        except (OSError, IOError, RuntimeError) as e:
-            self.message_signal.emit(f"remove_directory_with_prompt() {e}")
-            ic(e)
 
     def is_remote_browser(self):
         return False
+
+    def rename(self, old_path, new_name):
+        """Rename a local file or directory"""
+        try:
+            if not os.path.exists(old_path):
+                self.message_signal.emit(f"Path '{old_path}' not found.")
+                return False
+            
+            parent = os.path.dirname(old_path)
+            new_path = os.path.join(parent, new_name)
+            
+            if os.path.exists(new_path):
+                self.message_signal.emit(f"A file or directory named '{new_name}' already exists.")
+                return False
+            
+            os.rename(old_path, new_path)
+            self.message_signal.emit(f"Renamed to: {new_name}")
+            self.model.get_files()
+            self.notify_observers()
+            return True
+        except (OSError, IOError) as e:
+            self.message_signal.emit(f"Error renaming: {e}")
+            return False
 
     def get_current_directory(self):
         """Get the current local directory"""

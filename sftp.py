@@ -515,8 +515,14 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             btn.setToolTip(tooltip)
             btn.setFixedWidth(80)
             btn.setStyleSheet(BUTTON_STYLE_DARK)
-            btn.clicked.connect(callback)
+            btn.clicked.connect(lambda checked, c=callback, b=btn_id: self._handle_toolbar_click(c, b))
             self._toolbar_buttons[btn_id] = btn
+    
+    def _handle_toolbar_click(self, callback, btn_id):
+        try:
+            callback()
+        except Exception as e:
+            ic(f"Error in toolbar callback: {e}")
     
     def _apply_toolbar_config(self):
         for btn_id, btn in self._toolbar_buttons.items():
@@ -630,8 +636,12 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         # Store references in container widget
         container_widget.left_browser = self.file_browser_panel.left_browser
         container_widget.right_browser = self.file_browser_panel.right_browser
+        container_widget.file_browser_panel = self.file_browser_panel
         container_widget.session_id = self.session_id
         container_widget.is_terminal = False
+        
+        # Add get_active_browser method that delegates to FileBrowserPanel
+        container_widget.get_active_browser = self.file_browser_panel.get_active_browser
 
         # Set the main layout to the container widget
         container_widget.setLayout(main_layout)
@@ -897,17 +907,20 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             self.tab_widget.setCurrentIndex(tab_index)
     
     def _get_active_browser(self):
-        """Get the currently active remote file browser"""
+        """Get the currently active file browser (local or remote based on last click)"""
         current_index = self.tab_widget.currentIndex()
         if current_index < 2:  # Transfers or Connections tab
             return None
         try:
             widget = self.tab_widget.widget(current_index)
-            # Container widget has right_browser directly, not file_browser_panel
+            # Check if widget has get_active_browser method (FileBrowserPanel)
+            if hasattr(widget, 'get_active_browser'):
+                return widget.get_active_browser()
+            # Fallback for widgets with just right_browser
             if hasattr(widget, 'right_browser'):
                 return widget.right_browser
         except (AttributeError, RuntimeError) as e:
-            ic(f"Error getting right browser: {e}")
+            ic(f"Error getting browser: {e}")
         return None
     
     def _toolbar_refresh(self):
@@ -921,18 +934,24 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
     def _toolbar_upload(self):
         """Handle Upload button click - uploads from local to remote"""
         browser = self._get_active_browser()
-        if browser and hasattr(browser, 'is_remote_browser') and browser.is_remote_browser():
-            browser.upload_download()
-        else:
-            QMessageBox.information(self, "Upload", "Please select a remote connection tab first.")
+        if browser:
+            is_remote = browser.is_remote_browser() if hasattr(browser, 'is_remote_browser') else False
+            if not is_remote:
+                # Local browser - call upload_download to upload to remote
+                browser.upload_download()
+            else:
+                QMessageBox.information(self, "Upload", "Please select a file in the local browser first.")
     
     def _toolbar_download(self):
         """Handle Download button click - downloads from remote to local"""
         browser = self._get_active_browser()
-        if browser and hasattr(browser, 'is_remote_browser') and browser.is_remote_browser():
-            browser.upload_download()
-        else:
-            QMessageBox.information(self, "Download", "Please select a remote connection tab first.")
+        if browser:
+            is_remote = browser.is_remote_browser() if hasattr(browser, 'is_remote_browser') else False
+            if is_remote:
+                # Remote browser - call upload_download to download to local
+                browser.upload_download()
+            else:
+                QMessageBox.information(self, "Download", "Please select a file in the remote browser first.")
     
     def _toolbar_new_folder(self):
         """Handle New Folder button click"""
@@ -943,7 +962,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             QMessageBox.information(self, "New Folder", "Please open a connection first.")
     
     def _toolbar_delete(self):
-        """Handle Delete button click"""
+        """Handle Delete button click - works for both local and remote browsers"""
         browser = self._get_active_browser()
         if browser:
             try:
@@ -955,23 +974,44 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             QMessageBox.information(self, "Delete", "Please open a connection first.")
 
     def _toolbar_rename(self):
-        """Handle Rename button click"""
+        """Handle Rename button click - works for both local and remote browsers"""
         from PyQt6.QtWidgets import QInputDialog
         browser = self._get_active_browser()
         if browser:
             current_browser = browser.table
             if current_browser is not None:
-                current_index = current_browser.currentIndex()
-                if current_index.isValid():
+                # Check selected indexes first (right-click selection)
+                indexes = current_browser.selectedIndexes()
+                if not indexes:
+                    # Fall back to current index (keyboard navigation)
+                    indexes = [current_browser.currentIndex()]
+                
+                if indexes and indexes[0].isValid():
+                    current_index = indexes[0]
                     filename_index = current_browser.model().index(current_index.row(), 0)
                     selected_item = current_browser.model().data(filename_index, Qt.DisplayRole)
-                    selected_item = selected_item.split(' ', 1)[-1] if ' ' in selected_item else selected_item
                     
-                    new_name, ok = QInputDialog.getText(self, "Rename", f"Enter new name for '{selected_item}':")
+                    # Remove type prefix if present (handles both text and emoji prefixes)
+                    prefixes = ['[DIR] ', '[FILE] ', '[LINK] ', '📁 ', '📄 ', '🔗 ']
+                    for prefix in prefixes:
+                        if selected_item.startswith(prefix):
+                            selected_item = selected_item[len(prefix):]
+                            break
+                    
+                    new_name, ok = QInputDialog.getText(
+                        self, "Rename", 
+                        f"Enter new name for '{selected_item}':",
+                        text=selected_item
+                    )
                     if ok and new_name and new_name != selected_item:
                         creds = get_credentials(browser.session_id)
-                        remote_path = os.path.join(creds.get('current_remote_directory'), selected_item)
-                        browser.sftp_rename(remote_path, new_name)
+                        
+                        if browser.is_remote_browser():
+                            remote_path = os.path.join(creds.get('current_remote_directory', '.'), selected_item)
+                            browser.sftp_rename(remote_path, new_name)
+                        else:
+                            local_path = os.path.join(creds.get('current_local_directory', '.'), selected_item)
+                            browser.rename(local_path, new_name)
                     elif ok and new_name == selected_item:
                         QMessageBox.information(self, "Rename", "New name is the same as current name.")
                 else:

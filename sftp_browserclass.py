@@ -526,7 +526,18 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             parent = parent.parent()
         self.message_signal.emit("Preview panel: Open a connection tab first")
 
+    def is_remote_browser(self):
+        """Return True if this is a remote browser, False for local browser.
+        Subclasses should override this method."""
+        return False
+
     def get_files(self):
+        # Debounce: prevent multiple rapid calls
+        current_time = time.time()
+        if hasattr(self, '_last_get_files_time') and current_time - self._last_get_files_time < 0.1:
+            return
+        self._last_get_files_time = current_time
+        
         self.model.get_files()
         
         # Force the view to re-sort after data is loaded
@@ -1694,23 +1705,18 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                         selected_item_text = selected_item_text[len(prefix):].lstrip()
                         break
                 
-                # Check if it's a directory
-                if self.is_remote_directory(selected_item_text) or self.is_remote_file(selected_item_text):
-                    is_remote = True
-                    is_dir = self.is_remote_directory(selected_item_text)
-                else:
-                    # Check local
-                    local_path = os.path.join(creds.get('current_local_directory', '.'), selected_item_text)
-                    is_remote = False
-                    is_dir = os.path.isdir(local_path)
-                
-                if is_dir:
-                    QMessageBox.information(None, "View", "Cannot view directories. Select a file.")
-                    return
+                # Determine if we're in a remote or local browser context
+                is_remote = self.is_remote_browser()
                 
                 if is_remote:
-                    # Remote file
-                    remote_path = self.get_normalized_remote_path(creds.get('current_remote_directory'), selected_item_text)
+                    # Remote file - construct full path
+                    remote_path = self.get_normalized_remote_path(creds.get('current_remote_directory', '.'), selected_item_text)
+                    
+                    # Check if it's a directory
+                    is_dir = self.is_remote_directory(selected_item_text)
+                    if is_dir:
+                        QMessageBox.information(None, "View", "Cannot view directories. Select a file.")
+                        return
                     
                     # Get file size first
                     try:

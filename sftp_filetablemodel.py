@@ -70,7 +70,6 @@ class FileTableModel(QAbstractTableModel):
             ic(f"Error getting files: {str(e)}")
 
         self.endResetModel()
-        self.layoutChanged.emit()
 
     def rowCount(self, parent=QModelIndex()):
         # Return the number of items in your files list

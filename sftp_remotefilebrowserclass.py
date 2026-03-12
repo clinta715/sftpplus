@@ -334,13 +334,24 @@ class RemoteFileBrowser(FileBrowser):
         self.always = always
         creds = get_credentials(self.session_id)
         
-        # Get selected items
+        # Get selected items - ensure table has focus first
         current_browser = self.table
         if current_browser is None or not isinstance(current_browser, QTableView):
             return
-            
+        
+        # Give focus to the table to ensure we can get selection
+        current_browser.setFocus()
+        
         indexes = current_browser.selectedIndexes()
+        
+        # If no items selected, use the current item (the one with keyboard focus)
         if not indexes:
+            current_idx = current_browser.currentIndex()
+            if current_idx.isValid():
+                indexes = [current_idx]
+        
+        if not indexes:
+            self.message_signal.emit("Please select file(s) to delete first.")
             return
             
         # Get unique rows from selected indexes
@@ -402,15 +413,25 @@ class RemoteFileBrowser(FileBrowser):
                     self.message_signal.emit(f"Remote path '{remote_path}' does not exist.")
                     continue
                 
-                # Check if it's a file
-                if self.is_remote_file(remote_path):
-                    self.sftp_remove(remote_path)
-                    self.message_signal.emit(f"File '{remote_path}' removed successfully.")
+                # Check if it's a file (catch permission errors)
+                try:
+                    is_file = self.is_remote_file(remote_path)
+                except (OSError, PermissionError):
+                    is_file = False
+                
+                if is_file:
+                    try:
+                        self.sftp_remove(remote_path)
+                        self.message_signal.emit(f"File '{remote_path}' removed successfully.")
+                    except PermissionError as e:
+                        self.message_signal.emit(f"Permission denied: {e}")
                     continue
                 
                 # It's a directory - recursively remove
                 self._remove_remote_directory_recursive(remote_path)
                 self.message_signal.emit(f"Directory '{remote_path}' removed successfully.")
+            except PermissionError as e:
+                self.message_signal.emit(f"Permission denied: {e}")
             except (OSError, IOError, RuntimeError) as e:
                 self.message_signal.emit(f"remove_directory_with_prompt() error: {e}")
         
@@ -437,7 +458,14 @@ class RemoteFileBrowser(FileBrowser):
         # Remove files
         for entry in files:
             entry_path = os.path.join(remote_path, entry.filename)
-            self.sftp_remove(entry_path)
+            try:
+                self.sftp_remove(entry_path)
+            except PermissionError:
+                ic(f"Permission denied deleting file: {entry_path}")
+                continue
+            except OSError as e:
+                ic(f"Error deleting file {entry_path}: {e}")
+                continue
         
         # Recursively remove subdirectories
         for entry in subdirectories:
@@ -445,7 +473,12 @@ class RemoteFileBrowser(FileBrowser):
             self._remove_remote_directory_recursive(entry_path)
         
         # Remove the directory itself
-        self.sftp_rmdir(remote_path)
+        try:
+            self.sftp_rmdir(remote_path)
+        except PermissionError:
+            ic(f"Permission denied removing directory: {remote_path}")
+        except OSError as e:
+            ic(f"Error removing directory {remote_path}: {e}")
         creds = get_credentials(self.session_id)
         if remote_path is None or remote_path is False:
             # current_browser = self.focusWidget()
