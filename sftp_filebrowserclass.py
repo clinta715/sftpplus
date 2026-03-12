@@ -29,7 +29,7 @@ class FileBrowser(Browser):
         self.table.horizontalHeader().setSectionResizeMode(Qt.HeaderView_Interactive)
         
         # Set minimum width for name column to ensure it's always visible
-        self.table.horizontalHeader().setMinimumSectionSize(0, 150)
+        self.table.horizontalHeader().setMinimumSectionSize(150)
         
         # Add these lines to enable full row selection
         self.table.setSelectionBehavior(Qt.TableView_SelectRows)
