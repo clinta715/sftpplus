@@ -946,7 +946,11 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         """Handle Delete button click"""
         browser = self._get_active_browser()
         if browser:
-            browser.remove_directory_with_prompt()
+            try:
+                browser.remove_directory_with_prompt()
+            except Exception as e:
+                ic(f"Error in _toolbar_delete: {e}")
+                QMessageBox.warning(self, "Delete Error", f"Error deleting: {e}")
         else:
             QMessageBox.information(self, "Delete", "Please open a connection first.")
 
