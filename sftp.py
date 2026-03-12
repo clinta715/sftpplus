@@ -955,7 +955,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         from PyQt6.QtWidgets import QInputDialog
         browser = self._get_active_browser()
         if browser:
-            current_browser = browser.active_table
+            current_browser = browser.table
             if current_browser is not None:
                 current_index = current_browser.currentIndex()
                 if current_index.isValid():
