@@ -1005,7 +1005,11 @@ class RemoteFileBrowser(FileBrowser):
 
         # Get local directory
         creds = get_credentials(self.session_id)
-        local_dir = creds.get('current_local_directory', os.path.expanduser('~'))
+        local_base = creds.get('current_local_directory', os.path.expanduser('~'))
+        
+        # Get the folder name from the path
+        folder_name = os.path.basename(path.rstrip('/'))
+        local_dir = os.path.join(local_base, folder_name)
 
         # Download the directory
         self.message_signal.emit(f"⬇️ Queuing download: {path} -> {local_dir}")
@@ -1020,9 +1024,9 @@ class RemoteFileBrowser(FileBrowser):
             self.tree_status_label.setText("❌ No directories to download")
             return
 
-        # Get local directory
+        # Get local directory base
         creds = get_credentials(self.session_id)
-        local_dir = creds.get('current_local_directory', os.path.expanduser('~'))
+        local_base = creds.get('current_local_directory', os.path.expanduser('~'))
 
         # Count directories to download
         download_count = 0
@@ -1031,6 +1035,9 @@ class RemoteFileBrowser(FileBrowser):
             data = item.data(0, Qt.UserRole)
             if data and data.get('is_dir', False):
                 path = data.get('path')
+                # Append folder name to local path
+                folder_name = os.path.basename(path.rstrip('/'))
+                local_dir = os.path.join(local_base, folder_name)
                 self.message_signal.emit(f"⬇️ Queuing download: {path} -> {local_dir}")
                 self.download_directory(path, local_dir)
                 download_count += 1
