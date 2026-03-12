@@ -45,9 +45,12 @@ class RemoteFileBrowser(FileBrowser):
 
         # Make all columns resizable
         self.table.horizontalHeader().setSectionResizeMode(Qt.HeaderView_Interactive)
-
+        
+        # Set minimum width for name column to ensure it's always visible
+        self.table.horizontalHeader().setMinimumSectionSize(0, 150)
+        
         # Set column widths to prevent text truncation
-        self.table.setColumnWidth(0, 250)  # Name column - wide enough for most filenames
+        self.table.setColumnWidth(0, 300)  # Name column - wide enough for most filenames
         self.table.setColumnWidth(1, 80)   # Size column
         self.table.setColumnWidth(2, 90)   # Permissions column
         self.table.setColumnWidth(3, 140)  # Modified column

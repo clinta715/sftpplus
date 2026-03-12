@@ -27,7 +27,10 @@ class FileBrowser(Browser):
 
         # Make all columns resizable
         self.table.horizontalHeader().setSectionResizeMode(Qt.HeaderView_Interactive)
-
+        
+        # Set minimum width for name column to ensure it's always visible
+        self.table.horizontalHeader().setMinimumSectionSize(0, 150)
+        
         # Add these lines to enable full row selection
         self.table.setSelectionBehavior(Qt.TableView_SelectRows)
         self.table.setSelectionMode(Qt.TableView_ExtendedSelection)  # Allow Ctrl+Click and Shift+Click multi-select
@@ -37,7 +40,7 @@ class FileBrowser(Browser):
         self.table.sortByColumn(0, Qt.AscendingOrder)
 
         # Set column widths to prevent text truncation
-        self.table.setColumnWidth(0, 250)  # Name column - wide enough for most filenames
+        self.table.setColumnWidth(0, 300)  # Name column - wide enough for most filenames
         self.table.setColumnWidth(1, 80)   # Size column
         self.table.setColumnWidth(2, 90)   # Permissions column
         self.table.setColumnWidth(3, 140)  # Modified column
