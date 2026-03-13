@@ -81,6 +81,12 @@ class QtCompat:
     HeaderView_ResizeToContents = QHeaderView.ResizeMode.ResizeToContents
     HeaderView_Interactive = QHeaderView.ResizeMode.Interactive
     
+    # TextElideMode for QTableView
+    TextElideMode_Left = Qt.TextElideMode.ElideLeft
+    TextElideMode_Right = Qt.TextElideMode.ElideRight
+    TextElideMode_Middle = Qt.TextElideMode.ElideMiddle
+    TextElideMode_None = Qt.TextElideMode.ElideNone
+    
     # SelectionBehavior and SelectionMode for QTableView
     TableView_SelectRows = QTableView.SelectionBehavior.SelectRows
     TableView_ExtendedSelection = QTableView.SelectionMode.ExtendedSelection

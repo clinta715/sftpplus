@@ -190,6 +190,8 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(Qt.HeaderView_Stretch)
         self.table.horizontalHeader().setSectionResizeMode(Qt.HeaderView_Interactive)
+        # Show start of filename instead of end when truncated
+        self.table.setTextElideMode(Qt.TextElideMode_Left)
         self.table.setSortingEnabled(True)
 
         self.table.doubleClicked.connect(self.double_click_handler)
