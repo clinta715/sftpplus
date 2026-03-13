@@ -108,6 +108,10 @@ class QtCompat:
     # LineWrapMode for QTextBrowser
     NoWrap = QTextBrowser.LineWrapMode.NoWrap
     
+    # TextFormat for QMessageBox
+    TextFormat_RichText = Qt.TextFormat.RichText
+    TextFormat_PlainText = Qt.TextFormat.PlainText
+    
     # GlobalColor for QColor
     Color_blue = QtCore.Qt.GlobalColor.blue
     Color_darkGray = QtCore.Qt.GlobalColor.darkGray

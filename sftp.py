@@ -102,20 +102,56 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             (QKeySequence("F5"), self._toolbar_refresh),
             (QKeySequence("Ctrl+N"), self._new_connection_tab),
             (QKeySequence("Ctrl+W"), self._close_current_tab),
+            (QKeySequence("Ctrl+Shift+N"), self._toolbar_new_folder),
             (QKeySequence("F6"), self._toolbar_download),
             (QKeySequence("F7"), self._toolbar_upload),
+            (QKeySequence("Ctrl+U"), self._toolbar_upload),
+            (QKeySequence("Ctrl+D"), self._toolbar_download),
             (QKeySequence("F2"), self._toolbar_rename),
             (QKeySequence("Delete"), self._toolbar_delete),
             (QKeySequence("Backspace"), self._navigate_parent),
             (QKeySequence("Ctrl+L"), self._focus_address_bar),
-            (QKeySequence("Ctrl+D"), self._add_bookmark),
+            (QKeySequence("Ctrl+B"), self._add_bookmark),
             (QKeySequence("Ctrl+P"), self._toggle_preview),
             (QKeySequence("Ctrl+T"), self._toggle_transfers_tab),
             (QKeySequence("Ctrl+Shift+T"), self._customize_toolbar),
+            (QKeySequence("F1"), self._show_shortcuts_help),
+            (QKeySequence("Ctrl+Return"), self._toolbar_view),
         ]
         for key_seq, callback in shortcuts:
             shortcut = QShortcut(key_seq, self)
             shortcut.activated.connect(callback)
+    
+    def _show_shortcuts_help(self):
+        """Show keyboard shortcuts help dialog"""
+        shortcuts_text = """
+<h2>Keyboard Shortcuts</h2>
+<table border="1" cellpadding="5">
+<tr><th>Action</th><th>Shortcut</th></tr>
+<tr><td>Refresh</td><td>Ctrl+R or F5</td></tr>
+<tr><td>New Connection</td><td>Ctrl+N</td></tr>
+<tr><td>Close Tab</td><td>Ctrl+W</td></tr>
+<tr><td>Upload</td><td>Ctrl+U or F7</td></tr>
+<tr><td>Download</td><td>Ctrl+D or F6</td></tr>
+<tr><td>New Folder</td><td>Ctrl+Shift+N</td></tr>
+<tr><td>Delete</td><td>Delete</td></tr>
+<tr><td>Rename</td><td>F2</td></tr>
+<tr><td>View File</td><td>Enter</td></tr>
+<tr><td>Go to Parent</td><td>Backspace</td></tr>
+<tr><td>Address Bar</td><td>Ctrl+L</td></tr>
+<tr><td>Add Bookmark</td><td>Ctrl+B</td></tr>
+<tr><td>Toggle Preview</td><td>Ctrl+P</td></tr>
+<tr><td>Transfers Tab</td><td>Ctrl+T</td></tr>
+<tr><td>Customize Toolbar</td><td>Ctrl+Shift+T</td></tr>
+<tr><td>This Help</td><td>F1</td></tr>
+</table>
+        """.strip()
+        
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Keyboard Shortcuts")
+        msg.setText(shortcuts_text)
+        msg.setTextFormat(Qt.TextFormat_RichText)
+        msg.exec()
 
     def _new_connection_tab(self):
         self.tab_widget.setCurrentIndex(1)
@@ -501,13 +537,13 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
     
     def _create_toolbar_buttons(self):
         button_defs = {
-            'refresh': ('↻ Refresh', 'Refresh current directory', self._toolbar_refresh),
-            'upload': ('↑ Upload', 'Upload selected file(s)', self._toolbar_upload),
-            'download': ('↓ Download', 'Download selected file(s)', self._toolbar_download),
-            'new_folder': ('+ Folder', 'Create new folder', self._toolbar_new_folder),
-            'delete': ('✕ Delete', 'Delete selected file(s)', self._toolbar_delete),
-            'rename': ('⇄ Rename', 'Rename selected file(s)', self._toolbar_rename),
-            'view': ('👁 View', 'View/Edit selected text file', self._toolbar_view),
+            'refresh': ('↻ Refresh', 'Refresh current directory\nShortcut: Ctrl+R', self._toolbar_refresh),
+            'upload': ('↑ Upload', 'Upload selected file(s) to remote\nShortcut: Ctrl+U', self._toolbar_upload),
+            'download': ('↓ Download', 'Download selected file(s) to local\nShortcut: Ctrl+D', self._toolbar_download),
+            'new_folder': ('+ Folder', 'Create new folder\nShortcut: Ctrl+N', self._toolbar_new_folder),
+            'delete': ('✕ Delete', 'Delete selected file(s)\nShortcut: Delete', self._toolbar_delete),
+            'rename': ('⇄ Rename', 'Rename selected file(s)\nShortcut: F2', self._toolbar_rename),
+            'view': ('👁 View', 'View/Edit selected text file\nShortcut: Ctrl+Enter', self._toolbar_view),
         }
         
         for btn_id, (text, tooltip, callback) in button_defs.items():
