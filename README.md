@@ -68,17 +68,19 @@ pip install PyQt6 paramiko icecream cryptography humanize
 | `Ctrl+R` / `F5` | Refresh directory |
 | `Ctrl+N` | New connection (switch to Connections tab) |
 | `Ctrl+W` | Close current tab |
-| `F6` | Download selected |
-| `F7` | Upload |
+| `Ctrl+Shift+N` | New folder |
+| `Ctrl+U` / `F7` | Upload selected |
+| `Ctrl+D` / `F6` | Download selected |
 | `F2` | Rename selected |
 | `Delete` | Delete selected |
+| `Ctrl+Enter` | View/edit selected file |
 | `Backspace` | Go to parent directory |
-| `Enter` | Open directory/file |
 | `Ctrl+L` | Focus address bar |
-| `Ctrl+D` | Add bookmark for current directory |
+| `Ctrl+B` | Add bookmark for current directory |
 | `Ctrl+P` | Toggle preview panel |
 | `Ctrl+T` | Toggle Transfers tab |
 | `Ctrl+Shift+T` | Customize toolbar |
+| `F1` | Show keyboard shortcuts help |
 
 ### Toolbar Customization
 

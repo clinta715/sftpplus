@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Keyboard Shortcuts Help**: Press F1 to see all available keyboard shortcuts
+- **Test Framework**: New pytest-based test framework with 40 tests in `tests/` directory
+- **Filename Truncation**: Long filenames now show beginning instead of end (elide left)
+- **Tree View Context Menu**: Added Rename and Delete options to tree view right-click menu
+
+### Fixed
+- **Active Browser Detection**: Toolbar buttons now correctly detect which browser (local/remote) was last clicked
+- **Tree Download Path**: Tree view downloads now create subfolders instead of flattening directory structure
+- **Permission Error Handling**: Delete operations now handle permission errors gracefully instead of retrying forever
+- **Rename Dialog**: Rename dialog now pre-populates with current filename
+- **Toolbar Delete**: Delete button works for both local and remote browsers
+- **Connection Pool**: Changed from RejectPolicy to WarningPolicy to allow connections to new hosts
+
+### Changed
+- **Toolbar Tooltips**: Now display keyboard shortcuts for each button
+- **Default Browser**: Remote browser is now default active browser instead of local
+
 ## [2.0.1] - 2026-03-03
 
 ### Fixed
