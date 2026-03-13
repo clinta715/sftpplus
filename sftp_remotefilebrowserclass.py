@@ -334,51 +334,55 @@ class RemoteFileBrowser(FileBrowser):
         self.always = always
         creds = get_credentials(self.session_id)
         
-        # Get selected items - ensure table has focus first
-        current_browser = self.table
-        if current_browser is None or not isinstance(current_browser, QTableView):
-            return
-        
-        # Give focus to the table to ensure we can get selection
-        current_browser.setFocus()
-        
-        indexes = current_browser.selectedIndexes()
-        
-        # If no items selected, use the current item (the one with keyboard focus)
-        if not indexes:
-            current_idx = current_browser.currentIndex()
-            if current_idx.isValid():
-                indexes = [current_idx]
-        
-        if not indexes:
-            self.message_signal.emit("Please select file(s) to delete first.")
-            return
+        # If a specific path is provided (e.g., from tree view), use it directly
+        if remote_path:
+            selected_paths = [remote_path]
+        else:
+            # Get selected items from table - ensure table has focus first
+            current_browser = self.table
+            if current_browser is None or not isinstance(current_browser, QTableView):
+                return
             
-        # Get unique rows from selected indexes
-        processed_rows = set()
-        selected_paths = []
-        
-        for index in indexes:
-            row = index.row()
-            if row in processed_rows:
-                continue
-            processed_rows.add(row)
+            # Give focus to the table to ensure we can get selection
+            current_browser.setFocus()
             
-            # Get filename from first column
-            filename_index = index.sibling(row, 0)
-            selected_item = current_browser.model().data(filename_index, Qt.DisplayRole)
+            indexes = current_browser.selectedIndexes()
             
-            # Remove type prefix if present
-            filename = selected_item
-            prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
-            for prefix in prefixes:
-                if filename.startswith(prefix):
-                    filename = filename[len(prefix):].lstrip()
-                    break
+            # If no items selected, use the current item (the one with keyboard focus)
+            if not indexes:
+                current_idx = current_browser.currentIndex()
+                if current_idx.isValid():
+                    indexes = [current_idx]
             
-            # Get current remote directory
-            if creds.get('current_remote_directory') == '.':
-                temp_path = self.sftp_getcwd()
+            if not indexes:
+                self.message_signal.emit("Please select file(s) to delete first.")
+                return
+                
+            # Get unique rows from selected indexes
+            processed_rows = set()
+            selected_paths = []
+            
+            for index in indexes:
+                row = index.row()
+                if row in processed_rows:
+                    continue
+                processed_rows.add(row)
+                
+                # Get filename from first column
+                filename_index = index.sibling(row, 0)
+                selected_item = current_browser.model().data(filename_index, Qt.DisplayRole)
+                
+                # Remove type prefix if present
+                filename = selected_item
+                prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
+                for prefix in prefixes:
+                    if filename.startswith(prefix):
+                        filename = filename[len(prefix):].lstrip()
+                        break
+                
+                # Get current remote directory
+                if creds.get('current_remote_directory') == '.':
+                    temp_path = self.sftp_getcwd()
                 if temp_path:
                     set_credentials(self.session_id, 'current_remote_directory', self.remove_trailing_dot(temp_path))
             
@@ -1111,7 +1115,7 @@ class RemoteFileBrowser(FileBrowser):
     
     def tree_context_menu_handler(self, pos):
         """Handle context menu on tree widget"""
-        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtWidgets import QMenu, QInputDialog
         
         item = self.tree_widget.itemAt(pos)
         if not item:
@@ -1128,6 +1132,8 @@ class RemoteFileBrowser(FileBrowser):
         
         if not is_root:
             open_action = menu.addAction("📂 Open")
+            rename_action = menu.addAction("✏️ Rename")
+            delete_action = menu.addAction("🗑️ Delete")
         refresh_action = menu.addAction("🔄 Refresh")
         if not is_root:
             menu.addSeparator()
@@ -1140,6 +1146,27 @@ class RemoteFileBrowser(FileBrowser):
             self._tree_current_path = path
             self._mark_current_item(item)
             self.tree_path_input.setText(path)
+        elif action == rename_action:
+            folder_name = os.path.basename(path.rstrip('/'))
+            new_name, ok = QInputDialog.getText(
+                None, "Rename", 
+                f"Enter new name for '{folder_name}':",
+                text=folder_name
+            )
+            if ok and new_name and new_name != folder_name:
+                parent_dir = os.path.dirname(path.rstrip('/'))
+                new_path = os.path.join(parent_dir, new_name)
+                self.sftp_rename(path, new_path)
+                self.populate_tree_view()
+        elif action == delete_action:
+            # Check if it's a directory and confirm deletion
+            data = item.data(0, Qt.UserRole)
+            is_dir = data.get('is_dir', False) if data else False
+            if is_dir:
+                self.remove_directory_with_prompt(remote_path=path)
+            else:
+                self.sftp_remove(path)
+            self.populate_tree_view()
         elif action == refresh_action:
             self.populate_tree_view()
         elif action == download_action:
