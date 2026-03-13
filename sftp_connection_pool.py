@@ -156,10 +156,9 @@ class ConnectionPool:
             except Exception as e:
                 ic(f"ConnectionPool: Warning: Could not load known_hosts: {e}")
         
-        # Default to interactive policy if we can (simplified for pool)
-        # In actual use, the caller should have already handled policy setup 
-        # for first-time connections. We use RejectPolicy here for safety.
-        ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
+        # Use WarningPolicy to warn about unknown hosts but allow connection
+        # This is appropriate for a file transfer client where user initiates connections
+        ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
         
         connect_kwargs = {
             'hostname': hostname,
