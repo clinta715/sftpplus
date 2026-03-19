@@ -15,7 +15,6 @@ from sftp_downloadworkerclass import Transfer, DownloadWorker, SFTPJob, sftp_que
 from sftp_theme import (BUTTON_STYLE_DARK, LIST_WIDGET_STYLE_DARK, PROGRESS_BAR_STYLE_DARK,
                         TEXT_EDIT_STYLE_DARK, DARK_THEME)
 from sftp_preferences import get_preferences
-from sftp_transfer_handler import cancel_active_directory_transfer
 
 
 QUEUE_FILE_PATH = os.path.join(os.path.expanduser('~'), '.sftp_client_transfer_queue.json')
@@ -39,7 +38,7 @@ class TransferQueueWidget(QWidget):
     signal_transfer_started = pyqtSignal(int, str)  # (count, message)
     signal_transfer_completed = pyqtSignal(int, str)  # (count, message)
     signal_transfer_error = pyqtSignal(int, str)  # (count, message)
-    signal_transfer_progress = pyqtSignal(int, int, float, float)  # (transfer_id, percent, speed_bps, eta_sec)
+    signal_transfer_progress = pyqtSignal(int, int, float, float, int, int)  # (transfer_id, percent, speed_bps, eta_sec, bytes_done, bytes_total)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -496,7 +495,7 @@ class TransferQueueWidget(QWidget):
             # Connect signals
             if hasattr(download_worker, 'signals'):
                 download_worker.signals.progress.connect(
-                    lambda tid, val, speed, eta: self.update_progress(tid, val, speed, eta),
+                    lambda tid, val, speed, eta, bdone, btotal: self.update_progress(tid, val, speed, eta, bdone, btotal),
                     Qt.QueuedConnection
                 )
                 download_worker.signals.finished.connect(
@@ -770,8 +769,8 @@ class TransferQueueWidget(QWidget):
         except (OSError, IOError, RuntimeError) as e:
             print(f"Error handling worker message: {e}")
 
-    def update_progress(self, transfer_id, value, speed_bps=None, eta_sec=None):
-        """Update transfer progress"""
+    def update_progress(self, transfer_id, value, speed_bps=None, eta_sec=None, bytes_done=0, bytes_total=0):
+        """Update transfer progress with bytes tracking"""
         try:
             if not transfer_id:
                 return
@@ -782,12 +781,23 @@ class TransferQueueWidget(QWidget):
 
             speed = speed_bps if speed_bps is not None else 0.0
             eta = eta_sec if eta_sec is not None else 0.0
-            self.signal_transfer_progress.emit(transfer_id, value, speed, eta)
+            
+            # Update transfer object with progress data
+            transfer.bytes_done = bytes_done
+            transfer.bytes_total = bytes_total
+            transfer.speed_bps = speed
+            transfer.eta_seconds = eta
+            
+            self.signal_transfer_progress.emit(transfer_id, value, speed, eta, bytes_done, bytes_total)
             
             try:
                 if transfer.progress_bar:
                     transfer.progress_bar.setValue(value)
-
+                    # Update progress bar text format
+                    if bytes_total > 0:
+                        bytes_str = self.format_bytes(bytes_done, bytes_total)
+                        transfer.progress_bar.setFormat(f"{value}% • {bytes_str}")
+                    
                 if transfer.speed_label and speed_bps is not None:
                     transfer.speed_label.setText(self.format_speed(speed_bps))
 
@@ -809,6 +819,20 @@ class TransferQueueWidget(QWidget):
 
         except (OSError, IOError, RuntimeError):
             pass
+
+    def format_bytes(self, bytes_done, bytes_total):
+        """Format bytes done / bytes total"""
+        def humanize(b):
+            if b >= 1024**3:
+                return f"{b / 1024**3:.1f} GB"
+            elif b >= 1024**2:
+                return f"{b / 1024**2:.1f} MB"
+            elif b >= 1024:
+                return f"{b / 1024:.1f} KB"
+            else:
+                return f"{b} B"
+        
+        return f"{humanize(bytes_done)}/{humanize(bytes_total)}"
 
     def format_speed(self, bytes_per_sec):
         """Format transfer speed"""
@@ -886,9 +910,6 @@ class TransferQueueWidget(QWidget):
     def stop_all_transfers(self):
         """Cancel all active transfers"""
         try:
-            # Cancel any active directory traversal
-            cancel_active_directory_transfer()
-            
             # Clear the transfer queue to stop new transfers from starting
             clear_sftp_queue()
             

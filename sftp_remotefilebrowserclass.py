@@ -8,7 +8,7 @@ import time
 
 from sftp_remotefiletablemodel import RemoteFileTableModel
 from sftp_qt_compat import Qt
-from sftp_transfer_handler import TreePopulateWorker, DirectoryTransferTask, TraversalWorker
+from sftp_transfer_handler import TreePopulateWorker, TraversalWorker
 from sftp_creds import get_credentials
 from sftp_sortfiltermodel import DirectoryFirstSortProxyModel
 from sftp_creds import (get_credentials, create_random_integer, set_credentials,

@@ -1,33 +1,12 @@
 from PyQt6.QtWidgets import QInputDialog, QMessageBox, QApplication
-from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QRunnable, QThreadPool, QMutex, QWaitCondition
+from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool, QMutex, QWaitCondition
 from sftp_qt_compat import Qt
 from sftp_creds import get_credentials, create_random_integer, sanitize_error_message
 from sftp_downloadworkerclass import add_sftp_job
 from sftp_preferences import get_preferences
 import os
 import stat
-import threading
 from icecream import ic
-
-
-_active_directory_transfer = None
-_active_directory_transfer_lock = threading.Lock()
-
-
-def set_active_directory_transfer(worker):
-    """Set the currently active directory transfer worker"""
-    global _active_directory_transfer
-    with _active_directory_transfer_lock:
-        _active_directory_transfer = worker
-
-
-def cancel_active_directory_transfer():
-    """Cancel the currently active directory transfer"""
-    global _active_directory_transfer
-    with _active_directory_transfer_lock:
-        if _active_directory_transfer:
-            _active_directory_transfer.cancel()
-            _active_directory_transfer = None
 
 
 class TreePopulateWorker(QRunnable):
@@ -174,85 +153,6 @@ class FilePreviewWorker(QRunnable):
         except (OSError, IOError, RuntimeError) as e:
             ic(f"FilePreviewWorker error: {sanitize_error_message(str(e))}")
             self.signals.error.emit(self.remote_path, sanitize_error_message(str(e)))
-
-
-class DirectoryTransferTask(QObject):
-    """
-    Worker that runs directory traversal and transfers in a background thread.
-    """
-    finished = pyqtSignal()
-    error = pyqtSignal(str)
-    job_added = pyqtSignal(str)
-    
-    def __init__(self, session_id, source_dir, dest_dir, is_source_remote, is_dest_remote,
-                 skip_all=False, overwrite_all=False, resume_all=False, browser=None,
-                 auto_overwrite=False):
-        super().__init__()
-        self.session_id = session_id
-        self.source_dir = source_dir
-        self.dest_dir = dest_dir
-        self.is_source_remote = is_source_remote
-        self.is_dest_remote = is_dest_remote
-        self.skip_all = skip_all
-        self.overwrite_all = overwrite_all
-        self.resume_all = resume_all
-        self.browser = browser
-        self.auto_overwrite = auto_overwrite  # Auto-answer prompts
-        self._cancelled = False
-        self._worker = None  # Keep reference to worker
-        self._worker_signals = None  # Keep reference to worker's signals to prevent garbage collection
-        
-    def cancel(self):
-        """Cancel the transfer"""
-        self._cancelled = True
-        if self._worker:
-            self._worker.cancel()
-        
-    @pyqtSlot()
-    def run(self):
-        global _active_directory_transfer
-        _active_directory_transfer = self
-        try:
-            self._worker_signals = TraversalSignals()
-            self._worker_signals.job_added.connect(self.job_added.emit)
-            self._worker_signals.finished.connect(self.finished.emit)
-            self._worker_signals.error.connect(self.error.emit)
-            
-            # Force overwrite_all if auto_overwrite is set
-            effective_overwrite = self.overwrite_all or self.auto_overwrite
-            
-            self._worker = TraversalWorker(
-                self.session_id, self.source_dir, self.dest_dir,
-                self.is_source_remote, self.is_dest_remote,
-                self.skip_all, effective_overwrite, self.resume_all,
-                parent_signals=self._worker_signals
-            )
-            
-            # Always connect prompt signal if we might need to prompt
-            # Use QueuedConnection so the slot runs in the browser's UI thread
-            if not effective_overwrite and self.browser:
-                browser = self.browser
-                worker = self._worker
-                
-                def prompt_handler(path):
-                    action = browser.prompt_overwrite(path)
-                    worker.set_prompt_result(action)
-                
-                self._worker_signals.prompt_overwrite.connect(
-                    prompt_handler,
-                    type=Qt.QueuedConnection
-                )
-        except Exception as e:
-            self.error.emit(str(e))
-        finally:
-            if _active_directory_transfer is self:
-                _active_directory_transfer = None
-
-    def _handle_prompt(self, path):
-        """Handle overwrite prompt request from background worker on UI thread"""
-        if self.browser:
-            action = self.browser.prompt_overwrite(path)
-            self._worker.set_prompt_result(action)
 
 
 class TraversalSignals(QObject):

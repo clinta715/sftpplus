@@ -32,7 +32,6 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         self.session_id = session_id
         self._notifying = False
         self._current_traversal_worker = None
-        self._current_traversal_thread = None
         
         # THREAD SAFETY: Cancel flag with lock
         self._cancel_lock = threading.Lock()
@@ -1886,13 +1885,9 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             return False
     
     def cleanup(self):
-        """Cleanup browser resources including running threads"""
-        # Stop any running directory traversal
+        """Cleanup browser resources"""
         if hasattr(self, '_current_traversal_worker') and self._current_traversal_worker:
             self._current_traversal_worker.cancel()
-        if hasattr(self, '_current_traversal_thread') and self._current_traversal_thread:
-            self._current_traversal_thread.quit()
-            self._current_traversal_thread.wait()
     
     def get_bookmarks(self):
         """Get bookmarks for current hostname"""
