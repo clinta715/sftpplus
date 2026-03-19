@@ -1,6 +1,6 @@
 from sftp_filebrowserclass import FileBrowser
 from PyQt6.QtWidgets import QTableView, QFileDialog, QMessageBox, QInputDialog, QHeaderView, QMenu, QProgressDialog, QApplication
-from PyQt6.QtCore import QModelIndex, QTimer, QThread
+from PyQt6.QtCore import QModelIndex, QTimer, QThreadPool
 from icecream import ic
 import os
 import stat
@@ -383,8 +383,8 @@ class RemoteFileBrowser(FileBrowser):
                 # Get current remote directory
                 if creds.get('current_remote_directory') == '.':
                     temp_path = self.sftp_getcwd()
-                if temp_path:
-                    set_credentials(self.session_id, 'current_remote_directory', self.remove_trailing_dot(temp_path))
+                    if temp_path:
+                        set_credentials(self.session_id, 'current_remote_directory', self.remove_trailing_dot(temp_path))
             
             full_path = os.path.join(creds.get('current_remote_directory'), filename)
             selected_paths.append(full_path)
@@ -768,38 +768,44 @@ class RemoteFileBrowser(FileBrowser):
                         resume_all: bool = False) -> None:
         """
         Download a directory and its contents from the remote server.
-        Uses DirectoryTransferTask for thread-safe background execution.
+        Uses QThreadPool for thread-safe background execution with proper prompt handling.
         """
+        from sftp_transfer_handler import TraversalWorker
+        from PyQt6.QtCore import QThreadPool
+        from sftp_qt_compat import Qt
+        
         ic(f"download_directory called: source={source_directory}, dest={destination_directory}")
         
-        # Cancel any existing transfer before starting a new one
-        if hasattr(self, '_current_traversal_thread') and self._current_traversal_thread:
-            if self._current_traversal_thread.isRunning():
-                self.cancel_current_transfer()
-        
-        thread = QThread()
-        worker = DirectoryTransferTask(
+        worker = TraversalWorker(
             self.session_id, source_directory, destination_directory,
             is_source_remote=True, is_dest_remote=False,
-            skip_all=skip_all, overwrite_all=overwrite_all, resume_all=resume_all,
-            browser=self,
-            auto_overwrite=True  # Auto-overwrite to avoid blocking on prompts
+            skip_all=skip_all, overwrite_all=overwrite_all, resume_all=resume_all
         )
-        worker.moveToThread(thread)
         
-        thread.started.connect(worker.run)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        
-        # Connect signals
-        worker.job_added.connect(lambda jid: self.transfer_started.emit(jid) if hasattr(self, 'transfer_started') and self.transfer_started else None)
-        worker.error.connect(lambda err: self.message_signal.emit(f"Download error: {err}"))
+        worker.signals.status.connect(
+            lambda msg: self.message_signal.emit(msg),
+            type=Qt.QueuedConnection
+        )
+        worker.signals.job_added.connect(
+            lambda jid: self.transfer_started.emit(jid) if hasattr(self, 'transfer_started') and self.transfer_started else None,
+            type=Qt.QueuedConnection
+        )
+        worker.signals.prompt_overwrite.connect(
+            lambda path: self._handle_worker_prompt(worker, path),
+            type=Qt.QueuedConnection
+        )
+        worker.signals.error.connect(
+            lambda err: self.message_signal.emit(f"Download error: {err}"),
+            type=Qt.QueuedConnection
+        )
+        worker.signals.finished.connect(
+            lambda: self.message_signal.emit("Download finished"),
+            type=Qt.QueuedConnection
+        )
         
         self._current_traversal_worker = worker
-        self._current_traversal_thread = thread
         
-        thread.start()
+        QThreadPool.globalInstance().start(worker)
         self.message_signal.emit(f"Started download of {source_directory}")
 
     def cancel_current_transfer(self):
@@ -808,18 +814,11 @@ class RemoteFileBrowser(FileBrowser):
             self._current_traversal_worker.cancel()
             self.message_signal.emit("Cancelling transfer...")
             self._current_traversal_worker = None
-        if hasattr(self, '_current_traversal_thread') and self._current_traversal_thread:
-            self._current_traversal_thread.quit()
-            self._current_traversal_thread.wait()
-            self._current_traversal_thread = None
     
     def cleanup(self):
-        """Cleanup browser resources including running threads"""
+        """Cleanup browser resources"""
         if hasattr(self, '_current_traversal_worker') and self._current_traversal_worker:
             self._current_traversal_worker.cancel()
-        if hasattr(self, '_current_traversal_thread') and self._current_traversal_thread:
-            self._current_traversal_thread.quit()
-            self._current_traversal_thread.wait()
         super().cleanup()
 
     def get_current_directory(self):

@@ -133,7 +133,7 @@ class FileListWorker(QRunnable):
                     items.append(LocalAttr(name, st.st_size, st.st_mode, int(st.st_mtime)))
                 
                 self.signals.finished.emit(self.path, items)
-        except (OSError, IOError, RuntimeError) as e:
+        except (OSError, IOError, RuntimeError, Exception) as e:
             ic(f"FileListWorker error: {sanitize_error_message(str(e))}")
             self.signals.error.emit(self.path, sanitize_error_message(str(e)))
 
@@ -213,34 +213,46 @@ class DirectoryTransferTask(QObject):
         global _active_directory_transfer
         _active_directory_transfer = self
         try:
-            # Create our own signals object that we keep a reference to
             self._worker_signals = TraversalSignals()
-            
-            # Connect signals to our own signals
             self._worker_signals.job_added.connect(self.job_added.emit)
             self._worker_signals.finished.connect(self.finished.emit)
             self._worker_signals.error.connect(self.error.emit)
             
-            # Create the worker with our signals
-            # If auto_overwrite is set, force overwrite_all to skip prompts
-            worker_skip_all = self.skip_all
-            worker_overwrite_all = self.overwrite_all or self.auto_overwrite
-            worker_resume_all = self.resume_all
+            # Force overwrite_all if auto_overwrite is set
+            effective_overwrite = self.overwrite_all or self.auto_overwrite
             
             self._worker = TraversalWorker(
                 self.session_id, self.source_dir, self.dest_dir,
                 self.is_source_remote, self.is_dest_remote,
-                worker_skip_all, worker_overwrite_all, worker_resume_all,
+                self.skip_all, effective_overwrite, self.resume_all,
                 parent_signals=self._worker_signals
             )
             
-            # Run the worker
-            self._worker.run()
+            # Always connect prompt signal if we might need to prompt
+            # Use QueuedConnection so the slot runs in the browser's UI thread
+            if not effective_overwrite and self.browser:
+                browser = self.browser
+                worker = self._worker
+                
+                def prompt_handler(path):
+                    action = browser.prompt_overwrite(path)
+                    worker.set_prompt_result(action)
+                
+                self._worker_signals.prompt_overwrite.connect(
+                    prompt_handler,
+                    type=Qt.QueuedConnection
+                )
         except Exception as e:
             self.error.emit(str(e))
         finally:
             if _active_directory_transfer is self:
                 _active_directory_transfer = None
+
+    def _handle_prompt(self, path):
+        """Handle overwrite prompt request from background worker on UI thread"""
+        if self.browser:
+            action = self.browser.prompt_overwrite(path)
+            self._worker.set_prompt_result(action)
 
 
 class TraversalSignals(QObject):
@@ -384,12 +396,22 @@ class TraversalWorker(QRunnable):
                 self.prompt_mutex.lock()
                 self.prompt_result = None
                 self.signals.prompt_overwrite.emit(dest_path)
-                # Wait for UI thread to respond
+                # Wait for UI thread to respond (with 60 second timeout)
+                timeout_ms = 60000
                 while self.prompt_result is None:
-                    self.prompt_cond.wait(self.prompt_mutex)
+                    result = self.prompt_cond.wait(self.prompt_mutex, timeout_ms)
+                    if not result:  # Timeout occurred
+                        self.prompt_mutex.unlock()
+                        self.signals.error.emit(f"Prompt timeout for {dest_path}, skipping")
+                        break
                 
+                if self.prompt_result is None:
+                    ic(f"Prompt result is None, skipping {dest_path}")
+                    continue
+                    
                 action = self.prompt_result
                 self.prompt_mutex.unlock()
+                ic(f"Prompt result received: action={action} for {dest_path}")
                 
                 if action == "cancel":
                     return
@@ -404,6 +426,11 @@ class TraversalWorker(QRunnable):
                     self.resume_all = True
                 elif action == "resume":
                     command = "resume"
+                elif action == "overwrite":
+                    ic(f"Overwrite selected for {dest_path}, proceeding with {command}")
+                else:
+                    ic(f"Unknown action '{action}' for {dest_path}, treating as skip")
+                    continue
                     
             if self.skip_all:
                 continue
@@ -413,6 +440,7 @@ class TraversalWorker(QRunnable):
             
             try:
                 job_id = create_random_integer()
+                ic(f"Adding job: source={source_path}, dest={dest_path}, command={command}")
                 add_sftp_job(source_path, self.is_source_remote, dest_path, self.is_dest_remote,
                             self.creds.get('hostname', ''),
                             self.creds.get('username', ''),

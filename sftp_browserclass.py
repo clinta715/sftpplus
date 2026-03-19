@@ -739,11 +739,13 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             self.session_api.rmdir(remote_path, job_id=str(job_id))
             ic(f"sftp_rmdir: session_api.rmdir returned successfully")
             result = True
-        except (OSError, IOError, PermissionError, paramiko.SSHException) as e:
+        except PermissionError as e:
+            ic(f"sftp_rmdir: Permission denied: {e}")
+            self.message_signal.emit(f"Permission denied: cannot remove '{os.path.basename(remote_path)}'")
+            result = False
+        except (OSError, IOError, paramiko.SSHException) as e:
             ic(f"sftp_rmdir: Exception: {e}")
-            import traceback
-            traceback.print_exc()
-            self.message_signal.emit(f"FileBrowser sftp_rmdir() {e}")
+            self.message_signal.emit(f"Error removing '{os.path.basename(remote_path)}': {e}")
             result = False
 
         self.get_files()
@@ -764,11 +766,13 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             self.session_api.remove(remote_path, job_id=str(job_id))
             ic(f"sftp_remove: session_api.remove returned successfully")
             result = True
-        except (OSError, IOError, PermissionError, paramiko.SSHException) as e:
+        except PermissionError as e:
+            ic(f"sftp_remove: Permission denied: {e}")
+            self.message_signal.emit(f"Permission denied: cannot delete '{os.path.basename(remote_path)}'")
+            result = False
+        except (OSError, IOError, paramiko.SSHException) as e:
             ic(f"sftp_remove: Exception: {e}")
-            import traceback
-            traceback.print_exc()
-            self.message_signal.emit(f"FileBrowser sftp_remove() {e}")
+            self.message_signal.emit(f"Error deleting '{os.path.basename(remote_path)}': {e}")
             result = False
 
         self.get_files()
@@ -798,11 +802,9 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             result = False
         except (OSError, IOError, paramiko.SSHException) as e:
             ic(f"sftp_rename: Exception: {e}")
-            import traceback
-            traceback.print_exc()
             error_msg = str(e)
             QMessageBox.critical(None, "Rename Error", f"Error renaming file: {error_msg}")
-            self.message_signal.emit(f"FileBrowser sftp_rename() {e}")
+            self.message_signal.emit(f"Error renaming: {error_msg}")
             result = False
 
         self.get_files()
@@ -908,8 +910,6 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
 
         except (OSError, IOError, paramiko.SSHException) as e:
             ic(f"is_remote_directory: EXCEPTION - {e} for {partial_remote_path}")
-            import traceback
-            traceback.print_exc()
             return False
 
     def is_remote_file(self, partial_remote_path):
@@ -1383,8 +1383,6 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
 
         if not has_valid_item:
             self.message_signal.emit("No valid items selected.")
-        else:
-            self.message_signal.emit("Current browser is not a valid QTableView.")
 
     def _get_transfer_action(self, target_path, skip_all, overwrite_all, resume_all, 
                             is_remote_target=False):
@@ -1601,43 +1599,52 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                         skip_all=False, overwrite_all=False, resume_all=False, always=0):
         """
         Upload a directory and its contents to the remote server.
-        Runs in background thread to avoid UI hang.
+        Uses QThreadPool for thread-safe background execution with proper prompt handling.
         """
-        from sftp_transfer_handler import DirectoryTransferTask
-        from PyQt6.QtCore import QThread
+        from sftp_transfer_handler import TraversalWorker
+        from PyQt6.QtCore import QThreadPool
+        from sftp_qt_compat import Qt
         
-        thread = QThread()
-        worker = DirectoryTransferTask(
+        worker = TraversalWorker(
             self.session_id, source_directory, destination_directory,
             is_source_remote=False, is_dest_remote=True,
-            skip_all=skip_all, overwrite_all=overwrite_all, resume_all=resume_all,
-            browser=self
+            skip_all=skip_all, overwrite_all=overwrite_all, resume_all=resume_all
         )
-        worker.moveToThread(thread)
         
-        thread.started.connect(worker.run)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
+        worker.signals.status.connect(
+            lambda msg: self.message_signal.emit(msg), 
+            type=Qt.QueuedConnection
+        )
+        worker.signals.job_added.connect(
+            lambda jid: self.transfer_started.emit(jid) if self.transfer_started else None,
+            type=Qt.QueuedConnection
+        )
+        worker.signals.prompt_overwrite.connect(
+            lambda path: self._handle_worker_prompt(worker, path),
+            type=Qt.QueuedConnection
+        )
+        worker.signals.error.connect(
+            lambda err: self.message_signal.emit(f"Upload error: {err}"),
+            type=Qt.QueuedConnection
+        )
+        worker.signals.finished.connect(
+            lambda: self.message_signal.emit("Upload finished"),
+            type=Qt.QueuedConnection
+        )
         
-        # Store reference for cleanup
         self._current_traversal_worker = worker
-        self._current_traversal_thread = thread
         
-        # Also clean up previous thread if one exists
-        if hasattr(self, '_previous_traversal_thread') and self._previous_traversal_thread:
-            self._previous_traversal_thread.quit()
-            self._previous_traversal_thread.wait()
-        self._previous_traversal_thread = thread
-        
-        thread.start()
+        QThreadPool.globalInstance().start(worker)
         self.message_signal.emit(f"Started upload of {source_directory}")
         return skip_all, overwrite_all, resume_all
 
     def _handle_worker_prompt(self, worker, path):
         """Handle overwrite prompt request from background worker on UI thread"""
+        ic(f"_handle_worker_prompt called for {path}")
         action = self.prompt_overwrite(path)
+        ic(f"prompt_overwrite returned: {action}")
         worker.set_prompt_result(action)
+        ic(f"set_prompt_result called with {action}")
 
     def cancel_current_transfer(self):
         """Cancel the current directory transfer"""

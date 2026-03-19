@@ -305,12 +305,13 @@ __init__.py                   # Package structure and public API exports
 sftp.py                       # Main application entry point
 sftp_creds.py                 # Thread-safe credential management
 sftp_downloadworkerclass.py   # Background transfer workers
+sftp_transfer_handler.py      # Directory traversal workers (TraversalWorker, DirectoryTransferTask)
 sftp_backgroundthreadwindow.py # Transfer queue UI
 sftp_hostdataeditor.py        # Connection data storage/encryption (functions only)
 sftp_browserclass.py          # Base browser (uses mixins)
 sftp_browser_mixins.py        # Browser mixins: TreeViewMixin, BookmarkMixin, FileOpsMixin
 sftp_remotefilebrowserclass.py # Remote file browser
-sftp_filebrowserclass.py      # Legacy base browser class
+sftp_filebrowserclass.py      # Local file browser
 sftp_*tablemodel.py           # Table models for file listings
 sftp_editwindowclass.py       # Edit window dialog
 sftp_session.py               # Session management
@@ -467,6 +468,75 @@ if not hostname or not isinstance(hostname, str):
 ```
 
 ## Critical Bugs & Lessons Learned
+
+### Directory Transfer Prompts (2026-03-19) - CRITICAL FIX
+
+Directory uploads and downloads now properly handle file conflict prompts. This was a major bug where prompts would not work or files would not transfer.
+
+**Root Cause:**
+`DirectoryTransferTask` created a `TraversalWorker` but never called `QThreadPool.globalInstance().start(worker)` to execute it. The worker never ran.
+
+**The Fix:**
+Replace the broken `DirectoryTransferTask` + `QThread` pattern with direct `TraversalWorker` + `QThreadPool`:
+
+```python
+# CORRECT - Worker is actually started
+worker = TraversalWorker(...)
+worker.signals.prompt_overwrite.connect(
+    lambda path: self._handle_worker_prompt(worker, path),
+    type=Qt.QueuedConnection  # CRITICAL: Must be QueuedConnection
+)
+QThreadPool.globalInstance().start(worker)
+
+# WRONG - Worker created but never started
+task = DirectoryTransferTask(...)
+task.moveToThread(thread)
+thread.started.connect(task.run)  # run() creates worker but doesn't start it!
+```
+
+**Key Points:**
+
+1. **Use `QThreadPool.globalInstance().start(worker)`:** `TraversalWorker` is a `QRunnable` that must be started in a thread pool.
+
+2. **Use `Qt.QueuedConnection` for prompts:** With `DirectConnection`, the slot runs in the worker thread which has no event loop. Use `QueuedConnection` so the prompt dialog runs in the UI thread.
+
+3. **Remove `auto_overwrite=True`:** This flag bypassed prompts entirely, not because it was working correctly, but because the worker was never running.
+
+**Files Modified:**
+- `sftp_browserclass.py` - `upload_directory()` fixed to use `TraversalWorker` + `QThreadPool`
+- `sftp_remotefilebrowserclass.py` - `download_directory()` fixed to use `TraversalWorker` + `QThreadPool`
+- `sftp_transfer_handler.py` - `DirectoryTransferTask.run()` fixed to use `QueuedConnection`; added explicit `"overwrite"` action handling
+
+**Prompt Flow (Now Working):**
+1. `TraversalWorker._traverse()` detects file conflict
+2. Emits `prompt_overwrite` signal with `QueuedConnection`
+3. Signal queued to browser's UI thread event loop
+4. `_handle_worker_prompt()` runs in UI thread, shows dialog
+5. User clicks Overwrite → `set_prompt_result("overwrite")` called
+6. `QWaitCondition` wakes worker thread with result
+7. Worker continues with correct action
+
+**Action Handling in `TraversalWorker._traverse()`:**
+```python
+if action == "cancel":
+    return
+elif action == "skip":
+    continue
+elif action == "skip_all":
+    self.skip_all = True
+    continue
+elif action == "overwrite_all":
+    self.overwrite_all = True
+    # Falls through to add job
+elif action == "resume_all":
+    self.resume_all = True
+    # Falls through to add job
+elif action == "resume":
+    command = "resume"
+elif action == "overwrite":
+    # Falls through to add job with original command
+    pass
+```
 
 ### Remote Directory Tracking (CRITICAL)
 

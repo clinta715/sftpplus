@@ -60,6 +60,9 @@ class QtCompat:
     
     # ConnectionType
     QueuedConnection = QtCore.Qt.ConnectionType.QueuedConnection
+    BlockingQueuedConnection = QtCore.Qt.ConnectionType.BlockingQueuedConnection
+    AutoConnection = QtCore.Qt.ConnectionType.AutoConnection
+    DirectConnection = QtCore.Qt.ConnectionType.DirectConnection
     
     # ISODate format
     ISODate = QtCore.Qt.DateFormat.ISODate
