@@ -74,6 +74,12 @@ case "$PLATFORM" in
                     --collect-all "PySide6" \
                     --collect-all "paramiko" \
                     --collect-all "cryptography" \
+                    --collect-all "encodings" \
+                    --hidden-import "encodings" \
+                    --hidden-import "encodings.ascii" \
+                    --hidden-import "encodings.utf_8" \
+                    --hidden-import "encodings.latin_1" \
+                    --hidden-import "encodings.charmap" \
                     --hidden-import "PySide6.QtCore" \
                     --hidden-import "PySide6.QtGui" \
                     --hidden-import "PySide6.QtWidgets" \

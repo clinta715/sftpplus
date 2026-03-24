@@ -24,6 +24,11 @@ datas += collect_data_files('paramiko')
 
 # Hidden imports that PyInstaller might miss
 hiddenimports = [
+    'encodings',
+    'encodings.ascii',
+    'encodings.utf_8',
+    'encodings.latin_1',
+    'encodings.charmap',
     'PySide6.QtCore',
     'PySide6.QtGui',
     'PySide6.QtWidgets',

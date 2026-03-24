@@ -85,6 +85,19 @@ jobs:
                       --collect-all "PySide6" `
                       --collect-all "paramiko" `
                       --collect-all "cryptography" `
+                      --collect-all "encodings" `
+                      --hidden-import "encodings" `
+                      --hidden-import "encodings.ascii" `
+                      --hidden-import "encodings.utf_8" `
+                      --hidden-import "encodings.latin_1" `
+                      --hidden-import "encodings.charmap" `
+                      --hidden-import "PySide6.QtCore" `
+                      --hidden-import "PySide6.QtGui" `
+                      --hidden-import "PySide6.QtWidgets" `
+                      --hidden-import "paramiko" `
+                      --hidden-import "cryptography" `
+                      --hidden-import "cryptography.fernet" `
+                      --hidden-import "paramiko.win_openssh" `
                       --exclude-module "tkinter" `
                       --exclude-module "matplotlib" `
                       --exclude-module "numpy" `
@@ -93,13 +106,6 @@ jobs:
                       --exclude-module "PIL" `
                       --exclude-module "cv2" `
                       --exclude-module "pytest" `
-                      --hidden-import "PySide6.QtCore" `
-                      --hidden-import "PySide6.QtGui" `
-                      --hidden-import "PySide6.QtWidgets" `
-                      --hidden-import "paramiko" `
-                      --hidden-import "cryptography" `
-                      --hidden-import "cryptography.fernet" `
-                      --hidden-import "paramiko.win_openssh" `
                       sftp.py
       
       - name: Create Windows ZIP
