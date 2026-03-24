@@ -3,6 +3,9 @@
 # Nuitka compiles Python to C for better performance and smaller binaries
 # Usage: ./build-nuitka.sh [platform]
 #   platform: macos, windows, linux (default: current platform)
+#
+# NOTE: PyQt6 support in Nuitka is limited on macOS.
+# For macOS builds, consider using PyInstaller instead (./build.sh macos)
 
 set -e
 
@@ -26,6 +29,19 @@ if ! python3 -c "import nuitka" 2>/dev/null; then
     echo "Installing Nuitka..."
     pip3 install nuitka
 fi
+
+# Platform-specific warnings
+case "$PLATFORM" in
+    macos)
+        echo ""
+        echo "WARNING: PyQt6 support in Nuitka is limited on macOS."
+        echo "Consider using PyInstaller for macOS builds instead:"
+        echo "  ./build.sh macos"
+        echo ""
+        echo "Continuing with Nuitka build (may fail)..."
+        echo ""
+        ;;
+esac
 
 # Check if C compiler is available
 check_compiler() {
@@ -55,7 +71,7 @@ check_compiler
 
 # Clean previous builds
 echo "Cleaning previous builds..."
-rm -rf build/ dist/ *.build/ *.dist/ 2>/dev/null || true
+rm -rf build/ dist/ *.build/ *.dist/ sftp.app 2>/dev/null || true
 
 # Create dist directory
 mkdir -p dist
@@ -78,7 +94,7 @@ NUITKA_OPTS=(
     --include-data-file=sftp_qt_compat.py=sftp_qt_compat.py
 )
 
-#modules to include
+# Modules to include
 INCLUDE_MODULES=(
     sftp_browserclass
     sftp_browser_mixins
@@ -122,24 +138,39 @@ done
 case "$PLATFORM" in
     macos)
         echo "Building macOS .app bundle with Nuitka..."
-        python3 -m nuitka \
+        echo "Note: This may fail due to PyQt6 limitations. Use ./build.sh macos if it does."
+        echo ""
+        
+        # Try build, fallback to PyInstaller recommendation on failure
+        if python3 -m nuitka \
             "${NUITKA_OPTS[@]}" \
             --standalone \
             --macos-create-app-bundle \
             --macos-app-name="SFTP Client" \
             --macos-app-version="2.1.0" \
             --macos-signed-app-name="com.sftpclient.app" \
+            --macos-app-icon=none \
             --enable-plugin=pyqt6 \
-            sftp.py
-        
-        # Move to dist directory
-        if [ -d "sftp.dist" ]; then
-            mv sftp.dist/* dist/ 2>/dev/null || true
+            sftp.py 2>&1; then
+            
+            # Move to dist directory
+            if [ -d "sftp.app" ]; then
+                mv sftp.app "dist/SFTP Client.app"
+            fi
+            if [ -d "sftp.dist" ]; then
+                mv sftp.dist/* dist/ 2>/dev/null || true
+            fi
+            
+            echo ""
+            echo "Build complete!"
+            echo "macOS .app bundle: dist/SFTP Client.app/"
+        else
+            echo ""
+            echo "Nuitka build failed (PyQt6 on macOS has limited support)."
+            echo "Falling back to PyInstaller..."
+            echo ""
+            ./build.sh macos
         fi
-        
-        echo ""
-        echo "Build complete!"
-        echo "macOS .app bundle: dist/SFTP Client.app/"
         ;;
 
     windows)
@@ -149,13 +180,13 @@ case "$PLATFORM" in
             --standalone \
             --onefile \
             --windows-console-mode=disable \
-            --windows-icon-from-ico="" \
+            --windows-icon-from-ico=none \
             --enable-plugin=pyqt6 \
             sftp.py
         
         # Move to dist directory
         if [ -f "sftp.exe" ]; then
-            mv sftp.exe dist/"SFTP Client.exe"
+            mv sftp.exe "dist/SFTP Client.exe"
         fi
         
         echo ""

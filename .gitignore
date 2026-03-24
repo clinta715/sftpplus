@@ -51,3 +51,6 @@ htmlcov/
 
 # Temporary files
 *.tmp
+nuitka-crash-report.xml
+*.build/
+*.dist/

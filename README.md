@@ -311,9 +311,11 @@ pip install nuitka
 ```
 
 **Nuitka Requirements:**
-- **macOS**: Xcode CLI (`xcode-select --install`)
+- **macOS**: Xcode CLI (`xcode-select --install`) - Note: PyQt6 has limited support
 - **Linux**: GCC (`apt install gcc` or `dnf install gcc`)
 - **Windows**: MinGW or Visual Studio
+
+**Note:** Nuitka has limited PyQt6 support on macOS. The script will fall back to PyInstaller if Nuitka fails. For macOS, PyInstaller (`./build.sh macos`) is recommended.
 
 ### Build Comparison
 
@@ -322,4 +324,5 @@ pip install nuitka
 | Build time | Fast (1-2 min) | Slow (5-15 min) |
 | Executable size | Larger | Smaller |
 | Startup speed | Normal | Faster |
+| macOS PyQt6 | ✅ Works | ⚠️ Limited |
 | Complexity | Simple | Requires C compiler |
