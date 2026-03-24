@@ -276,21 +276,14 @@ python3 -m pytest tests/ -v
 
 ## Building Standalone Executables
 
-PyInstaller is used to create standalone executables for macOS, Windows, and Linux.
+### PyInstaller (Recommended)
 
-### Prerequisites
+PyInstaller is the easiest way to create standalone executables.
 
 ```bash
-# Install runtime dependencies
-pip install -r requirements.txt
-
-# Install development dependencies (includes PyInstaller)
+# Install dependencies
 pip install -r requirements-dev.txt
-```
 
-### Build Commands
-
-```bash
 # Build for current platform
 ./build.sh
 
@@ -300,17 +293,33 @@ pip install -r requirements-dev.txt
 ./build.sh linux    # Creates dist/sftp-client
 ```
 
-### Platform-Specific Notes
+### Nuitka (Alternative)
 
-**macOS:**
-- Creates a `.app` bundle in `dist/SFTP Client.app`
-- Local terminal works with system shell (bash/zsh)
+Nuitka compiles Python to C for potentially smaller, faster executables.
 
-**Windows:**
-- Creates a single `.exe` file in `dist/SFTP Client.exe`
-- Local terminal shows a placeholder message (PTY not supported)
-- May require Visual C++ Redistributable
+```bash
+# Install Nuitka
+pip install nuitka
 
-**Linux:**
-- Creates a single executable in `dist/sftp-client`
-- Local terminal requires PTY support (all modern distributions)
+# Build for current platform
+./build-nuitka.sh
+
+# Build for specific platform
+./build-nuitka.sh macos    # Creates dist/SFTP Client.app
+./build-nuitka.sh windows  # Creates dist/SFTP Client.exe
+./build-nuitka.sh linux    # Creates dist/sftp-client
+```
+
+**Nuitka Requirements:**
+- **macOS**: Xcode CLI (`xcode-select --install`)
+- **Linux**: GCC (`apt install gcc` or `dnf install gcc`)
+- **Windows**: MinGW or Visual Studio
+
+### Build Comparison
+
+| Feature | PyInstaller | Nuitka |
+|---------|-------------|--------|
+| Build time | Fast (1-2 min) | Slow (5-15 min) |
+| Executable size | Larger | Smaller |
+| Startup speed | Normal | Faster |
+| Complexity | Simple | Requires C compiler |
