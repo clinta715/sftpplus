@@ -269,4 +269,48 @@ python3 -m py_compile sftp.py sftp_*.py
 
 # Test single module
 python3 -c "from sftp_creds import get_credentials; print('OK')"
+
+# Run all tests
+python3 -m pytest tests/ -v
 ```
+
+## Building Standalone Executables
+
+PyInstaller is used to create standalone executables for macOS, Windows, and Linux.
+
+### Prerequisites
+
+```bash
+# Install runtime dependencies
+pip install -r requirements.txt
+
+# Install development dependencies (includes PyInstaller)
+pip install -r requirements-dev.txt
+```
+
+### Build Commands
+
+```bash
+# Build for current platform
+./build.sh
+
+# Build for specific platform
+./build.sh macos    # Creates dist/SFTP Client.app
+./build.sh windows  # Creates dist/SFTP Client.exe
+./build.sh linux    # Creates dist/sftp-client
+```
+
+### Platform-Specific Notes
+
+**macOS:**
+- Creates a `.app` bundle in `dist/SFTP Client.app`
+- Local terminal works with system shell (bash/zsh)
+
+**Windows:**
+- Creates a single `.exe` file in `dist/SFTP Client.exe`
+- Local terminal shows a placeholder message (PTY not supported)
+- May require Visual C++ Redistributable
+
+**Linux:**
+- Creates a single executable in `dist/sftp-client`
+- Local terminal requires PTY support (all modern distributions)

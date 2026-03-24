@@ -1,0 +1,13 @@
+# SFTP Client - Development Dependencies
+# Install with: pip install -r requirements-dev.txt
+
+# Runtime dependencies
+-r requirements.txt
+
+# Development tools
+pyinstaller>=6.0.0
+pytest>=7.0.0
+pytest-qt>=4.2.0
+
+# Optional but useful
+humanize>=4.0.0
