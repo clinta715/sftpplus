@@ -82,8 +82,11 @@ jobs:
       - name: Build Windows executable
         run: |
           pyinstaller --windowed `
-                      --onefile `
+                      --onedir `
                       --name "SFTP Client" `
+                      --collect-all "PySide6" `
+                      --collect-all "paramiko" `
+                      --collect-all "cryptography" `
                       --exclude-module "tkinter" `
                       --exclude-module "matplotlib" `
                       --exclude-module "numpy" `
@@ -95,18 +98,21 @@ jobs:
                       --hidden-import "PySide6.QtCore" `
                       --hidden-import "PySide6.QtGui" `
                       --hidden-import "PySide6.QtWidgets" `
-                      --hidden-import "PySide6.sip" `
                       --hidden-import "paramiko" `
                       --hidden-import "cryptography" `
                       --hidden-import "cryptography.fernet" `
                       --hidden-import "paramiko.win_openssh" `
                       sftp.py
       
+      - name: Create Windows ZIP
+        run: |
+          Compress-Archive -Path "dist/SFTP Client" -DestinationPath "dist/SFTP-Client-Windows.zip"
+      
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: SFTP-Client-Windows
-          path: dist/SFTP Client.exe
+          path: dist/SFTP-Client-Windows.zip
 
   build-linux:
     runs-on: ubuntu-latest

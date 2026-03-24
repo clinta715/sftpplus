@@ -70,14 +70,16 @@ case "$PLATFORM" in
     windows)
         echo "Building Windows executable..."
         pyinstaller --windowed \
-                    --onefile \
+                    --onedir \
                     --name "SFTP Client" \
                     --add-data "sftp_theme.py;." \
                     --add-data "sftp_qt_compat.py;." \
+                    --collect-all "PySide6" \
+                    --collect-all "paramiko" \
+                    --collect-all "cryptography" \
                     --hidden-import "PySide6.QtCore" \
                     --hidden-import "PySide6.QtGui" \
                     --hidden-import "PySide6.QtWidgets" \
-                    --hidden-import "PySide6.sip" \
                     --hidden-import "paramiko" \
                     --hidden-import "cryptography" \
                     --hidden-import "cryptography.fernet" \
@@ -98,7 +100,8 @@ case "$PLATFORM" in
         
         echo ""
         echo "Build complete!"
-        echo "Windows executable: dist/SFTP Client.exe"
+        echo "Windows folder: dist/SFTP Client/"
+        echo "Run: dist/SFTP Client/SFTP Client.exe"
         ;;
 
     linux)
