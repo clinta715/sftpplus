@@ -14,7 +14,7 @@ import platform
 import re
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QLabel
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QTextCursor
 
 from sftp_platform import is_windows, supports_local_terminal, get_default_shell
 
@@ -35,18 +35,25 @@ def _check_unix_modules():
 
 UNIX_MODULES = _check_unix_modules()
 
+# Comprehensive ANSI escape code pattern
+# Matches CSI sequences, OSC sequences, and other control sequences
 TERMINAL_CONTROL_PATTERN = re.compile(
-    r'\x1b\[[0-9;?]*[a-zA-Z]|'
-    r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)|'
-    r'\x1b[()][A-Za-z0-9]|'
-    r'\x1b[=>]|'
-    r'\x1b[78]|'
-    r'\x1b[DE]|'
-    r'\x1b[HM]|'
-    r'\x1b[cl]|'
-    r'\x1b[NO]|'
-    r'\x1bP[^\\]*(?:\\|$)|'
-    r'\x1b\[[\x3e0-9;]*q[0-9;]*~?'
+    r'\x1b\[[0-9;?]*[a-zA-Z]|'        # CSI sequences: ESC [ ... letter
+    r'\x1b\[[0-9;?]*~|'                # CSI sequences: ESC [ ... ~
+    r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)|'  # OSC sequences: ESC ] ... BEL/ST
+    r'\x1b[()][A-Za-z0-9]|'            # Character set: ESC ( letter
+    r'\x1b[=>]|'                        # Keypad mode: ESC = or ESC >
+    r'\x1b[78]|'                        # Save/restore cursor: ESC 7 or ESC 8
+    r'\x1b[DE]|'                        # Index/newline: ESC D or ESC E
+    r'\x1b[HM]|'                        # Tab sets: ESC H or ESC M
+    r'\x1b[cl]|'                        # Clear/reset: ESC c or ESC l
+    r'\x1b[NO]|'                        # Locks: ESC N or ESC O
+    r'\x1bP[^\\]*(?:\\|$)|'             # DCS sequences: ESC P ... ST
+    r'\x1b\[[\x3e0-9;]*q[0-9;]*~?|'     # Keyboard keys
+    r'\x1b[<>][0-9]*[a-zA-Z]?|'        # Private sequences: ESC < or ESC >
+    r'\x1b[_][^\x07]*\x07|'             # APC sequences: ESC _ ... BEL
+    r'\x1b\^.*?\x1b\\|'                 # PM sequences: ESC ^ ... ST
+    r'\x1bX[^\x1b]*\x1b'                # SOS sequences: ESC X ... ST
 )
 
 DA_RESPONSE = b'\x1b[?1;0c'
@@ -208,32 +215,41 @@ class LocalTerminalWidget(QWidget):
         try:
             data = os.read(fd, 65536)
             if data:
+                # Respond to device attribute queries
                 if b'\x1b[c' in data or b'\x1b[?c' in data or b'\x1b[>c' in data:
                     try:
                         os.write(self.master_fd, DA_RESPONSE)
                     except OSError:
                         pass
                 
+                # Respond to cursor position queries
                 if b'\x1b[6n' in data or b'\x1b[?6n' in data:
                     try:
                         os.write(self.master_fd, b'\x1b[1;1R')
                     except OSError:
                         pass
                 
+                # Respond to status queries
                 if b'\x1b[5n' in data:
                     try:
                         os.write(self.master_fd, b'\x1b[0n')
                     except OSError:
                         pass
                 
-                if b'\x1b[?2004h' in data or b'\x1b[>0q' in data:
-                    pass
+                # Strip OSC title sequences before cleaning
+                # These often contain the shell prompt path
+                data_clean = data
+                data_clean = re.sub(rb'\x1b\][^\x07\x1b]*\x07', b'', data_clean)
+                data_clean = re.sub(rb'\x1b\][^\x1b]*\x1b\\\\', b'', data_clean)
                 
-                text = data.decode('utf-8', errors='replace')
+                # Decode and clean
+                text = data_clean.decode('utf-8', errors='replace')
                 text = clean_terminal_output(text)
                 
+                # Remove any remaining control characters except newline and tab
+                text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
+                
                 if text:
-                    from PyQt6.QtGui import QTextCursor
                     cursor = self.terminal.textCursor()
                     cursor.movePosition(QTextCursor.MoveOperation.End)
                     cursor.insertText(text)
