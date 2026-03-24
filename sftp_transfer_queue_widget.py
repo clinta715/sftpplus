@@ -197,7 +197,7 @@ class TransferQueueWidget(QWidget):
                 color: #ffffff;
             }}
             QProgressBar::chunk {{
-                background-color: {DARK_THEME['accent']};
+                background-color: {DARK_THEME['accent_green']};
                 border-radius: 3px;
             }}
         """)
