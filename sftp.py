@@ -11,6 +11,7 @@ from sftp_theme import BUTTON_STYLE_DARK
 from sftp_connections_widget import ConnectionsWidget
 from sftp_file_browser_panel import FileBrowserPanel
 from sftp_terminal_widget import SSHTerminalWidget
+from sftp_local_terminal_widget import LocalTerminalWidget
 from sftp_filebrowserclass import FileBrowser
 from sftp_creds import get_credentials, set_credentials, del_credentials, create_random_integer, clear_all_credentials, get_home_directory
 from sftp_session import get_session_manager
@@ -396,6 +397,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         # Create and add the connections widget as a tab
         self.connections_widget = ConnectionsWidget()
         self.connections_widget.connect_requested.connect(self.handle_connection_request)
+        self.connections_widget.open_local_terminal.connect(self.open_local_terminal)
         self.tab_widget.addTab(self.connections_widget, "🔗 Connections")
         
         # Connect the edit button to switch to connections tab
@@ -727,11 +729,18 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         
         # Close terminal session if this is a terminal tab
         if hasattr(widget_to_remove, 'is_terminal') and widget_to_remove.is_terminal:
+            # SSH terminal
             if hasattr(widget_to_remove, 'terminal_widget') and widget_to_remove.terminal_widget:
                 try:
                     widget_to_remove.terminal_widget.disconnect_ssh()
                 except Exception as e:
-                    print(f"Error disconnecting terminal: {e}")
+                    print(f"Error disconnecting SSH terminal: {e}")
+            # Local terminal
+            if hasattr(widget_to_remove, 'local_terminal_widget') and widget_to_remove.local_terminal_widget:
+                try:
+                    widget_to_remove.local_terminal_widget.close()
+                except Exception as e:
+                    print(f"Error closing local terminal: {e}")
         
         self.tab_widget.removeTab(index)
 
@@ -1159,6 +1168,38 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             error_message = f"Connection failed: {str(e)}"
             self.update_console(error_message)
             QMessageBox.critical(self, "Connection Error", error_message)
+
+    def open_local_terminal(self):
+        """Handle Local Terminal button click - opens local shell tab"""
+        from sftp_platform import supports_local_terminal
+        
+        if not supports_local_terminal():
+            QMessageBox.information(
+                self, 
+                "Local Terminal", 
+                "Local terminal is not supported on Windows.\n\n"
+                "Please use the SSH Terminal tab for remote shell access,\n"
+                "or use Windows Terminal/CMD/PowerShell for local commands."
+            )
+            return
+        
+        container_widget = QWidget()
+        container_widget.is_terminal = True
+        
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        container_widget.setLayout(layout)
+        
+        self.local_terminal_widget = LocalTerminalWidget()
+        layout.addWidget(self.local_terminal_widget)
+        
+        container_widget.local_terminal_widget = self.local_terminal_widget
+        
+        tab_title = "💻 Local Terminal"
+        new_tab_index = self.tab_widget.addTab(container_widget, tab_title)
+        self.tab_widget.setCurrentIndex(new_tab_index)
+        
+        self.message_signal.emit("Local terminal opened")
 
     def display_error(self, transfer_id, message):
         # Display error in a message box
