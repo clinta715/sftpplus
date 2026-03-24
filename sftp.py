@@ -4,7 +4,6 @@ import argparse
 import platform
 import time
 import logging
-from icecream import ic
 from sftp_downloadworkerclass import transferSignals, add_sftp_job, clear_sftp_queue
 from sftp_transfer_queue_widget import TransferQueueWidget
 from sftp_hostdataeditor import save_connection_data, load_connection_data
@@ -23,6 +22,7 @@ import paramiko
 
 from sftp_preferences import get_preferences
 from sftp_toolbar_customizer import customize_toolbar
+from sftp_logging import setup_logging, get_logger
 
 class CustomComboBox(QComboBox):
     editingFinished = pyqtSignal()
@@ -558,7 +558,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         try:
             callback()
         except Exception as e:
-            ic(f"Error in toolbar callback: {e}")
+            pass
     
     def _apply_toolbar_config(self):
         for btn_id, btn in self._toolbar_buttons.items():
@@ -651,9 +651,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         # Create the file browser panel with toggleable local browser
         # Use auto_initialize=False to defer remote browser initialization
         # until after connection is fully established
-        ic(f"prepare_container_widget: Creating FileBrowserPanel with session_id={self.session_id}")
         self.file_browser_panel = FileBrowserPanel(self.session_id, auto_initialize=False)
-        ic(f"prepare_container_widget: FileBrowserPanel created (deferred init)")
         
         # Connect observers
         self.transfer_queue_widget.add_observee(self.file_browser_panel.left_browser)
@@ -691,7 +689,6 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         
         container_widget = QWidget()
         
-        ic(f"prepare_terminal_widget: Creating SSHTerminalWidget with session_id={self.session_id}")
         self.terminal_widget = SSHTerminalWidget(self.session_id)
         
         main_layout = QVBoxLayout()
@@ -756,11 +753,11 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             try:
                 get_session_manager().remove_session(str(session_id))
             except Exception as e:
-                ic(f"Error removing session: {e}")
+                pass
             try:
                 del_credentials(session_id)
             except Exception as e:
-                ic(f"Error clearing credentials: {e}")
+                pass
 
     def add_tab(self, session_id, widget):
         self.session_id = session_id
@@ -830,7 +827,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
                 try:
                     self.key_combo.addItem(os.path.basename(key_data), key_data)
                 except (TypeError, AttributeError) as e:
-                    ic(f"Error adding key to combo: {e}")
+                    pass
 
             # If we actually added any keys, select the first one
             # if key_paths and self.key_combo.count() > 1:  # More than just '<none>'
@@ -956,7 +953,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             if hasattr(widget, 'right_browser'):
                 return widget.right_browser
         except (AttributeError, RuntimeError) as e:
-            ic(f"Error getting browser: {e}")
+            pass
         return None
     
     def _toolbar_refresh(self):
@@ -1004,7 +1001,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             try:
                 browser.remove_directory_with_prompt()
             except Exception as e:
-                ic(f"Error in _toolbar_delete: {e}")
+                pass
                 QMessageBox.warning(self, "Delete Error", f"Error deleting: {e}")
         else:
             QMessageBox.information(self, "Delete", "Please open a connection first.")
@@ -1397,10 +1394,8 @@ Do you want to trust this host and add it to known_hosts?"""
                 if output and not error:
                     home_dir = output
                     self.message_signal.emit(f"Remote home directory: {home_dir}")
-                else:
-                    ic(f"Could not get home directory: {error}")
             except (OSError, IOError, RuntimeError) as e:
-                ic(f"Could not get home directory: {e}")
+                pass
 
             return home_dir
 
@@ -1413,13 +1408,13 @@ Do you want to trust this host and add it to known_hosts?"""
                 try:
                     sftp.close()
                 except (OSError, IOError, RuntimeError) as e:
-                    ic(f"Warning: Error closing SFTP session: {e}")
+                    pass
 
             # Ensure SSH connection is closed
             try:
                 ssh.close()
             except (OSError, IOError, RuntimeError) as e:
-                ic(f"Warning: Error closing SSH connection: {e}")
+                pass
         
     def set_credentials_async(self):
             set_credentials(self.session_id, 'hostname', self.temp_hostname)
@@ -1494,7 +1489,6 @@ Do you want to trust this host and add it to known_hosts?"""
             return
         self._cleanup_performed = True
 
-        ic("Cleanup method called")
         try:
             if hasattr(self, 'transfer_queue_widget'):
                 self.transfer_queue_widget.cleanup()
@@ -1509,10 +1503,9 @@ Do you want to trust this host and add it to known_hosts?"""
             try:
                 save_connection_data(self.host_data)
             except (OSError, IOError, RuntimeError) as e:
-                ic(f"Error saving connection data: {e}")
+                pass
         except (OSError, IOError, RuntimeError) as e:
-            ic(f"Error during cleanup: {str(e)}")
-        ic("All cleanup tasks completed.")
+            pass
 
     # Remove the perform_next_cleanup_task method as it's no longer needed
 
@@ -1534,7 +1527,7 @@ Do you want to trust this host and add it to known_hosts?"""
                 if hasattr(browser, 'close_sftp_connection'):
                     browser.close_sftp_connection()
             except (OSError, IOError, RuntimeError) as e:
-                ic(f"Error closing SFTP connection: {e}")
+                pass
 
     def stop_background_thread(self):
         """Stop the transfer queue processing"""
@@ -1618,8 +1611,8 @@ Do you want to trust this host and add it to known_hosts?"""
         return super().eventFilter(source, event)
 
 def main():
-    ic.enable()
-    clear_all_credentials()  # Clear any stale credentials from previous runs
+    # Clear any stale credentials from previous runs
+    clear_all_credentials()
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="FTP/SFTP Client")
     parser.add_argument("-H", "--hostname", help="Initial hostname to connect to")
@@ -1627,22 +1620,13 @@ def main():
     parser.add_argument("-p", "--password", help="Password for the connection")
     parser.add_argument("-P", "--port", type=int, default=22, help="Port for the connection (default: 22)")
     parser.add_argument("-K", "--key", help="SSH key")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode (outputs to debug.log)")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     args = parser.parse_args()
 
-    # Configure icecream based on debug flag
-    _debug_log_file = None
-    if args.debug:
-        # Enable debug output to file
-        log_dir = os.path.expanduser("~/.sftp_client")
-        os.makedirs(log_dir, exist_ok=True)
-        debug_log_path = os.path.join(log_dir, "debug.log")
-        _debug_log_file = open(debug_log_path, 'a')
-        ic.configureOutput(outputFunction=_debug_log_file.write)
-        ic(f"=== Debug session started at {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
-    else:
-        # Disable icecream for performance
-        ic.disable()
+    # Set up logging
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logger = setup_logging(log_level=log_level)
+    logger.info("SFTP Client starting up")
 
     app = QApplication(sys.argv)
 
@@ -1688,7 +1672,7 @@ def main():
                 key=args.key or "None"
             )
         except (OSError, IOError, RuntimeError) as e:
-            ic("Error connecting:", e)
+            pass
 
     # Connect the aboutToQuit signal directly to the cleanup method
     app.aboutToQuit.connect(main_window.cleanup)

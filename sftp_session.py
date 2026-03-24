@@ -9,7 +9,6 @@ from typing import Optional, Dict, Any
 from threading import Lock
 import time
 import os
-from icecream import ic
 
 
 @dataclass
@@ -82,7 +81,6 @@ class SessionManager:
         with self._lock:
             self._sessions[session_id] = session
 
-        ic(f"SessionManager: Created session {session_id}")
         return session
     
     def get_session(self, session_id: str) -> Optional['SFTPSession']:
@@ -97,7 +95,6 @@ class SessionManager:
                 session = self._sessions[session_id]
                 session.cleanup()
                 del self._sessions[session_id]
-                ic(f"SessionManager: Removed session {session_id}")
                 return True
         return False
     
@@ -126,8 +123,6 @@ class SFTPSession:
         self._lock = Lock()
         self._job_counter = 0
         self._active = True
-        
-        ic(f"SFTPSession: Created session {session_id} for {credentials.hostname}")
     
     @property
     def is_active(self) -> bool:
@@ -143,17 +138,14 @@ class SFTPSession:
     def update_remote_directory(self, path: str):
         """Update the current remote directory"""
         self.credentials.remote_directory = path
-        ic(f"SFTPSession: Updated remote directory to {path}")
     
     def update_local_directory(self, path: str):
         """Update the current local directory"""
         self.credentials.local_directory = path
-        ic(f"SFTPSession: Updated local directory to {path}")
     
     def cleanup(self):
         """Cleanup session resources"""
         self._active = False
-        ic(f"SFTPSession: Cleanup session {self.session_id}")
     
     def __repr__(self) -> str:
         return (f"SFTPSession(id={self.session_id}, "

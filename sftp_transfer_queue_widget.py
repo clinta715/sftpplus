@@ -2,32 +2,114 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                             QListWidget, QTextEdit, QProgressBar, QSizePolicy,
                             QLabel, QListWidgetItem, QScrollArea, QFrame, QCheckBox)
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
-from PyQt6.QtCore import QThreadPool, QTimer, QMutex, QMutexLocker, pyqtSignal
-from icecream import ic
+from PyQt6.QtCore import QThreadPool, QTimer, QMutex, QMutexLocker, pyqtSignal, pyqtSlot
 import inspect
 import os
 import json
 import queue
 import time
-import stat
+import logging
 
 from sftp_downloadworkerclass import Transfer, DownloadWorker, SFTPJob, sftp_queue, clear_sftp_queue, response_queues, response_queues_lock
 from sftp_theme import (BUTTON_STYLE_DARK, LIST_WIDGET_STYLE_DARK, PROGRESS_BAR_STYLE_DARK,
                         TEXT_EDIT_STYLE_DARK, DARK_THEME)
 from sftp_preferences import get_preferences
+from sftp_hostdataeditor import cipher_suite
+from sftp_transfer_history import log_transfer
+from sftp_platform import get_transfer_queue_path, create_secure_directory, secure_file_permissions, is_windows
+
+logger = logging.getLogger('sftp.transfer_queue')
 
 
-QUEUE_FILE_PATH = os.path.join(os.path.expanduser('~'), '.sftp_client_transfer_queue.json')
+QUEUE_FILE_PATH = get_transfer_queue_path()
+
+
+class TransferPanelHeader(QWidget):
+    """
+    Collapsible header for the transfer panel.
+    Shows transfer count and allows collapsing the panel.
+    """
+    toggle_panel = pyqtSignal()  # Emitted when header is clicked to toggle collapse
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._is_collapsed = False
+        self._active_count = 0
+        self._init_ui()
+        
+    def _init_ui(self):
+        layout = QHBoxLayout()
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(8)
+        
+        # Collapse toggle button
+        self.toggle_btn = QPushButton("▼")
+        self.toggle_btn.setFixedWidth(24)
+        self.toggle_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                color: #aaaaaa;
+                font-size: 12px;
+                padding: 0;
+            }
+            QPushButton:hover {
+                color: #ffffff;
+            }
+        """)
+        self.toggle_btn.clicked.connect(self._on_toggle)
+        layout.addWidget(self.toggle_btn)
+        
+        # Title label with count
+        self.title_label = QLabel("Transfers")
+        self.title_label.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {DARK_THEME['text_primary']};")
+        layout.addWidget(self.title_label)
+        
+        # Spacing
+        layout.addStretch()
+        
+        self.setLayout(layout)
+        self.setStyleSheet("""
+            TransferPanelHeader {
+                background-color: #2a2a2a;
+                border-bottom: 1px solid #444444;
+            }
+        """)
+        self.setCursor(Qt.PointingHandCursor)
+        
+    def _on_toggle(self):
+        self.toggle_panel.emit()
+        
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.toggle_panel.emit()
+        super().mousePressEvent(event)
+        
+    def set_collapsed(self, collapsed: bool):
+        self._is_collapsed = collapsed
+        self.toggle_btn.setText("▶" if collapsed else "▼")
+        
+    def set_active_count(self, count: int):
+        self._active_count = count
+        self._update_title()
+        
+    def _update_title(self):
+        if self._active_count > 0:
+            self.title_label.setText(f"Transfers ({self._active_count} active)")
+        else:
+            self.title_label.setText("Transfers")
 
 
 class TransferQueueWidget(QWidget):
     """
-    Transfer queue widget for integration into main window.
+    Transfer queue widget for integration into main window as a bottom panel.
     
     This is a QWidget version of BackgroundThreadWindow that can be embedded
-    as a tab in the main application window instead of being a separate window.
+    as a collapsible panel in the main application window.
     
     Features:
+    - Collapsible header with active transfer count
+    - Collapsible console within the panel
     - Persistent transfer history (doesn't disappear on completion)
     - Scrollable list to view all transfers
     - Hostname indicator for each transfer
@@ -57,29 +139,39 @@ class TransferQueueWidget(QWidget):
         # Debounce timer for refresh - prevents excessive refreshing during bulk transfers
         self._refresh_debounce_timer = None
         
+        # Collapse state
+        self._panel_collapsed = False
+        self._console_collapsed = False
+        
         self.init_ui()
 
     def init_ui(self):
         """Initialize the UI layout"""
         # Main layout
         self.main_layout = QVBoxLayout()
-        self.main_layout.setSpacing(4)
-        self.main_layout.setContentsMargins(8, 8, 8, 8)
+        self.main_layout.setSpacing(0)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Header
-        header = QLabel("Transfers")
-        header.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {DARK_THEME['text_primary']};")
-        self.main_layout.addWidget(header)
+        # Collapsible header
+        self.header = TransferPanelHeader(self)
+        self.header.toggle_panel.connect(self.toggle_panel)
+        self.main_layout.addWidget(self.header)
+        
+        # Content widget (transfer list + controls + console)
+        self.content_widget = QWidget()
+        content_layout = QVBoxLayout()
+        content_layout.setSpacing(4)
+        content_layout.setContentsMargins(8, 8, 8, 8)
         
         # Transfer list widget (container for transfer items)
         self.transfer_list = QListWidget()
         self.transfer_list.setStyleSheet(LIST_WIDGET_STYLE_DARK)
         self.transfer_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.transfer_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.transfer_list.setMinimumHeight(150)
+        self.transfer_list.setMinimumHeight(100)
         
         # Set the list as the scroll area widget
-        self.main_layout.addWidget(self.transfer_list, stretch=1)
+        content_layout.addWidget(self.transfer_list, stretch=1)
 
         # Add control buttons and preferences
         self.control_layout = QHBoxLayout()
@@ -104,47 +196,86 @@ class TransferQueueWidget(QWidget):
         # Preferences checkboxes
         prefs = get_preferences()
         
-        self.clear_on_complete_checkbox = QCheckBox("Auto-clear completed")
-        self.clear_on_complete_checkbox.setToolTip("Automatically clear completed transfers when they finish")
+        self.clear_on_complete_checkbox = QCheckBox("Auto-clear")
+        self.clear_on_complete_checkbox.setToolTip("Automatically clear completed transfers")
         self.clear_on_complete_checkbox.setChecked(prefs.get_bool("clear_completed_on_complete", False))
         self.clear_on_complete_checkbox.stateChanged.connect(self._on_clear_on_complete_changed)
         
-        self.overwrite_checkbox = QCheckBox("Overwrite files")
-        self.overwrite_checkbox.setToolTip("Overwrite existing files during transfer without prompting")
+        self.overwrite_checkbox = QCheckBox("Overwrite")
+        self.overwrite_checkbox.setToolTip("Overwrite existing files without prompting")
         self.overwrite_checkbox.setChecked(prefs.get_bool("overwrite_on_transfer", False))
         self.overwrite_checkbox.stateChanged.connect(self._on_overwrite_changed)
         
-        self.focus_transfers_checkbox = QCheckBox("Focus Transfers tab")
-        self.focus_transfers_checkbox.setToolTip("Automatically switch to Transfers tab when transfers start")
-        self.focus_transfers_checkbox.setChecked(prefs.get_bool("focus_transfers_on_start", True))
-        self.focus_transfers_checkbox.stateChanged.connect(self._on_focus_transfers_changed)
+        # Console toggle button
+        self.console_toggle = QPushButton("▼ Console")
+        self.console_toggle.setCheckable(True)
+        self.console_toggle.setChecked(False)
+        self.console_toggle.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 2px 8px;
+                color: #aaaaaa;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                border-color: #777777;
+                color: #ffffff;
+            }
+            QPushButton:checked {
+                border-color: #5555ff;
+                color: #5555ff;
+            }
+        """)
+        self.console_toggle.clicked.connect(self.toggle_console)
         
         self.control_layout.addWidget(self.pause_button)
         self.control_layout.addWidget(self.stop_button)
         self.control_layout.addWidget(self.clear_on_complete_checkbox)
         self.control_layout.addWidget(self.overwrite_checkbox)
-        self.control_layout.addWidget(self.focus_transfers_checkbox)
         self.control_layout.addStretch(1)
+        self.control_layout.addWidget(self.console_toggle)
         self.control_layout.addWidget(self.clear_button)
         
-        self.main_layout.addLayout(self.control_layout)
+        content_layout.addLayout(self.control_layout)
 
-        # Add text console with dynamic width based on window size
+        # Console (collapsible)
+        self.console_widget = QWidget()
+        console_layout = QVBoxLayout()
+        console_layout.setContentsMargins(0, 0, 0, 0)
+        console_layout.setSpacing(0)
+        
         self.text_console = QTextEdit()
         self.text_console.setReadOnly(True)
         self.text_console.setMaximumHeight(80)
         self.text_console.setStyleSheet(TEXT_EDIT_STYLE_DARK)
-        self.main_layout.addWidget(self.text_console)
-        
-        # Ensure console width is reasonable but not constraining
         self.text_console.setMinimumWidth(300)
-        self.text_console.setSizePolicy(
-            QSizePolicy.Policy.Expanding, 
-            QSizePolicy.Policy.Fixed
-        )
+        self.text_console.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        
+        console_layout.addWidget(self.text_console)
+        self.console_widget.setLayout(console_layout)
+        
+        # Set initial console visibility based on preferences
+        console_collapsed = prefs.get_bool("transfer_console_collapsed", False)
+        self._console_collapsed = console_collapsed
+        self.console_widget.setVisible(not console_collapsed)
+        self.console_toggle.setChecked(not console_collapsed)
+        self.console_toggle.setText("▼ Console" if not console_collapsed else "▶ Console")
+        
+        content_layout.addWidget(self.console_widget)
+        
+        self.content_widget.setLayout(content_layout)
+        self.main_layout.addWidget(self.content_widget)
 
         # Set the main layout
         self.setLayout(self.main_layout)
+        
+        # Set initial panel collapse state from preferences
+        panel_collapsed = prefs.get_bool("transfer_panel_collapsed", False)
+        self._panel_collapsed = panel_collapsed
+        self.content_widget.setVisible(not panel_collapsed)
+        self.header.set_collapsed(panel_collapsed)
 
         # Initialize thread pool
         self.thread_pool = QThreadPool.globalInstance()
@@ -155,6 +286,51 @@ class TransferQueueWidget(QWidget):
 
         # Setup timers
         self._setup_timers()
+        
+    def toggle_panel(self):
+        """Toggle the entire panel visibility (collapse/expand)"""
+        self._panel_collapsed = not self._panel_collapsed
+        self.content_widget.setVisible(not self._panel_collapsed)
+        self.header.set_collapsed(self._panel_collapsed)
+        
+        # Save preference
+        prefs = get_preferences()
+        prefs.set_bool("transfer_panel_collapsed", self._panel_collapsed)
+        
+    def toggle_console(self):
+        """Toggle the console visibility within the panel"""
+        self._console_collapsed = not self._console_collapsed
+        self.console_widget.setVisible(not self._console_collapsed)
+        
+        if self._console_collapsed:
+            self.console_toggle.setText("▶ Console")
+        else:
+            self.console_toggle.setText("▼ Console")
+            self.console_toggle.setChecked(True)
+        
+        # Save preference
+        prefs = get_preferences()
+        prefs.set_bool("transfer_console_collapsed", self._console_collapsed)
+        
+    def is_collapsed(self):
+        """Return whether the panel is collapsed"""
+        return self._panel_collapsed
+        
+    def set_collapsed(self, collapsed: bool):
+        """Set the panel collapse state"""
+        if self._panel_collapsed != collapsed:
+            self._panel_collapsed = collapsed
+            self.content_widget.setVisible(not collapsed)
+            self.header.set_collapsed(collapsed)
+        
+    def set_panel_height(self, height: int):
+        """Set the panel height (used by splitter)"""
+        # This is handled by the splitter in the parent widget
+        pass
+        
+    def update_active_count(self, count: int):
+        """Update the active transfer count in the header"""
+        self.header.set_active_count(count)
 
     def _on_clear_on_complete_changed(self, state):
         """Handle clear on complete checkbox change"""
@@ -165,11 +341,6 @@ class TransferQueueWidget(QWidget):
         """Handle overwrite checkbox change"""
         prefs = get_preferences()
         prefs.set_bool("overwrite_on_transfer", bool(state))
-
-    def _on_focus_transfers_changed(self, state):
-        """Handle focus transfers checkbox change"""
-        prefs = get_preferences()
-        prefs.set_bool("focus_transfers_on_start", bool(state))
 
     def _setup_timers(self):
         """Setup timers for queue processing"""
@@ -231,9 +402,9 @@ class TransferQueueWidget(QWidget):
             try:
                 # Use Qt QueuedConnection to ensure refresh happens on main thread
                 QTimer.singleShot(0, lambda o=observee: self._do_refresh(o))
-            except (AttributeError, RuntimeError) as e:
-                ic("Error queuing observer refresh", observee, e)
-    
+            except (AttributeError, RuntimeError):
+                pass
+
     def _do_refresh(self, observee):
         """Actually perform the refresh - called on main thread"""
         try:
@@ -253,10 +424,9 @@ class TransferQueueWidget(QWidget):
                 observee.table.repaint()
                 
         except AttributeError as ae:
-            ic("Observee", observee, "does not implement 'get_files' method.", ae)
+            pass
         except (AttributeError, RuntimeError) as e:
-            ic("An error occurred while notifying observee", observee, e)
-
+            pass
     def update_overall_progress(self):
         """Update the overall progress - no longer displayed in compact UI"""
         pass
@@ -270,7 +440,6 @@ class TransferQueueWidget(QWidget):
             with QMutexLocker(self._transfer_lock):
                 actual_active = len([t for t in self.transfers if t.active])
                 if self.active_transfers != actual_active:
-                    ic(f"Fixing active_transfers: {self.active_transfers} -> {actual_active}")
                     self.active_transfers = actual_active
             
             # Check if we've reached max transfers
@@ -278,35 +447,24 @@ class TransferQueueWidget(QWidget):
             max_concurrent = prefs.get("max_concurrent_transfers", 8)
             with QMutexLocker(self._active_transfers_lock):
                 if self.active_transfers >= max_concurrent:
-                    # Log every 50 ticks (5 seconds) to avoid spam
-                    if self._timer_tick_count % 50 == 0:
-                        ic(f"Max transfers reached: {self.active_transfers}/{max_concurrent}")
                     return
             
             # Check if queue has items
             queue_size = sftp_queue.qsize()
             if queue_size == 0:
                 return
-            
-            ic(f"Queue has {queue_size} items, active_transfers={self.active_transfers}")
-
             # Get job from queue with timeout (thread-safe, avoids race condition)
             try:
                 job = sftp_queue.get_nowait()
             except Exception as e:
-                ic(f"Queue get error: {e}")
                 return  # Queue is empty or error
             
             if not job:
-                ic("Got null job from queue")
                 return
             
             # Debug: log job details
-            ic(f"TransferQueueWidget: Processing job {job.job_id}, command={job.command}")
-                
             # Validate job
             if not hasattr(job, "job_id"):
-                ic("Job missing 'job_id' attribute:", job)
                 self.text_console.append(f"Invalid job structure: {job}")
                 return
 
@@ -336,7 +494,6 @@ class TransferQueueWidget(QWidget):
             )
 
         except (OSError, IOError, RuntimeError) as e:
-            ic(e)
             self.text_console.append(f"Error starting transfer: {e}")
 
     def start_transfer(self, transfer_id, job_source, job_destination, 
@@ -602,19 +759,15 @@ class TransferQueueWidget(QWidget):
 
     def _release_transfer(self, transfer_id):
         """Release transfer resources"""
-        ic(f"_release_transfer called for {transfer_id}")
         try:
             with QMutexLocker(self._transfer_lock):
                 if transfer_id in self._released_transfers:
-                    ic(f"_release_transfer: {transfer_id} already released")
                     return
                 self._released_transfers.add(transfer_id)
 
             with QMutexLocker(self._active_transfers_lock):
                 old_count = self.active_transfers
                 self.active_transfers = max(self.active_transfers - 1, 0)
-                ic(f"_release_transfer: active_transfers {old_count} -> {self.active_transfers}")
-
             self.remove_queue_item(transfer_id)
             self.update_overall_progress()
             
@@ -623,14 +776,12 @@ class TransferQueueWidget(QWidget):
 
     def transfer_finished(self, transfer_id):
         """Handle transfer completion"""
-        ic(f"transfer_finished called for {transfer_id}")
         try:
             if not transfer_id:
                 return
                 
             transfer = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
             if not transfer:
-                ic(f"transfer_finished: transfer {transfer_id} not found")
                 return
 
             transfer.active = False
@@ -690,6 +841,37 @@ class TransferQueueWidget(QWidget):
             except (OSError, IOError, RuntimeError):
                 pass
 
+            # Log to transfer history
+            try:
+                if hasattr(transfer.download_worker, 'command') and \
+                   transfer.download_worker.command in ["upload", "download", "resume"]:
+                    worker = transfer.download_worker
+                    direction = 'upload' if worker.command == 'upload' else 'download'
+                    if worker.command == 'resume':
+                        direction = 'download' if worker.is_source_remote else 'upload'
+                    
+                    status = 'success'
+                    error_msg = None
+                    if is_cancelled:
+                        status = 'failed'
+                        error_msg = 'Cancelled by user'
+                    elif is_error:
+                        status = 'failed'
+                        error_msg = 'Transfer error'
+                    
+                    log_transfer(
+                        source_path=getattr(worker, 'job_source', ''),
+                        destination_path=getattr(worker, 'job_destination', ''),
+                        direction=direction,
+                        hostname=getattr(worker, 'hostname', None),
+                        username=getattr(worker, 'username', None),
+                        file_size=getattr(worker, 'file_size', None),
+                        status=status,
+                        error_message=error_msg
+                    )
+            except Exception:
+                pass  # Don't fail transfer if logging fails
+
             # Release resources but DON'T cleanup - keep visible
             self._release_transfer(transfer_id)
             
@@ -740,6 +922,25 @@ class TransferQueueWidget(QWidget):
             
             if hasattr(self, 'text_console'):
                 self.text_console.append(f"ERROR Transfer {transfer_id}: {message}")
+            
+            # Log to transfer history
+            try:
+                if hasattr(transfer, 'download_worker') and transfer.download_worker:
+                    worker = transfer.download_worker
+                    direction = 'upload' if getattr(worker, 'command', '') == 'upload' else 'download'
+                    
+                    log_transfer(
+                        source_path=getattr(worker, 'job_source', ''),
+                        destination_path=getattr(worker, 'job_destination', ''),
+                        direction=direction,
+                        hostname=getattr(worker, 'hostname', None),
+                        username=getattr(worker, 'username', None),
+                        file_size=getattr(worker, 'file_size', None),
+                        status='failed',
+                        error_message=str(message)[:500] if message else 'Unknown error'
+                    )
+            except Exception:
+                pass  # Don't fail if logging fails
             
             # Notify observers to refresh browsers (local file may have been created before error)
             try:
@@ -956,8 +1157,7 @@ class TransferQueueWidget(QWidget):
                 self.cleanup_transfer(transfer.transfer_id)
             self.transfer_list.clear()
         except (OSError, IOError, RuntimeError) as e:
-            ic(f"Error clearing all transfers: {e}")
-
+            pass
     def cleanup(self):
         """Cleanup resources when widget is destroyed"""
         try:
@@ -997,8 +1197,16 @@ class TransferQueueWidget(QWidget):
                         src = getattr(job, 'source_path', '') or ''
                         dst = getattr(job, 'destination_path', '') or ''
                         if not src or not dst:
-                            ic(f"Skipping queued job with empty path: src={src!r}, dst={dst!r}")
                             continue
+                        # Encrypt password for secure storage
+                        password = getattr(job, 'password', '') or ''
+                        if password and cipher_suite:
+                            try:
+                                encrypted_password = cipher_suite.encrypt(password.encode()).decode()
+                            except Exception:
+                                encrypted_password = ''
+                        else:
+                            encrypted_password = ''
                         pending_jobs.append({
                             'source_path': src,
                             'is_source_remote': getattr(job, 'is_source_remote', False),
@@ -1006,7 +1214,7 @@ class TransferQueueWidget(QWidget):
                             'is_destination_remote': getattr(job, 'is_destination_remote', False),
                             'hostname': getattr(job, 'hostname', ''),
                             'username': getattr(job, 'username', ''),
-                            'password': getattr(job, 'password', ''),
+                            'password': encrypted_password,
                             'port': getattr(job, 'port', 22),
                             'command': getattr(job, 'command', 'download'),
                             'job_id': getattr(job, 'job_id'),
@@ -1027,6 +1235,15 @@ class TransferQueueWidget(QWidget):
                             # Skip transfers with empty paths
                             if not src or not dst:
                                 continue
+                            # Encrypt password for secure storage
+                            password = getattr(worker, 'password', '') or ''
+                            if password and cipher_suite:
+                                try:
+                                    encrypted_password = cipher_suite.encrypt(password.encode()).decode()
+                                except Exception:
+                                    encrypted_password = ''
+                            else:
+                                encrypted_password = ''
                             pending_jobs.append({
                                 'source_path': src,
                                 'is_source_remote': getattr(worker, 'is_source_remote', False),
@@ -1034,7 +1251,7 @@ class TransferQueueWidget(QWidget):
                                 'is_destination_remote': getattr(worker, 'is_destination_remote', False),
                                 'hostname': getattr(worker, 'hostname', ''),
                                 'username': getattr(worker, 'username', ''),
-                                'password': getattr(worker, 'password', ''),
+                                'password': encrypted_password,
                                 'port': getattr(worker, 'port', 22),
                                 'command': getattr(worker, 'command', 'download'),
                                 'job_id': transfer.transfer_id,
@@ -1043,14 +1260,18 @@ class TransferQueueWidget(QWidget):
                             })
             
             if pending_jobs:
-                old_umask = os.umask(0o077)
-                try:
+                create_secure_directory(os.path.dirname(QUEUE_FILE_PATH))
+                if is_windows():
                     with open(QUEUE_FILE_PATH, 'w') as f:
                         json.dump(pending_jobs, f, indent=2)
-                    os.chmod(QUEUE_FILE_PATH, stat.S_IRUSR | stat.S_IWUSR)
-                    ic(f"Saved {len(pending_jobs)} pending transfers to {QUEUE_FILE_PATH}")
-                finally:
-                    os.umask(old_umask)
+                else:
+                    old_umask = os.umask(0o077)
+                    try:
+                        with open(QUEUE_FILE_PATH, 'w') as f:
+                            json.dump(pending_jobs, f, indent=2)
+                        secure_file_permissions(QUEUE_FILE_PATH)
+                    finally:
+                        os.umask(old_umask)
             else:
                 if os.path.exists(QUEUE_FILE_PATH):
                     try:
@@ -1059,8 +1280,7 @@ class TransferQueueWidget(QWidget):
                         pass
             
         except (OSError, IOError, json.JSONEncodeError) as e:
-            ic(f"Error saving pending transfers: {e}")
-    
+            pass
     def load_pending_transfers(self):
         """Load pending transfers from disk and restore them to the queue"""
         try:
@@ -1080,8 +1300,18 @@ class TransferQueueWidget(QWidget):
                     dst = job_data.get('destination_path', '')
                     # Skip jobs with empty paths
                     if not src or not dst:
-                        ic(f"Skipping job with empty path: src={src!r}, dst={dst!r}")
                         continue
+                    
+                    # Decrypt password from secure storage
+                    encrypted_password = job_data.get('password', '')
+                    if encrypted_password and cipher_suite:
+                        try:
+                            password = cipher_suite.decrypt(encrypted_password.encode()).decode()
+                        except Exception:
+                            logger.warning("Failed to decrypt saved password")
+                            password = ''
+                    else:
+                        password = ''
                     
                     job = SFTPJob(
                         source_path=src,
@@ -1090,7 +1320,7 @@ class TransferQueueWidget(QWidget):
                         is_destination_remote=job_data.get('is_destination_remote', False),
                         hostname=job_data.get('hostname', ''),
                         username=job_data.get('username', ''),
-                        password=job_data.get('password', ''),
+                        password=password,
                         port=job_data.get('port', 22),
                         command=job_data.get('command', 'download'),
                         job_id=job_data.get('job_id'),
@@ -1101,7 +1331,6 @@ class TransferQueueWidget(QWidget):
                     restored_count += 1
                     
                 except (KeyError, TypeError) as e:
-                    ic(f"Error restoring job: {e}")
                     continue
             
             try:
@@ -1111,10 +1340,7 @@ class TransferQueueWidget(QWidget):
             
             if restored_count > 0:
                 self.text_console.append(f"Restored {restored_count} pending transfer(s) from previous session")
-                ic(f"Restored {restored_count} pending transfers")
-            
             return restored_count
             
         except (OSError, IOError, json.JSONDecodeError) as e:
-            ic(f"Error loading pending transfers: {e}")
             return 0

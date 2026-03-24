@@ -5,12 +5,11 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QSize, QThreadPool
 from PyQt6.QtGui import QPixmap
 from sftp_qt_compat import Qt
-from icecream import ic
 import os
 import tempfile
 import atexit
-import stat
 from sftp_transfer_handler import FilePreviewWorker
+from sftp_platform import secure_file_permissions, is_windows
 
 _temp_files_registry = []
 _registry_lock = None
@@ -274,7 +273,7 @@ class FilePreviewWidget(QWidget):
                 
                 self.text_preview.setPlainText(content)
             except Exception as e:
-                ic(f"Preview read error: {e}")
+                pass
                 self.text_preview.setPlainText(f"Error reading file:\n{str(e)}")
         
         def on_error(original_path, error_msg):
@@ -283,7 +282,7 @@ class FilePreviewWidget(QWidget):
         try:
             fd, temp_path = tempfile.mkstemp(suffix='.txt', prefix='.sftp_preview_')
             os.close(fd)
-            os.chmod(temp_path, stat.S_IRUSR | stat.S_IWUSR)
+            secure_file_permissions(temp_path)
             _register_temp_file(temp_path)
             
             worker = FilePreviewWorker(session_id, file_path, temp_path, is_remote=True)
@@ -292,7 +291,7 @@ class FilePreviewWidget(QWidget):
             QThreadPool.globalInstance().start(worker)
             
         except Exception as e:
-            ic(f"Preview setup error: {e}")
+            pass
             self.text_preview.setPlainText(f"Error setting up preview:\n{str(e)}")
 
     def _preview_image(self, file_path, session_id=None):
@@ -332,7 +331,7 @@ class FilePreviewWidget(QWidget):
                 self.content_area.setWidget(self.image_label)
                 
             except Exception as e:
-                ic(f"Image preview error: {e}")
+                pass
                 self.text_preview.setPlainText(f"Error loading image:\n{str(e)}")
                 self.text_preview.setVisible(True)
                 self.image_label.setVisible(False)
@@ -347,7 +346,7 @@ class FilePreviewWidget(QWidget):
         try:
             fd, temp_path = tempfile.mkstemp(suffix=os.path.splitext(file_path)[1], prefix='.sftp_preview_')
             os.close(fd)
-            os.chmod(temp_path, stat.S_IRUSR | stat.S_IWUSR)
+            secure_file_permissions(temp_path)
             _register_temp_file(temp_path)
             
             worker = FilePreviewWorker(session_id, file_path, temp_path, is_remote=True)
@@ -356,7 +355,7 @@ class FilePreviewWidget(QWidget):
             QThreadPool.globalInstance().start(worker)
             
         except Exception as e:
-            ic(f"Image preview setup error: {e}")
+            pass
             self.text_preview.setPlainText(f"Error setting up preview:\n{str(e)}")
             self.text_preview.setPlainText(f"Error previewing image:\n{str(e)}")
             self.text_preview.setVisible(True)

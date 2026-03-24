@@ -5,7 +5,6 @@ High-level convenience functions for SFTP operations.
 Provides a simple API that can replace add_sftp_job calls.
 """
 from typing import Optional, List, Any
-from icecream import ic
 
 from sftp_session import (
     SessionManager, SFTPSession, SFTPCredentials, 

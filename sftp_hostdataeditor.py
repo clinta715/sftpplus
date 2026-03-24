@@ -8,10 +8,14 @@ import os
 import stat
 import json
 from cryptography.fernet import Fernet
-from icecream import ic
 
-KEY_FILE_PATH = os.path.join(os.path.expanduser('~'), '.sftp_client_key')
-DATA_FILE_PATH = os.path.join(os.path.expanduser('~'), '.sftp_client_connection_data.json')
+from sftp_platform import (
+    get_key_file_path, get_connection_data_path,
+    secure_file_permissions, create_secure_directory, is_windows
+)
+
+KEY_FILE_PATH = get_key_file_path()
+DATA_FILE_PATH = get_connection_data_path()
 
 encryption_key = None
 cipher_suite = None
@@ -21,6 +25,8 @@ def _load_encryption_key():
     """Load encryption key from separate file, or generate new one."""
     global encryption_key, cipher_suite
     
+    create_secure_directory(os.path.dirname(KEY_FILE_PATH))
+    
     key_loaded = False
     try:
         if os.path.exists(KEY_FILE_PATH):
@@ -29,8 +35,8 @@ def _load_encryption_key():
             if len(key_data) == 44:
                 encryption_key = key_data
                 key_loaded = True
-    except (OSError, IOError, ValueError) as e:
-        ic(f"Error loading encryption key: {e}")
+    except (OSError, IOError, ValueError):
+        pass
     
     if not key_loaded:
         encryption_key = Fernet.generate_key()
@@ -44,15 +50,13 @@ def _save_encryption_key(key):
     """Save encryption key to separate file with restricted permissions."""
     global encryption_key
     try:
-        old_umask = os.umask(0o077)
+        create_secure_directory(os.path.dirname(KEY_FILE_PATH))
         with open(KEY_FILE_PATH, 'wb') as f:
             f.write(key)
-        os.chmod(KEY_FILE_PATH, stat.S_IRUSR | stat.S_IWUSR)
-    except (OSError, IOError) as e:
-        ic(f"Error saving encryption key: {e}")
+        secure_file_permissions(KEY_FILE_PATH)
+    except (OSError, IOError):
+        pass
         raise
-    finally:
-        os.umask(old_umask)
     encryption_key = key
 
 
@@ -69,7 +73,6 @@ def _migrate_old_key_format(data):
     return False
 
 
-# Initialize on module load
 _load_encryption_key()
 
 
@@ -104,22 +107,25 @@ def save_connection_data(host_data):
             "bookmarks": host_data.get("bookmarks", {})
         }
 
-        old_umask = os.umask(0o077)
-        try:
+        create_secure_directory(os.path.dirname(DATA_FILE_PATH))
+        
+        if is_windows():
             with open(DATA_FILE_PATH, 'w') as f:
                 json.dump(data, f, indent=4)
-            os.chmod(DATA_FILE_PATH, stat.S_IRUSR | stat.S_IWUSR)
-        finally:
-            os.umask(old_umask)
+        else:
+            old_umask = os.umask(0o077)
+            try:
+                with open(DATA_FILE_PATH, 'w') as f:
+                    json.dump(data, f, indent=4)
+                secure_file_permissions(DATA_FILE_PATH)
+            finally:
+                os.umask(old_umask)
         return True
-    except PermissionError as e:
-        ic(f"Permission denied saving connection data: {e}")
+    except PermissionError:
         return False
-    except OSError as e:
-        ic(f"OS error saving connection data: {e}")
+    except OSError:
         return False
-    except (OSError, IOError, RuntimeError) as e:
-        ic(f"Error saving connection data: {e}")
+    except (OSError, IOError, RuntimeError):
         return False
 
 
@@ -163,8 +169,7 @@ def load_connection_data():
         for k, v in encrypted_passwords.items():
             try:
                 host_data["passwords"][k] = cipher_suite.decrypt(v.encode()).decode()
-            except (OSError, IOError, RuntimeError) as e:
-                ic(f"Error decrypting password for {k}: {e}")
+            except (OSError, IOError, RuntimeError):
                 host_data["passwords"][k] = ""
                 
         host_data["ports"] = data.get("ports", {})
@@ -183,13 +188,11 @@ def load_connection_data():
         return host_data
         
     except json.JSONDecodeError:
-        ic("Error: Invalid JSON format in connection data file")
         encryption_key = Fernet.generate_key()
         cipher_suite = Fernet(encryption_key)
         return host_data
         
-    except (OSError, IOError, RuntimeError) as e:
-        ic(f"Error loading connection data: {e}")
+    except (OSError, IOError, RuntimeError):
         encryption_key = Fernet.generate_key()
         cipher_suite = Fernet(encryption_key)
         return host_data

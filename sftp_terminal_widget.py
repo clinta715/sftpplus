@@ -12,7 +12,6 @@ from sftp_qt_compat import Qt
 from PyQt6.QtCore import pyqtSignal, QObject, QEvent
 from PyQt6.QtGui import QTextCursor
 import paramiko
-from icecream import ic
 
 from sftp_creds import sanitize_error_message
 
@@ -127,7 +126,7 @@ class SSHTerminalWidget(QWidget):
             try:
                 event.callback()
             except (RuntimeError, AttributeError) as e:
-                ic(f"Error executing terminal output callback: {sanitize_error_message(str(e))}")
+                pass
 
     def _setup_host_key_policy(self, ssh):
         """
@@ -193,7 +192,7 @@ class SSHTerminalWidget(QWidget):
                 try:
                     connect_kwargs['key_filename'] = key
                 except (OSError, IOError) as e:
-                    ic(f"Error loading key: {sanitize_error_message(str(e))}")
+                    pass
             
             if password:
                 connect_kwargs['password'] = password
@@ -213,7 +212,6 @@ class SSHTerminalWidget(QWidget):
             self.terminal.setPlaceholderText(f"Connected to {username}@{hostname}")
             self.terminal.appendPlainText(f"Connected to {username}@{hostname}\n")
             
-            ic(f"SSH connected to {hostname}")
             
             if ssh_commands:
                 import time
@@ -227,7 +225,6 @@ class SSHTerminalWidget(QWidget):
             
         except (paramiko.SSHException, OSError, IOError) as e:
             error_msg = f"Connection failed: {sanitize_error_message(str(e))}"
-            ic(error_msg)
             self.terminal.setPlaceholderText(error_msg)
             self.signals.error.emit(error_msg)
     
@@ -251,7 +248,7 @@ class SSHTerminalWidget(QWidget):
                     time.sleep(0.05)
             except (paramiko.SSHException, OSError, IOError) as e:
                 if self._running:
-                    ic(f"Error reading from shell: {sanitize_error_message(str(e))}")
+                    pass
                 break
         
         if self._running:
@@ -273,13 +270,13 @@ class SSHTerminalWidget(QWidget):
                 self.terminal.setTextCursor(cursor)
                 self.terminal.ensureCursorVisible()
             except (RuntimeError, AttributeError) as e:
-                ic(f"Error in append_text: {sanitize_error_message(str(e))}")
+                pass
         
         try:
             from PyQt6.QtWidgets import QApplication
             QApplication.instance().postEvent(self, _TerminalOutputEvent(append_text))
         except (RuntimeError, AttributeError) as e:
-            ic(f"Error posting terminal output event: {sanitize_error_message(str(e))}")
+            pass
     
     def _send_input(self, text):
         """Send keyboard input to SSH channel"""
@@ -287,7 +284,7 @@ class SSHTerminalWidget(QWidget):
             try:
                 self.channel.send(text)
             except (paramiko.SSHException, OSError, IOError) as e:
-                ic(f"Error sending input: {sanitize_error_message(str(e))}")
+                pass
     
     def send_command(self, command):
         """Send a command string to the shell"""
@@ -295,7 +292,7 @@ class SSHTerminalWidget(QWidget):
             try:
                 self.channel.send(command + '\n')
             except (paramiko.SSHException, OSError, IOError) as e:
-                ic(f"Error sending command: {sanitize_error_message(str(e))}")
+                pass
     
     def disconnect_ssh(self):
         """Disconnect from SSH"""
@@ -320,7 +317,6 @@ class SSHTerminalWidget(QWidget):
             self.signals.disconnected.emit()
         except RuntimeError:
             pass
-        ic("SSH disconnected")
     
     def close(self):
         """Clean up resources"""

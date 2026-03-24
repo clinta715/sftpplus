@@ -7,8 +7,8 @@ import sys
 import tempfile
 import subprocess
 import time
-from icecream import ic
 from pathlib import Path
+import logging
 
 import paramiko
 import threading
@@ -20,6 +20,9 @@ from sftp_downloadworkerclass import (create_response_queue, delete_response_que
 from sftp_session_executor import SFTPSessionAPI, create_session_api
 from sftp_session import SFTPCredentials, get_session_manager
 from sftp_browser_mixins import TreeViewMixin, BookmarkMixin, FileOpsMixin
+from sftp_drag_drop import start_drag, can_accept_drop, DragDropInfo
+
+logger = logging.getLogger('sftp.browser')
 
 
 class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
@@ -64,7 +67,6 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                 return
 
             if not all([self.init_hostname, self.init_username]):
-                ic("Browser: Missing credentials, session API not initialized")
                 return
 
             try:
@@ -79,9 +81,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                 session_manager = get_session_manager()
                 session = session_manager.create_session(credentials)
                 self._session_api = SFTPSessionAPI(session)
-                ic(f"Browser: Session API initialized for {self.init_hostname}")
             except (paramiko.SSHException, OSError, ValueError) as e:
-                ic(f"Browser: Failed to initialize session API: {e}")
                 self._session_api = None
 
     @property
@@ -409,7 +409,6 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
     
     def toggle_tree_view(self):
         show_tree = self.tree_toggle_btn.isChecked()
-        ic(f"Tree toggle: show_tree={show_tree}")
         self.tree_container.setVisible(show_tree)
         self.tree_position_btn.setVisible(show_tree)
         
@@ -553,8 +552,6 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         with self._observers_lock:
             if observer not in self._observers:
                 self._observers.append(observer)
-            else:
-                ic("Observer already exists:", observer)
 
     def remove_observer(self, observer):
         """Remove an observer with thread-safe lock protection."""
@@ -570,12 +567,9 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         
         for observer in observers_copy:
             try:
-                # Use Qt QueuedConnection to ensure refresh happens on main thread
                 QTimer.singleShot(0, observer.get_files)
-            except AttributeError as ae:
-                ic("Observer", observer, "does not implement 'get_files' method.", ae)
             except (AttributeError, RuntimeError) as e:
-                ic("An error occurred while notifying observer", observer, e)
+                pass
 
     def get_normalized_remote_path(self, current_remote_directory, partial_remote_path=None):
         """
@@ -725,25 +719,24 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         return result
 
     def sftp_rmdir(self, remote_path):
-        ic(f"sftp_rmdir: Starting for {remote_path}")
         if self.session_api is None:
-            ic("sftp_rmdir: Session API is None!")
+            logger.warning("sftp_rmdir: Session API not initialized")
             self.message_signal.emit("sftp_rmdir() - Session API not initialized")
             return False
 
         job_id = create_random_integer()
+        logger.debug(f"Removing directory: {remote_path}")
 
         try:
-            ic(f"sftp_rmdir: Calling session_api.rmdir({remote_path}, job_id={job_id})")
             self.session_api.rmdir(remote_path, job_id=str(job_id))
-            ic(f"sftp_rmdir: session_api.rmdir returned successfully")
+            logger.info(f"Removed directory: {remote_path}")
             result = True
         except PermissionError as e:
-            ic(f"sftp_rmdir: Permission denied: {e}")
+            logger.error(f"Permission denied removing directory {remote_path}: {e}")
             self.message_signal.emit(f"Permission denied: cannot remove '{os.path.basename(remote_path)}'")
             result = False
         except (OSError, IOError, paramiko.SSHException) as e:
-            ic(f"sftp_rmdir: Exception: {e}")
+            logger.error(f"Error removing directory {remote_path}: {e}")
             self.message_signal.emit(f"Error removing '{os.path.basename(remote_path)}': {e}")
             result = False
 
@@ -752,25 +745,24 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         return result
 
     def sftp_remove(self, remote_path):
-        ic(f"sftp_remove: Starting for {remote_path}")
         if self.session_api is None:
-            ic("sftp_remove: Session API is None!")
+            logger.warning("sftp_remove: Session API not initialized")
             self.message_signal.emit("sftp_remove() - Session API not initialized")
             return False
 
         job_id = create_random_integer()
+        logger.debug(f"Removing file: {remote_path}")
 
         try:
-            ic(f"sftp_remove: Calling session_api.remove({remote_path}, job_id={job_id})")
             self.session_api.remove(remote_path, job_id=str(job_id))
-            ic(f"sftp_remove: session_api.remove returned successfully")
+            logger.info(f"Removed file: {remote_path}")
             result = True
         except PermissionError as e:
-            ic(f"sftp_remove: Permission denied: {e}")
+            logger.error(f"Permission denied removing file {remote_path}: {e}")
             self.message_signal.emit(f"Permission denied: cannot delete '{os.path.basename(remote_path)}'")
             result = False
         except (OSError, IOError, paramiko.SSHException) as e:
-            ic(f"sftp_remove: Exception: {e}")
+            logger.error(f"Error deleting file {remote_path}: {e}")
             self.message_signal.emit(f"Error deleting '{os.path.basename(remote_path)}': {e}")
             result = False
 
@@ -779,28 +771,22 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         return result
 
     def sftp_rename(self, remote_path, new_name):
-        ic(f"sftp_rename: Starting for {remote_path} to {new_name}")
         if self.session_api is None:
-            ic("sftp_rename: Session API is None!")
             self.message_signal.emit("sftp_rename() - Session API not initialized")
             return False
 
         job_id = create_random_integer()
 
         try:
-            ic(f"sftp_rename: Calling session_api.rename({remote_path}, {new_name}, job_id={job_id})")
             self.session_api.rename(remote_path, new_name, job_id=str(job_id))
-            ic(f"sftp_rename: session_api.rename returned successfully")
             self.message_signal.emit(f"Renamed '{os.path.basename(remote_path)}' to '{new_name}'")
             result = True
         except PermissionError as e:
-            ic(f"sftp_rename: Permission denied: {e}")
             error_msg = f"Permission denied: Cannot rename file. You may not have permission to modify this file."
             QMessageBox.warning(None, "Permission Denied", error_msg)
             self.message_signal.emit(f"Rename failed: {error_msg}")
             result = False
         except (OSError, IOError, paramiko.SSHException) as e:
-            ic(f"sftp_rename: Exception: {e}")
             error_msg = str(e)
             QMessageBox.critical(None, "Rename Error", f"Error renaming file: {error_msg}")
             self.message_signal.emit(f"Error renaming: {error_msg}")
@@ -868,38 +854,28 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         self.table.sortByColumn(logicalIndex, order)
 
     def is_remote_directory(self, partial_remote_path):
-        """Check if a path is a remote directory with comprehensive debugging"""
-        ic(f"is_remote_directory: START - partial_remote_path={partial_remote_path}, session_id={self.session_id}")
-
+        """Check if a path is a remote directory"""
         try:
             current_dir = get_credentials(self.session_id).get('current_remote_directory', '.')
-            ic(f"is_remote_directory: current_remote_directory={current_dir}")
 
             if not self.is_complete_path(partial_remote_path):
                 remote_path = self.get_normalized_remote_path(current_dir, partial_remote_path)
-                ic(f"is_remote_directory: incomplete path - joined {current_dir} + {partial_remote_path} = {remote_path}")
             else:
                 remote_path = partial_remote_path.replace("\\", "/")
                 if remote_path != '/':
                     remote_path = remote_path.rstrip('/')
-                ic(f"is_remote_directory: complete path - normalized to {remote_path}")
 
             if hasattr(self.model, 'attr_cache'):
                 cached_attr = self.model.attr_cache.get(remote_path)
                 if cached_attr and time.time() - self.model.attr_cache_time.get(remote_path, 0) < self.model.cache_duration:
                     is_dir = stat.S_ISDIR(cached_attr.st_mode)
-                    ic(f"is_remote_directory: CACHE HIT - {remote_path} is_dir={is_dir}")
                     return is_dir
 
-            # Use session_api property to ensure initialization
             if self.session_api is None:
-                ic("is_remote_directory: Session API not initialized")
                 return False
 
-            ic(f"is_remote_directory: submitting stat for {remote_path}")
             attr = self.session_api.stat(remote_path)
             is_dir = stat.S_ISDIR(attr.st_mode)
-            ic(f"is_remote_directory: SUCCESS - {remote_path} is_dir={is_dir}, st_mode={attr.st_mode}")
 
             if hasattr(self.model, 'attr_cache'):
                 self.model.attr_cache[remote_path] = attr
@@ -908,7 +884,6 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             return is_dir
 
         except (OSError, IOError, paramiko.SSHException) as e:
-            ic(f"is_remote_directory: EXCEPTION - {e} for {partial_remote_path}")
             return False
 
     def is_remote_file(self, partial_remote_path):
@@ -916,35 +891,28 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         try:
             creds = get_credentials(self.session_id)
             current_dir = creds.get('current_remote_directory', '.')
-            ic(f"is_remote_file: START - partial_remote_path={partial_remote_path}, current_dir={current_dir}")
 
             if not self.is_complete_path(partial_remote_path):
                 remote_path = self.get_normalized_remote_path(current_dir, partial_remote_path)
-                ic(f"is_remote_file: incomplete path - joined {current_dir} + {partial_remote_path} = {remote_path}")
             else:
                 remote_path = partial_remote_path.replace("\\", "/")
                 if remote_path != '/':
                     remote_path = remote_path.rstrip('/')
-                ic(f"is_remote_file: complete path - normalized to {remote_path}")
 
         except (KeyError, ValueError) as e:
             self.message_signal.emit(f"Error in getting credentials or forming remote path: {e}")
-            ic(e)
             return False
 
         try:
             if self.session_api is None:
-                ic("is_remote_file: Session API not initialized")
                 return False
 
             attr = self.session_api.stat(remote_path)
             is_directory = stat.S_ISDIR(attr.st_mode)
             is_file = not is_directory
-            ic(f"is_remote_file: {remote_path} is_file={is_file}")
             return is_file
 
         except (OSError, IOError, paramiko.SSHException) as e:
-            ic(f"is_remote_file: Exception - {e}")
             return False
 
     def waitjob(self, job_id, timeout=30):
@@ -1364,15 +1332,10 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                                     self.transfer_started.emit(str(job_id))
                                 except Exception as e:
                                     self.message_signal.emit(f"Upload failed: {e}")
-                                    ic(e)
                         has_valid_item = True
             
             except (OSError, IOError, RuntimeError) as e:
                 self.message_signal.emit(f"upload_download() error: {e}")
-                ic(e)
-                # Print the full traceback to help debug
-                import traceback
-                ic(traceback.format_exc())
             finally:
                 # Clean up any remaining job resources
                 if job_id is not None:
@@ -1583,12 +1546,10 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                         self.transfer_started.emit(str(job_id))
                     except Exception as e:
                         self.message_signal.emit(f"Transfer failed: {e}")
-                        ic(e)
         
         except (OSError, IOError, RuntimeError) as e:
             operation = "upload" if not is_source_remote else "download"
             self.message_signal.emit(f"traverse_and_transfer ({operation}) error: {e}")
-            ic(e)
         finally:
             self.notify_observers()
         
@@ -1639,11 +1600,8 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
 
     def _handle_worker_prompt(self, worker, path):
         """Handle overwrite prompt request from background worker on UI thread"""
-        ic(f"_handle_worker_prompt called for {path}")
         action = self.prompt_overwrite(path)
-        ic(f"prompt_overwrite returned: {action}")
         worker.set_prompt_result(action)
-        ic(f"set_prompt_result called with {action}")
 
     def cancel_current_transfer(self):
         """Cancel the current directory transfer"""
@@ -1755,11 +1713,9 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                         ops = self.get_sftp_operations()
                         ops.download(remote_path, temp_path, job_id=str(job_id))
                     except Exception as e:
-                        ic(f"view_edit_file: download failed: {e}")
                         self.message_signal.emit(f"File download failed: {e}")
                         return
                     
-                    ic(f"view_edit_file: download complete, checking text file: {temp_path}")
                     # Check if it's a text file
                     if not is_text_file(temp_path):
                         result = QMessageBox.question(
@@ -1772,7 +1728,6 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                             os.unlink(temp_path)
                             return
                     
-                    ic(f"view_edit_file: opening viewer for {temp_path}")
                     # Open viewer
                     self.viewer = TextViewerWindow(
                         file_path=temp_path,
@@ -1781,7 +1736,6 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                     )
                     self.viewer.setWindowTitle(f"View: {remote_path}")
                     self.viewer.show()
-                    ic(f"view_edit_file: viewer shown, visible={self.viewer.isVisible()}")
                     self.message_signal.emit(f"Opened: {selected_item_text}")
                     
                 else:

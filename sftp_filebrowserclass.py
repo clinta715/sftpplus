@@ -1,11 +1,10 @@
 from sftp_browserclass import Browser
 from sftp_filetablemodel import FileTableModel
 from sftp_sortfiltermodel import DirectoryFirstSortProxyModel
-from PyQt6.QtWidgets import QMessageBox, QHeaderView, QTableView, QApplication
+from PyQt6.QtWidgets import QMessageBox, QHeaderView, QTableView, QApplication, QProgressDialog
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 import os 
 import shutil
-from icecream import ic
 
 from sftp_creds import get_credentials, set_credentials
 
@@ -16,8 +15,7 @@ class FileBrowser(Browser):
         try:
             self.model = FileTableModel(session_id)
         except (OSError, IOError, RuntimeError) as e:
-            ic(e)
-
+            pass
         self.proxy_model = DirectoryFirstSortProxyModel()
         self.proxy_model.setSourceModel(self.model)
         self.table.setModel(self.proxy_model)
@@ -103,25 +101,75 @@ class FileBrowser(Browser):
             if response != Qt.MsgBtn_Yes:
                 return
         
+        # Track results for summary
+        success_count = 0
+        failure_count = 0
+        failures = []
+        
+        # Show progress dialog for multiple items
+        show_progress = len(selected_paths) > 1
+        progress = None
+        if show_progress:
+            progress = QProgressDialog("Deleting files...", "Cancel", 0, len(selected_paths), self)
+            progress.setWindowTitle("Delete Progress")
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+        
         # Remove each selected item
-        for path in selected_paths:
+        for i, path in enumerate(selected_paths):
+            if show_progress and progress:
+                progress.setValue(i)
+                progress.setLabelText(f"Deleting: {os.path.basename(path)}")
+                QApplication.processEvents()
+                if progress.wasCanceled():
+                    break
+            
             try:
                 # Check if path exists
                 if not os.path.exists(path):
-                    self.message_signal.emit(f"Path '{path}' not found locally.")
+                    failure_count += 1
+                    failures.append((path, "Not found"))
                     continue
                 
                 # Check if it's a file (not directory)
                 if os.path.isfile(path):
                     os.remove(path)
-                    self.message_signal.emit(f"File '{path}' removed successfully.")
+                    success_count += 1
                 else:
                     # It's a directory - recursively remove
                     shutil.rmtree(path)
-                    self.message_signal.emit(f"Directory '{path}' removed successfully.")
+                    success_count += 1
             except (OSError, IOError, RuntimeError) as e:
-                self.message_signal.emit(f"Error deleting '{path}': {e}")
-                ic(e)
+                failure_count += 1
+                failures.append((path, str(e)))
+        
+        if show_progress and progress:
+            progress.setValue(len(selected_paths))
+            progress.close()
+        
+        # Show summary dialog
+        if len(selected_paths) > 1:
+            summary_parts = []
+            if success_count > 0:
+                summary_parts.append(f"{success_count} deleted successfully")
+            if failure_count > 0:
+                summary_parts.append(f"{failure_count} failed")
+            summary_msg = ", ".join(summary_parts)
+            
+            if failure_count > 0 and len(failures) <= 3:
+                summary_msg += "\n\nFailed items:"
+                for path, error in failures[:3]:
+                    summary_msg += f"\n• {os.path.basename(path)}: {error}"
+                if len(failures) > 3:
+                    summary_msg += f"\n...and {len(failures) - 3} more"
+            
+            QMessageBox.information(self, "Delete Complete", summary_msg)
+        elif len(selected_paths) == 1:
+            if success_count > 0:
+                self.message_signal.emit(f"Deleted successfully.")
+            elif failure_count > 0:
+                self.message_signal.emit(f"Delete failed: {failures[0][1]}")
         
         # Refresh the browser
         self.model.get_files()
@@ -219,7 +267,6 @@ class FileBrowser(Browser):
                 self._expand_to_path(root_item, root_path, current_path)
             
         except (OSError, IOError, RuntimeError) as e:
-            ic(f"Error building tree: {e}")
             self.tree_status_label.setText(f"Error: {e}")
     
     def _populate_tree_children(self, parent_item, path):
@@ -323,8 +370,7 @@ class FileBrowser(Browser):
             self.tree_widget.scrollToItem(current_item)
             
         except (OSError, IOError, RuntimeError) as e:
-            ic(f"Error expanding to path: {e}")
-    
+            pass
     def _mark_current_item(self, item):
         """Mark an item as the current directory"""
         # Remove bold from all items
@@ -608,4 +654,4 @@ class FileBrowser(Browser):
         elif action == refresh_action:
             self.populate_tree_view()
         elif action == upload_action:
-            self.message_signal.emit(f"Upload directory: {path}")
+            self.tree_download_selected()

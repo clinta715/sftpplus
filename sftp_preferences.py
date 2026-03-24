@@ -7,7 +7,8 @@ import os
 import json
 from typing import Any, Optional
 from threading import Lock
-from icecream import ic
+
+from sftp_platform import get_preferences_path
 
 
 DEFAULT_PREFERENCES = {
@@ -51,7 +52,7 @@ class Preferences:
     
     def _get_filepath(self) -> str:
         """Get the preferences file path"""
-        return os.path.join(os.path.expanduser('~'), '.sftp_client_preferences.json')
+        return get_preferences_path()
     
     def _load(self):
         """Load preferences from disk"""
@@ -62,9 +63,8 @@ class Preferences:
                     data = json.load(f)
                 with self._preferences_lock:
                     self._preferences.update(data)
-                ic(f"Loaded preferences from {filepath}")
         except (json.JSONDecodeError, OSError, IOError) as e:
-            ic(f"Error loading preferences: {e}")
+            pass
     
     def _save(self):
         """Save preferences to disk"""
@@ -74,9 +74,8 @@ class Preferences:
                 data = self._preferences.copy()
             with open(filepath, 'w') as f:
                 json.dump(data, f, indent=4)
-            ic(f"Saved preferences to {filepath}")
         except (OSError, IOError) as e:
-            ic(f"Error saving preferences: {e}")
+            pass
     
     def get(self, key: str, default: Any = None) -> Any:
         """Get a preference value"""

@@ -10,7 +10,8 @@ import os
 import paramiko
 from typing import Optional, Tuple, Dict, List, Any
 from dataclasses import dataclass, field
-from icecream import ic
+
+from sftp_platform import get_known_hosts_path
 
 
 @dataclass
@@ -111,8 +112,8 @@ class ConnectionPool:
                             conn_info.last_used_at = time.time()
                             return conn_info.ssh, sftp
                         except Exception as e:
-                            ic(f"ConnectionPool: Failed to open new SFTP channel on existing SSH: {e}")
                             # Keep looking or create new SSH
+                            pass
                 else:
                     # Stale or dead connection
                     self._close_conn_info(conn_info)
@@ -121,7 +122,6 @@ class ConnectionPool:
             self._pool[conn_key] = valid_connections
             
             # 2. Create new SSH connection if none suitable found
-            ic(f"ConnectionPool: Creating new SSH connection for {hostname}:{port}")
             try:
                 ssh = self._create_ssh_connection(hostname, port, username, password, key)
                 sftp = ssh.open_sftp()
@@ -139,7 +139,6 @@ class ConnectionPool:
                 self._pool[conn_key].append(conn_info)
                 return ssh, sftp
             except Exception as e:
-                ic(f"ConnectionPool: Failed to create new SSH connection: {e}")
                 raise
     
     def _create_ssh_connection(self, hostname: str, port: int, username: str,
@@ -149,12 +148,12 @@ class ConnectionPool:
         ssh = paramiko.SSHClient()
         
         # Load known hosts
-        known_hosts_path = os.path.expanduser('~/.ssh/known_hosts')
+        known_hosts_path = get_known_hosts_path()
         if os.path.exists(known_hosts_path):
             try:
                 ssh.load_host_keys(known_hosts_path)
             except Exception as e:
-                ic(f"ConnectionPool: Warning: Could not load known_hosts: {e}")
+                pass
         
         # Use WarningPolicy to warn about unknown hosts but allow connection
         # This is appropriate for a file transfer client where user initiates connections

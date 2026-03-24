@@ -1,7 +1,6 @@
 from PyQt6.QtCore import QRunnable, QObject, pyqtSignal
 import enum
 import queue
-from icecream import ic
 import paramiko
 import base64
 import re
@@ -9,8 +8,12 @@ import os
 import time
 import threading
 import shlex
+import logging
 
 from sftp_connection_pool import ConnectionPool
+from sftp_hostdataeditor import cipher_suite
+
+logger = logging.getLogger('sftp.transfer')
 
 
 def strip_decorative_chars(filename):
@@ -22,7 +25,7 @@ def strip_decorative_chars(filename):
 
 
 class WorkerSignals(QObject):
-    progress = pyqtSignal(int, int, float, float)   # transfer_id, percent, speed_bytes_per_sec, eta_seconds
+    progress = pyqtSignal(int, int, float, float, int, int)   # transfer_id, percent, speed_bytes_per_sec, eta_seconds, bytes_done, bytes_total
     finished = pyqtSignal(int)
     message  = pyqtSignal(int, str)
 
@@ -55,6 +58,13 @@ class Transfer:
         self.hostname = hostname
         self.paused = False
         self.layout = None  # Initialize layout attribute
+        # Progress tracking
+        self.bytes_done = 0
+        self.bytes_total = 0
+        self.files_done = 0
+        self.files_total = 0
+        self.speed_bps = 0.0
+        self.eta_seconds = 0
 
 class transferSignals(QObject):
     showhide = pyqtSignal()
@@ -79,10 +89,13 @@ class SFTPJob:
         self.key = key
 
     def to_dict(self):
-        # SECURITY WARNING: Base64 encoding provides NO SECURITY - it is NOT encryption!
-        # This is merely obfuscation. Do NOT serialize jobs to disk or logs.
-        # Passwords should be passed through secure memory channels only.
-        # TODO: Implement proper encryption or avoid serializing credentials entirely
+        """Convert job to dictionary with encrypted password for secure serialization."""
+        encrypted_password = ''
+        if self.password and cipher_suite:
+            try:
+                encrypted_password = cipher_suite.encrypt(self.password.encode()).decode()
+            except Exception:
+                pass
         return {
             "source_path": self.source_path,
             "is_source_remote": self.is_source_remote,
@@ -90,17 +103,24 @@ class SFTPJob:
             "is_destination_remote": self.is_destination_remote,
             "hostname": self.hostname,
             "username": self.username,
-            "password": base64.b64encode(self.password.encode()).decode(),  # NOT secure - only obfuscation!
+            "password": encrypted_password,
             "port": self.port,
             "command": self.command,
             "job_id": self.job_id,
-            "key" : self.key
+            "key": self.key
         }
 
     @staticmethod
     def from_dict(data):
-        # SECURITY WARNING: Base64 decoding provides NO SECURITY
-        data["password"] = base64.b64decode(data["password"]).decode()
+        """Create job from dictionary with decrypted password."""
+        encrypted_password = data.get("password", "")
+        if encrypted_password and cipher_suite:
+            try:
+                data["password"] = cipher_suite.decrypt(encrypted_password.encode()).decode()
+            except Exception:
+                data["password"] = ""
+        else:
+            data["password"] = ""
         return SFTPJob(**data)
 
 def clear_sftp_queue():
@@ -154,7 +174,7 @@ class ResponseQueueContext:
         try:
             delete_response_queue(self.job_id)
         except (KeyError, RuntimeError) as e:
-            ic(f"Queue cleanup warning for job {self.job_id}: {e}")
+            pass
         # Don't suppress exceptions
         return False
 
@@ -354,7 +374,6 @@ class DownloadWorker(QRunnable):
 
     def _load_private_key(self, key_data, passphrase=None):
         """Load private key from string data with comprehensive format support"""
-        ic("load_private_key: attempting to load key")
         if not key_data:
             return None
     
@@ -387,7 +406,6 @@ class DownloadWorker(QRunnable):
             except (paramiko.SSHException, ValueError, TypeError, FileNotFoundError):
                 continue
             except (OSError, IOError) as e:
-                ic(e)
                 continue
                 
         # All attempts failed
@@ -399,8 +417,6 @@ class DownloadWorker(QRunnable):
 
     def _connect(self):
         """Establish SSH connection with connection pooling using ConnectionPool singleton."""
-        ic(f"_connect: Starting for {self.hostname}:{self.port} user={self.username}")
-        
         try:
             # Use ConnectionPool singleton for connection management
             pool = ConnectionPool()
@@ -415,7 +431,6 @@ class DownloadWorker(QRunnable):
             )
             
             self.transport = self.ssh.get_transport()
-            ic(f"_connect: Successfully connected using connection pool")
             return True
             
         except paramiko.AuthenticationException as e:
@@ -481,7 +496,7 @@ class DownloadWorker(QRunnable):
         if (now - self._last_emit_time >= self._emit_interval) or (percent >= 100):
             try:
                 # Use Qt's QueuedConnection to prevent signal buildup
-                self.signals.progress.emit(self.transfer_id, percent, speed_bps, eta_sec)
+                self.signals.progress.emit(self.transfer_id, percent, speed_bps, eta_sec, transferred, total)
                 self._last_emit_time = now
             except RuntimeError as e:
                 # If signal emission fails, don't crash the transfer
@@ -515,9 +530,6 @@ class DownloadWorker(QRunnable):
         try:
             # Perform the actual transfer
             if len(args) >= 2:
-                ic(f"Transfer {self.transfer_id}: Performing transfer - func={transfer_func.__name__}")
-                ic(f"Transfer {self.transfer_id}: args[0]={args[0]}")
-                ic(f"Transfer {self.transfer_id}: args[1]={args[1]}")
                 transfer_func(args[0], args[1], callback=progress_wrapper)
             else:
                 transfer_func(*args, callback=progress_wrapper)
@@ -546,7 +558,7 @@ class DownloadWorker(QRunnable):
                 if hasattr(transfer_func, '__self__') and hasattr(transfer_func.__self__, 'set_callback'):
                     transfer_func.__self__.set_callback(None)
             except (AttributeError, RuntimeError) as e:
-                ic(f"_perform_transfer: Error clearing callback: {e}")
+                pass
 
     def _cleanup_connections(self, error=False):
         """Release connection references or invalidate pooled connection."""
@@ -554,15 +566,11 @@ class DownloadWorker(QRunnable):
             try:
                 pool = ConnectionPool()
                 if error:
-                    # On real connection error, invalidate the whole SSH connection
                     pool.close_connection(self.hostname, self.port, self.username)
-                    ic(f"Invalidated connection after error for {self.hostname}:{self.port}")
                 else:
-                    # Normal completion, just release this SFTP channel back to idle pool
                     pool.release_connection(self.hostname, self.port, self.username, self.sftp)
-                    ic(f"Released SFTP channel to pool for {self.hostname}:{self.port}")
             except Exception as e:
-                ic(f"Error during connection cleanup: {e}")
+                pass
         
         # Clear references
         self.sftp = None
@@ -574,28 +582,20 @@ class DownloadWorker(QRunnable):
         error_occurred = False
 
         try:
-            # Debug: Log worker start
-            ic(f"DownloadWorker started: transfer_id={self.transfer_id}, command={self.command}, source={self.job_source}")
-            ic(f"DownloadWorker: hostname={self.hostname}, port={self.port}, username={self.username}")
-            
             # Establish connection (includes SFTP channel from pool)
-            ic(f"DownloadWorker: Calling _connect()")
             if not self._connect():
-                ic(f"Connection failed for transfer {self.transfer_id}")
+                logger.error(f"Transfer {self.transfer_id}: Connection failed")
                 put_response(self.transfer_id, "error", "Connection failed")
                 return
-            ic(f"DownloadWorker: _connect() returned True, sftp ready")
 
             # Strip decorative characters from source and destination paths
             clean_source = strip_decorative_chars(self.job_source)
             clean_destination = strip_decorative_chars(self.job_destination)
-            
-            ic(f"Transfer {self.transfer_id}: clean_source={clean_source}")
-            ic(f"Transfer {self.transfer_id}: clean_destination={clean_destination}")
-            ic(f"Processing: source_remote={self.is_source_remote}, dest_remote={self.is_destination_remote}, command={self.command}")
 
             if self.command == "resume":
                 resume = True
+
+            logger.debug(f"Transfer {self.transfer_id}: {self.command} {clean_source} → {clean_destination}")
 
             # Handle different transfer types
             if self.is_source_remote and not self.is_destination_remote:
@@ -604,23 +604,16 @@ class DownloadWorker(QRunnable):
                     self.transfer_id,
                     f"Downloading {clean_source} → {clean_destination}"
                 )
-                ic(f"Transfer {self.transfer_id}: Opening SFTP channel for download")
-                ic(f"Transfer {self.transfer_id}: Full paths - source={clean_source}, dest={clean_destination}")
-                
-                # Debug: List the remote directory to verify file exists
-                remote_dir = os.path.dirname(clean_source)
-                remote_file = os.path.basename(clean_source)
-                ic(f"Transfer {self.transfer_id}: Checking remote_dir={remote_dir}, remote_file={remote_file}")
                 
                 if resume:
                     self._transfer_with_timeout(self._resume_download, clean_source, clean_destination)
                 else:
-                    ic(f"Transfer {self.transfer_id}: Calling sftp.get({clean_source}, {clean_destination})")
                     self._transfer_with_timeout(self.sftp.get, clean_source, clean_destination)
                 
                 # Only signal success if not already handled (e.g., cancelled)
                 if not self._stop_flag:
                     # Signal successful download
+                    logger.info(f"Transfer {self.transfer_id}: Download complete {clean_source} → {clean_destination}")
                     put_response(self.transfer_id, "success", clean_destination)
 
             elif self.is_destination_remote and not self.is_source_remote:
@@ -637,19 +630,16 @@ class DownloadWorker(QRunnable):
                 # Only signal success if not already handled (e.g., cancelled)
                 if not self._stop_flag:
                     # Signal successful upload
+                    logger.info(f"Transfer {self.transfer_id}: Upload complete {clean_source} → {clean_destination}")
                     put_response(self.transfer_id, "success", clean_destination)
 
             elif self.is_source_remote and self.is_destination_remote:
                 # Remote command execution
-                ic(f"Handling remote command: {self.command}")
-                ic(f"Remote command - about to call _handle_remote_command")
                 self._handle_remote_command()
-                ic(f"Remote command - _handle_remote_command returned")
-            else:
-                ic(f"No matching transfer type: src_remote={self.is_source_remote}, dst_remote={self.is_destination_remote}")
 
         except Exception as e:
             error_occurred = True
+            logger.error(f"Transfer {self.transfer_id} failed: {e}")
             self.signals.message.emit(self.transfer_id, f"Transfer failed: {e}")
             put_response(self.transfer_id, "error", str(e))
         finally:
@@ -659,88 +649,59 @@ class DownloadWorker(QRunnable):
 
     def _handle_remote_command(self):
         """Handle remote SFTP commands"""
-        ic(f"_handle_remote_command: Starting - command={self.command}, source={self.job_source}")
-        ic(f"_handle_remote_command: sftp object = {self.sftp}")
-        ic(f"_handle_remote_command: ssh object = {self.ssh}")
-        
         try:
-            ic(f"Executing command: {self.command}, source: {self.job_source}, dest: {self.job_destination}")
-            
             if self.command == "mkdir":
-                ic(f"Creating directory: {self.job_destination}")
                 self.sftp.mkdir(self.job_destination)
                 put_response(self.transfer_id, "success", self.job_destination)
 
             elif self.command == "listdir_attr":
-                ic(f"Listing directory attributes: {self.job_source}")
-                ic(f"About to call sftp.listdir_attr({self.job_source})")
                 try:
                     response = self.sftp.listdir_attr(self.job_source)
-                    ic(f"listdir_attr returned {len(response)} items")
                     put_response(self.transfer_id, "success", response)
                 except (OSError, IOError, paramiko.SSHException) as listdir_err:
-                    ic(f"listdir_attr FAILED: {listdir_err}")
                     put_response(self.transfer_id, "error", str(listdir_err))
 
             elif self.command == "listdir":
-                ic(f"Listing directory: {self.job_source}")
                 response = self.sftp.listdir(self.job_source)
                 put_response(self.transfer_id, "success", response)
 
             elif self.command == "chdir":
-                ic(f"Changing directory to: {self.job_source}")
-                # Note: chdir doesn't actually change the server's working directory permanently
-                # It just validates that the path exists and is accessible
-                # The actual path tracking is done in the client
                 try:
-                    # Test if directory exists by trying to list it
                     self.sftp.listdir(self.job_source)
-                    ic(f"Directory exists and is accessible: {self.job_source}")
                     put_response(self.transfer_id, "success", self.job_source)
                 except (OSError, IOError, paramiko.SSHException) as e:
                     error_msg = f"Cannot access directory {self.job_source}: {e}"
-                    ic(error_msg)
                     put_response(self.transfer_id, "error", error_msg)
 
             elif self.command == "rmdir":
-                ic(f"Removing directory: {self.job_source}")
                 self.sftp.rmdir(self.job_source)
                 put_response(self.transfer_id, "success", self.job_source)
 
             elif self.command == "stat":
-                ic(f"Getting stat for: {self.job_source}")
                 try:
                     attr = self.sftp.stat(self.job_source)
                     put_response(self.transfer_id, "success", attr)
                 except (OSError, IOError, paramiko.SSHException) as e:
                     error_msg = f"Stat failed for {self.job_source}: {e}"
-                    ic(error_msg)
                     put_response(self.transfer_id, "error", error_msg)
 
             elif self.command == "remove":
-                ic(f"Removing file: {self.job_source}")
                 self.sftp.remove(self.job_source)
                 put_response(self.transfer_id, "success", self.job_source)
 
             elif self.command == "getcwd":
-                # Get current working directory
-                # Note: This creates a new SSH session which always starts in the home directory
-                # So it will return the home directory, not the SFTP session's current directory
                 try:
                     stdin, stdout, stderr = self.ssh.exec_command('pwd')
                     error_output = stderr.read()
                     if error_output:
                         error_msg = error_output.decode()
-                        ic("Error:", error_msg)
                         self.signals.message.emit(self.transfer_id, f"{self.command} operation failed: {error_msg}")
                         put_response(self.transfer_id, "error", error_msg)
                     else:
                         getcwd_path = stdout.read().strip().decode()
-                        ic(f"getcwd: returning home directory: {getcwd_path}")
                         put_response(self.transfer_id, "success", getcwd_path)
                 except (OSError, IOError, paramiko.SSHException) as e:
                     error_msg = f"getcwd failed: {e}"
-                    ic(error_msg)
                     put_response(self.transfer_id, "error", error_msg)
 
         except (OSError, IOError, paramiko.SSHException) as e:

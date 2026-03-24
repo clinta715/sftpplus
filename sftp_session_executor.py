@@ -13,7 +13,6 @@ import time
 import os
 import errno
 import paramiko
-from icecream import ic
 
 from PyQt6.QtCore import pyqtSignal, QObject
 
@@ -121,7 +120,6 @@ class CommandExecutor(QObject):
                     (isinstance(e, OSError) and e.errno in (errno.EACCES, errno.EPERM))
                 )
                 if is_permission_error:
-                    ic(f"Executor: Permission denied for {command.command_type}, not retrying: {e}")
                     raise
                 else:
                     # Invalidate the connection so a fresh one is created next time
@@ -132,7 +130,6 @@ class CommandExecutor(QObject):
                     )
                     # Retry once with a fresh connection if this was the first attempt
                     if retry:
-                        ic(f"Executor: Retrying command {command.command_type} with fresh connection")
                         return self.execute(command, timeout, retry=False)
                     raise
     
@@ -161,9 +158,9 @@ class CommandExecutor(QObject):
             try:
                 self.progress.emit(job_id, percent, speed_bps, eta_sec)
                 self._last_emit_time = now
-            except RuntimeError as e:
-                ic(f"Progress signal emission failed: {e}")
-    
+            except RuntimeError:
+                pass
+
     def _reset_progress_tracking(self):
         """Reset progress tracking state for new transfer"""
         self._last_emit_time = 0
@@ -172,8 +169,6 @@ class CommandExecutor(QObject):
     
     def _execute_download(self, ssh, sftp, command: DownloadCommand, job_id: str):
         """Execute download command"""
-        ic(f"Executor: Downloading {command.remote_path} to {command.local_path}")
-        
         self._reset_progress_tracking()
         
         try:
@@ -193,14 +188,11 @@ class CommandExecutor(QObject):
             put_response(job_id, "success", command.local_path)
             self.finished.emit(job_id)
         except (OSError, IOError, paramiko.SSHException) as e:
-            ic(f"Executor: Download failed for {command.remote_path}: {e}")
             put_response(job_id, "error", str(e))
             raise
     
     def _execute_upload(self, ssh, sftp, command: UploadCommand, job_id: str):
         """Execute upload command"""
-        ic(f"Executor: Uploading {command.local_path} to {command.remote_path}")
-        
         self._reset_progress_tracking()
         
         try:
@@ -216,141 +208,116 @@ class CommandExecutor(QObject):
             put_response(job_id, "success", command.remote_path)
             self.finished.emit(job_id)
         except (OSError, IOError, paramiko.SSHException) as e:
-            ic(f"Executor: Upload failed for {command.local_path}: {e}")
             put_response(job_id, "error", str(e))
             raise
     
     def _execute_list(self, ssh, sftp, command: ListCommand, job_id: str):
         """Execute list directory command"""
-        ic(f"Executor: Listing {command.remote_path}")
         try:
             result = sftp.listdir(command.remote_path)
             put_response(job_id, "success", result)
         except (OSError, IOError, paramiko.SSHException) as e:
-            ic(f"Executor: List failed for {command.remote_path}: {e}")
             put_response(job_id, "error", str(e))
             raise
     
     def _execute_list_attr(self, ssh, sftp, command: ListCommand, job_id: str):
         """Execute list directory with attributes command"""
-        ic(f"Executor: Listing {command.remote_path} with attributes")
         try:
             result = sftp.listdir_attr(command.remote_path)
             put_response(job_id, "success", result)
         except (OSError, IOError, paramiko.SSHException) as e:
-            ic(f"Executor: List_attr failed for {command.remote_path}: {e}")
             put_response(job_id, "error", str(e))
             raise
     
     def _execute_stat(self, ssh, sftp, command: StatCommand, job_id: str):
         """Execute stat command"""
-        ic(f"Executor: Stat {command.path}")
         try:
             result = sftp.stat(command.path)
             put_response(job_id, "success", result)
         except (OSError, IOError, paramiko.SSHException) as e:
-            ic(f"Executor: Stat failed for {command.path}: {e}")
             put_response(job_id, "error", str(e))
             raise
     
     def _execute_mkdir(self, ssh, sftp, command: MkDirCommand, job_id: str):
         """Execute mkdir command"""
-        ic(f"Executor: MkDir {command.remote_path}")
         try:
             sftp.mkdir(command.remote_path)
             put_response(job_id, "success", command.remote_path)
         except PermissionError as e:
             error_msg = f"Permission denied: Cannot create directory '{os.path.basename(command.remote_path)}'"
-            ic(f"Executor: mkdir permission denied: {e}")
             put_response(job_id, "error", error_msg)
             raise
         except IOError as e:
             error_msg = f"IO error creating directory: {e}"
-            ic(f"Executor: mkdir IO error: {e}")
             put_response(job_id, "error", error_msg)
             raise
 
     def _execute_rmdir(self, ssh, sftp, command: RmDirCommand, job_id: str):
         """Execute rmdir command"""
-        ic(f"Executor: RmDir {command.remote_path}")
         try:
             sftp.rmdir(command.remote_path)
             put_response(job_id, "success", command.remote_path)
         except PermissionError as e:
             error_msg = f"Permission denied: Cannot remove directory '{os.path.basename(command.remote_path)}'"
-            ic(f"Executor: rmdir permission denied: {e}")
             put_response(job_id, "error", error_msg)
             raise
         except IOError as e:
             error_msg = f"IO error removing directory: {e}"
-            ic(f"Executor: rmdir IO error: {e}")
             put_response(job_id, "error", error_msg)
             raise
 
     def _execute_remove(self, ssh, sftp, command: RemoveCommand, job_id: str):
         """Execute remove command"""
-        ic(f"Executor: Remove {command.remote_path}")
         try:
             sftp.remove(command.remote_path)
             put_response(job_id, "success", command.remote_path)
         except PermissionError as e:
             error_msg = f"Permission denied: Cannot remove '{os.path.basename(command.remote_path)}'"
-            ic(f"Executor: remove permission denied: {e}")
             put_response(job_id, "error", error_msg)
             raise
         except IOError as e:
             error_msg = f"IO error removing file: {e}"
-            ic(f"Executor: remove IO error: {e}")
             put_response(job_id, "error", error_msg)
             raise
 
     def _execute_rename(self, ssh, sftp, command, job_id: str):
         """Execute rename command"""
-        ic(f"Executor: Rename {command.remote_path} to {command.new_name}")
         new_path = os.path.join(os.path.dirname(command.remote_path), command.new_name)
         try:
             sftp.rename(command.remote_path, new_path)
             put_response(job_id, "success", new_path)
         except PermissionError as e:
             error_msg = f"Permission denied: Cannot rename '{os.path.basename(command.remote_path)}'"
-            ic(f"Executor: rename permission denied: {e}")
             put_response(job_id, "error", error_msg)
             raise
         except IOError as e:
-            ic(f"Executor: SFTP rename failed: {e}, trying SSH mv command")
             import shlex
             safe_old = shlex.quote(command.remote_path)
             safe_new = shlex.quote(new_path)
             stdin, stdout, stderr = ssh.exec_command(f'mv {safe_old} {safe_new}')
             exit_code = stdout.channel.recv_exit_status()
             if exit_code == 0:
-                ic(f"Executor: SSH mv succeeded")
                 put_response(job_id, "success", new_path)
             else:
                 error_output = stderr.read().decode('utf-8', errors='replace')
                 error_msg = f"IO error renaming file: {error_output or e}"
-                ic(f"Executor: rename IO error: {error_msg}")
                 put_response(job_id, "error", error_msg)
                 raise IOError(error_msg)
     
     def _execute_chdir(self, ssh, sftp, command: ChDirCommand, job_id: str):
         """Execute chdir command"""
-        ic(f"Executor: ChDir {command.remote_path}")
         sftp.listdir(command.remote_path)
         put_response(job_id, "success", command.remote_path)
 
     def _execute_getcwd(self, ssh, sftp, command: GetCwdCommand, job_id: str):
         """Execute getcwd command - get the actual CWD from server"""
-        ic(f"Executor: GetCWD")
         stdin, stdout, stderr = ssh.exec_command('pwd')
         error_output = stderr.read()
         if error_output:
             error_msg = error_output.decode()
-            ic(f"Executor: getcwd error: {error_msg}")
             put_response(job_id, "error", error_msg)
         else:
             cwd_path = stdout.read().decode().strip()
-            ic(f"Executor: getcwd returned: {cwd_path}")
             put_response(job_id, "success", cwd_path)
     
     def _resume_download(self, ssh, sftp, remote_path: str, local_path: str, job_id: str):
@@ -366,9 +333,6 @@ class CommandExecutor(QObject):
             sftp.get(remote_path, local_path)
             put_response(job_id, "success", local_path)
             return
-        
-        ic(f"Executor: Resuming download from {existing_size} bytes")
-        
         with open(local_path, 'ab') as local_file:
             with sftp.open(remote_path, 'rb') as remote_file:
                 remote_file.seek(existing_size)
@@ -398,9 +362,6 @@ class CommandExecutor(QObject):
             sftp.put(local_path, remote_path)
             put_response(job_id, "success", remote_path)
             return
-        
-        ic(f"Executor: Resuming upload from {existing_size} bytes")
-        
         with open(local_path, 'rb') as local_file:
             local_file.seek(existing_size)
             with sftp.open(remote_path, 'ab') as remote_file:

@@ -1,7 +1,6 @@
 import os
 import re
 import threading
-from icecream import ic
 
 _SENSITIVE_PATTERNS = [
     (re.compile(r'password[\'"]?\s*[:=]\s*[\'"][^\'"]*[\'"]', re.IGNORECASE), 'password=***'),
@@ -96,7 +95,6 @@ def verify_credential_update(session_id, credential, expected_value, context="")
         error_msg = f"CREDENTIAL MISMATCH: Session {session_id}, {credential} expected '{expected_value}' but got '{actual_value}'"
         if context:
             error_msg += f" (Context: {context})"
-        ic(error_msg)
         # In production, log but don't crash
         # In development, could raise AssertionError
         return False
@@ -120,7 +118,7 @@ def verify_directory_consistency(session_id, operation=""):
     is_valid = directory.startswith('/') if directory else False
     
     if not is_valid and directory != '.':
-        ic(f"DIRECTORY VALIDATION: Session {session_id} has invalid directory '{directory}' during {operation}")
+        pass  # Log warning in production
     
     return is_valid, directory
 

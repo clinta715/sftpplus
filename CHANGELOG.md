@@ -8,8 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Cross-Platform Support**: Application now runs on Windows, macOS, and Linux
+  - Platform-specific config directories (`%APPDATA%/sftp_client` on Windows)
+  - Local terminal shows placeholder on Windows (PTY not supported)
+  - File permissions handled gracefully on all platforms
+- **Delete Progress Feedback**: Deleting multiple items now shows progress dialog and summary
+- **Logging System**: New `sftp_logging.py` module with file logging to platform-specific log directory
+- **Transfer History**: New `sftp_transfer_history.py` module for logging completed transfers
+- **Drag & Drop Infrastructure**: New `sftp_drag_drop.py` module with `DragDropInfo` class
+- **Platform Utility Module**: New `sftp_platform.py` with cross-platform utilities
 - **Keyboard Shortcuts Help**: Press F1 to see all available keyboard shortcuts
-- **Test Framework**: New pytest-based test framework with 40 tests in `tests/` directory
+- **Test Framework**: 89 tests in `tests/` directory
 - **Filename Truncation**: Long filenames now show beginning instead of end (elide left)
 - **Tree View Context Menu**: Added Rename and Delete options to tree view right-click menu
 
@@ -21,9 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Toolbar Delete**: Delete button works for both local and remote browsers
 - **Connection Pool**: Changed from RejectPolicy to WarningPolicy to allow connections to new hosts
 
+### Security
+- **Credential Encryption**: Transfer queue passwords now encrypted with Fernet (not base64)
+- **Debug Output Cleanup**: Removed all `icecream` debug statements (269 calls across 23 files)
+
 ### Changed
 - **Toolbar Tooltips**: Now display keyboard shortcuts for each button
 - **Default Browser**: Remote browser is now default active browser instead of local
+- **Config Paths**: All config files now use platform-appropriate directories
 
 ## [2.0.1] - 2026-03-03
 

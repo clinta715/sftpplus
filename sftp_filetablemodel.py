@@ -5,7 +5,6 @@ from PyQt6.QtGui import QFont, QColor
 from pathlib import Path
 import os
 import datetime
-from icecream import ic
 
 from sftp_remotefiletablemodel import RemoteFileTableModel
 from sftp_creds import get_credentials, set_credentials
@@ -19,16 +18,13 @@ class FileTableModel(QAbstractTableModel):
         creds = get_credentials(self.session_id)
         current_dir = creds.get('current_local_directory')
         
-        ic(f"FileTableModel.__init__: session_id={session_id}, initial current_local_directory={current_dir}")
         
         if not current_dir or not os.path.exists(current_dir):
             current_dir = os.getcwd()
-            ic(f"FileTableModel.__init__: Using cwd instead: {current_dir}")
         
         set_credentials(self.session_id, 'current_local_directory', current_dir)
         self.directory = Path(current_dir)
         
-        ic(f"FileTableModel.__init__: Final directory={self.directory}")
         
         self.column_names = ['Name', 'Size', 'Permissions', 'Modified']
         self.get_files()
@@ -67,7 +63,7 @@ class FileTableModel(QAbstractTableModel):
 
             # Don't sort here - let DirectoryFirstSortProxyModel handle sorting
         except (OSError, IOError, RuntimeError) as e:
-            ic(f"Error getting files: {str(e)}")
+            pass
 
         self.endResetModel()
 

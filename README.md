@@ -4,8 +4,9 @@ A multi-tabbed, ephemeral-connection based graphical SFTP client written in Pyth
 
 ## Features
 
+- **Cross-platform**: Runs on Windows, macOS, and Linux
 - **Multi-tabbed interface**: Connect to multiple SFTP servers simultaneously
-- **SSH Terminal**: Interactive SSH shell sessions alongside SFTP file transfers
+- **SSH Terminal**: Interactive SSH shell sessions alongside SFTP file transfers (Unix only)
 - **Connection types**: Choose between SFTP Browser or SSH Terminal per saved site
 - **Ephemeral connections**: Each operation creates a fresh connection for security
 - **Threaded operations**: Uploads/downloads run in background threads
@@ -15,25 +16,38 @@ A multi-tabbed, ephemeral-connection based graphical SFTP client written in Pyth
 - **Bookmarks**: Save frequently used directories per-host
 - **Directory tree view**: Toggle tree panel above or below file list
 - **Progress tracking**: Real-time progress indicators for file transfers
+- **Delete feedback**: Progress dialog and summary when deleting multiple items
 - **Queue management**: Pause/cancel transfer operations
 - **Persistent transfer queue**: Unfinished transfers saved and restored between sessions
-- **Persistent preferences**: User settings saved to home directory
+- **Persistent preferences**: User settings saved to platform-appropriate directory
 - **Enhanced security**: Separate key storage, proper file permissions, secure temp file handling
+- **Transfer history**: Log of completed transfers with export capability
 
 ## Requirements
 
 - Python 3.7+
 - PyQt6
 - paramiko
-- icecream (for debugging)
 - cryptography
 - humanize (optional, for file size formatting)
 
 ## Installation
 
 ```bash
-pip install PyQt6 paramiko icecream cryptography humanize
+pip install PyQt6 paramiko cryptography humanize
 ```
+
+## Platform Notes
+
+### Windows
+- Config files stored in `%APPDATA%/sftp_client/`
+- Local terminal not available (PTY not supported on Windows)
+- File permissions use Windows ACLs
+
+### macOS / Linux
+- Config files stored in `~/.sftp_client/`
+- Local terminal fully supported
+- File permissions use Unix mode bits (0o600)
 
 ## Usage
 
@@ -169,13 +183,28 @@ User preferences stored in `~/.sftp_client_preferences.json`:
 
 ### File Storage Locations
 
+**Unix (macOS/Linux):**
+
 | File | Purpose |
 |------|---------|
-| `~/.sftp_client_preferences.json` | User preferences |
-| `~/.sftp_client_connection_data.json` | Encrypted site configurations |
+| `~/.sftp_client/preferences.json` | User preferences |
+| `~/.sftp_client/connections.json` | Encrypted site configurations |
+| `~/.sftp_client/history.json` | Transfer history |
+| `~/.sftp_client/logs/sftp.log` | Application logs |
 | `~/.sftp_client_key` | Encryption key (separate from data) |
 | `~/.sftp_client_transfer_queue.json` | Pending transfers (auto-deleted after restore) |
 | `/tmp/.sftp_preview_*` | Temporary preview files (auto-cleaned) |
+
+**Windows:**
+
+| File | Purpose |
+|------|---------|
+| `%APPDATA%/sftp_client/preferences.json` | User preferences |
+| `%APPDATA%/sftp_client/connections.json` | Encrypted site configurations |
+| `%APPDATA%/sftp_client/history.json` | Transfer history |
+| `%APPDATA%/sftp_client/logs/sftp.log` | Application logs |
+| `%APPDATA%/sftp_client/key.bin` | Encryption key |
+| `%APPDATA%/sftp_client/transfer_queue.json` | Pending transfers |
 
 ## Development History
 

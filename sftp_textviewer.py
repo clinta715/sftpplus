@@ -5,7 +5,6 @@ from PyQt6.QtWidgets import (
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QFont, QTextCursor
-from icecream import ic
 
 from sftp_theme import DARK_THEME, BUTTON_STYLE_DARK
 
@@ -29,7 +28,7 @@ def is_text_file(file_path, sample_size=8192):
             except (UnicodeDecodeError, LookupError, ValueError):
                 return False
     except (OSError, IOError) as e:
-        ic(f"Error checking file type: {e}")
+        pass
         return False
 
 

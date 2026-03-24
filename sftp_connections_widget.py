@@ -8,7 +8,6 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QIntValidator
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 from PyQt6.QtCore import pyqtSignal
-from icecream import ic
 
 from sftp_hostdataeditor import save_connection_data, load_connection_data
 from sftp_theme import CONNECT_BUTTON_STYLE, BUTTON_STYLE_DARK
@@ -23,9 +22,11 @@ class ConnectionsWidget(QWidget):
     
     Signals:
         connect_requested: Emitted when user wants to connect to a site
+        open_local_terminal: Emitted when user wants to open local terminal
     """
     
     connect_requested = pyqtSignal(dict)
+    open_local_terminal = pyqtSignal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -59,6 +60,12 @@ class ConnectionsWidget(QWidget):
         self.copy_button.setStyleSheet(BUTTON_STYLE_DARK)
         self.copy_button.clicked.connect(self.copy_row)
         toolbar_layout.addWidget(self.copy_button)
+        
+        self.local_terminal_button = QPushButton("💻 Local Terminal")
+        self.local_terminal_button.setToolTip("Open local terminal tab")
+        self.local_terminal_button.setStyleSheet(BUTTON_STYLE_DARK)
+        self.local_terminal_button.clicked.connect(self._open_local_terminal)
+        toolbar_layout.addWidget(self.local_terminal_button)
         
         toolbar_layout.addStretch()
         
@@ -533,6 +540,10 @@ class ConnectionsWidget(QWidget):
         }
         
         self.connect_requested.emit(connection_data)
+    
+    def _open_local_terminal(self):
+        """Emit signal to open local terminal"""
+        self.open_local_terminal.emit()
     
     # Alias methods to match expected names from HostDataEditor
     on_selection_changed = _on_selection_changed

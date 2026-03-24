@@ -4,7 +4,6 @@ from PyQt6.QtWidgets import (
 )
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 from PyQt6.QtCore import pyqtSignal
-from icecream import ic
 
 from sftp_filebrowserclass import FileBrowser
 from sftp_remotefilebrowserclass import RemoteFileBrowser
@@ -43,17 +42,16 @@ class FileBrowserPanel(QWidget):
         self._connect_signals()
         
         if not auto_initialize:
-            ic(f"FileBrowserPanel: Created with deferred initialization for session {session_id}")
+            pass
         else:
             self._initialized = True
     
     def initialize(self):
         """Initialize the remote browser - must be called after connection is ready"""
         if self._initialized:
-            ic(f"FileBrowserPanel.initialize: already initialized, skipping")
+            pass
             return
         
-        ic(f"FileBrowserPanel.initialize: Initializing remote browser for session {self.session_id}")
         self._initialized = True
         
         # Initialize remote browser

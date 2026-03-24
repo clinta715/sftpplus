@@ -180,6 +180,11 @@ class QtCompat:
     # ItemSelectionModel flags
     Select = QtCore.QItemSelectionModel.SelectionFlag.Select
     Rows = QtCore.QItemSelectionModel.SelectionFlag.Rows
+    
+    # Mouse buttons
+    LeftButton = QtCore.Qt.MouseButton.LeftButton
+    RightButton = QtCore.Qt.MouseButton.RightButton
+    MiddleButton = QtCore.Qt.MouseButton.MiddleButton
 
 # Add QApplication for convenience
 def get_qapplication():

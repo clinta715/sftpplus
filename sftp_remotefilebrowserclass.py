@@ -1,7 +1,6 @@
 from sftp_filebrowserclass import FileBrowser
 from PyQt6.QtWidgets import QTableView, QFileDialog, QMessageBox, QInputDialog, QHeaderView, QMenu, QProgressDialog, QApplication
 from PyQt6.QtCore import QModelIndex, QTimer, QThreadPool
-from icecream import ic
 import os
 import stat
 import time
@@ -70,7 +69,7 @@ class RemoteFileBrowser(FileBrowser):
     def initialize(self):
         """Initialize the model - called after connection is ready"""
         if self._initialized:
-            ic(f"RemoteFileBrowser.initialize: already initialized, skipping")
+            pass
             return
         self._initialized = True
         self.initialize_model()
@@ -88,24 +87,20 @@ class RemoteFileBrowser(FileBrowser):
     def initialize_model(self):
         creds = get_credentials(self.session_id)
         stored_dir = creds.get('current_remote_directory', '.')
-        ic(f"initialize_model: session_id={self.session_id}, stored_dir={stored_dir}")
 
         # Use the stored directory - it's the source of truth
         # get_remote_cwd_direct() creates a new SSH session which always returns the HOME directory
         # not the actual current directory we want to be in
         if stored_dir and stored_dir != '.' and stored_dir.startswith('/'):
             current_dir = stored_dir
-            ic(f"Using stored directory: {current_dir}")
         else:
             # Only query server if we don't have a valid absolute directory
-            ic(f"No valid stored directory, querying server...")
             current_dir = self.get_remote_cwd_direct()
             if current_dir:
-                ic(f"Got cwd from server: {current_dir}")
+                pass
                 set_credentials(self.session_id, 'current_remote_directory', current_dir)
             else:
                 current_dir = '/'
-                ic(f"Failed to get cwd, using root: {current_dir}")
                 set_credentials(self.session_id, 'current_remote_directory', current_dir)
 
         # Load files for current directory (single connection)
@@ -155,10 +150,9 @@ class RemoteFileBrowser(FileBrowser):
 
         try:
             result = self.session_api.getcwd()
-            ic(f"sftp_getcwd: returned {result}")
             return result
         except (OSError, IOError, RuntimeError) as e:
-            ic(f"sftp_getcwd: {e}")
+            pass
             return None
 
     def get_remote_cwd_direct(self):
@@ -168,10 +162,9 @@ class RemoteFileBrowser(FileBrowser):
         """
         try:
             result = self.session_api.getcwd()
-            ic(f"get_remote_cwd_direct: Got cwd from server: {result}")
             return result
         except (OSError, IOError, RuntimeError) as e:
-            ic(f"get_remote_cwd_direct error: {e}")
+            pass
             return None
 
     def close_sftp_connection(self):
@@ -225,11 +218,11 @@ class RemoteFileBrowser(FileBrowser):
             set_credentials(self.session_id, 'current_remote_directory', new_path)
             
             if not verify_credential_update(self.session_id, 'current_remote_directory', new_path, "change_directory"):
-                ic(f"CRITICAL: Failed to update credentials to {new_path}")
+                pass
             
             is_valid, current_dir = verify_directory_consistency(self.session_id, "change_directory")
             if not is_valid:
-                ic(f"WARNING: Directory '{current_dir}' may be invalid")
+                pass
             
             self.message_signal.emit(f"{new_path}")
             self.model.invalidate_cache(new_path)
@@ -243,7 +236,7 @@ class RemoteFileBrowser(FileBrowser):
             return True
 
         except (OSError, IOError, RuntimeError) as e:
-            ic(f"change_directory EXCEPTION: {e}")
+            pass
             self.message_signal.emit(f"change_directory() {e}")
             return False
 
@@ -302,7 +295,7 @@ class RemoteFileBrowser(FileBrowser):
                 return False
 
         except (OSError, IOError, RuntimeError) as e:
-            ic(e)
+            pass
             self.message_signal.emit(f"Error processing: {filename}. Details: {str(e)}")
             return False
 
@@ -385,7 +378,7 @@ class RemoteFileBrowser(FileBrowser):
                     temp_path = self.sftp_getcwd()
                     if temp_path:
                         set_credentials(self.session_id, 'current_remote_directory', self.remove_trailing_dot(temp_path))
-            
+        
             full_path = os.path.join(creds.get('current_remote_directory'), filename)
             selected_paths.append(full_path)
         
@@ -409,12 +402,35 @@ class RemoteFileBrowser(FileBrowser):
             if response != Qt.MsgBtn_Yes:
                 return
         
+        # Track results for summary
+        success_count = 0
+        failure_count = 0
+        failures = []
+        
+        # Show progress dialog for multiple items
+        show_progress = len(selected_paths) > 1
+        progress = None
+        if show_progress:
+            progress = QProgressDialog("Deleting files...", "Cancel", 0, len(selected_paths), self)
+            progress.setWindowTitle("Delete Progress")
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+        
         # Remove each selected item
-        for remote_path in selected_paths:
+        for i, remote_path in enumerate(selected_paths):
+            if show_progress and progress:
+                progress.setValue(i)
+                progress.setLabelText(f"Deleting: {os.path.basename(remote_path)}")
+                QApplication.processEvents()
+                if progress.wasCanceled():
+                    break
+            
             try:
                 # Check if the remote path exists
                 if not self.sftp_exists(remote_path):
-                    self.message_signal.emit(f"Remote path '{remote_path}' does not exist.")
+                    failure_count += 1
+                    failures.append((remote_path, "Not found"))
                     continue
                 
                 # Check if it's a file (catch permission errors)
@@ -426,20 +442,50 @@ class RemoteFileBrowser(FileBrowser):
                 if is_file:
                     try:
                         self.sftp_remove(remote_path)
-                        self.message_signal.emit(f"File '{remote_path}' removed successfully.")
+                        success_count += 1
                     except PermissionError as e:
-                        self.message_signal.emit(f"Permission denied: {e}")
+                        failure_count += 1
+                        failures.append((remote_path, str(e)))
                     continue
                 
                 # It's a directory - recursively remove
                 self._remove_remote_directory_recursive(remote_path)
-                self.message_signal.emit(f"Directory '{remote_path}' removed successfully.")
+                success_count += 1
             except PermissionError as e:
-                self.message_signal.emit(f"Permission denied: {e}")
+                failure_count += 1
+                failures.append((remote_path, str(e)))
             except (OSError, IOError, RuntimeError) as e:
-                self.message_signal.emit(f"remove_directory_with_prompt() error: {e}")
+                failure_count += 1
+                failures.append((remote_path, str(e)))
         
-        # Refresh the browser
+        if show_progress and progress:
+            progress.setValue(len(selected_paths))
+            progress.close()
+        
+        # Show summary dialog
+        if len(selected_paths) > 1:
+            summary_parts = []
+            if success_count > 0:
+                summary_parts.append(f"{success_count} deleted successfully")
+            if failure_count > 0:
+                summary_parts.append(f"{failure_count} failed")
+            summary_msg = ", ".join(summary_parts)
+            
+            if failure_count > 0 and len(failures) <= 3:
+                summary_msg += "\n\nFailed items:"
+                for path, error in failures[:3]:
+                    summary_msg += f"\n• {os.path.basename(path)}: {error}"
+                if len(failures) > 3:
+                    summary_msg += f"\n...and {len(failures) - 3} more"
+            
+            QMessageBox.information(self, "Delete Complete", summary_msg)
+        elif len(selected_paths) == 1:
+            if success_count > 0:
+                self.message_signal.emit("Deleted successfully.")
+            elif failure_count > 0 and failures:
+                self.message_signal.emit(f"Delete failed: {failures[0][1]}")
+        
+        #Refresh the browser
         self.model.get_files(force_refresh=True)
     
     def _remove_remote_directory_recursive(self, remote_path):
@@ -465,10 +511,10 @@ class RemoteFileBrowser(FileBrowser):
             try:
                 self.sftp_remove(entry_path)
             except PermissionError:
-                ic(f"Permission denied deleting file: {entry_path}")
+                pass
                 continue
             except OSError as e:
-                ic(f"Error deleting file {entry_path}: {e}")
+                pass
                 continue
         
         # Recursively remove subdirectories
@@ -480,9 +526,9 @@ class RemoteFileBrowser(FileBrowser):
         try:
             self.sftp_rmdir(remote_path)
         except PermissionError:
-            ic(f"Permission denied removing directory: {remote_path}")
+            pass
         except OSError as e:
-            ic(f"Error removing directory {remote_path}: {e}")
+            pass
         creds = get_credentials(self.session_id)
         if remote_path is None or remote_path is False:
             # current_browser = self.focusWidget()
@@ -581,7 +627,7 @@ class RemoteFileBrowser(FileBrowser):
         current_browser = self.table
         
         if current_browser is None:
-            ic("ERROR: current_browser is None!")
+            pass
             self.message_signal.emit("Error: No table browser found")
             return
             
@@ -774,7 +820,6 @@ class RemoteFileBrowser(FileBrowser):
         from PyQt6.QtCore import QThreadPool
         from sftp_qt_compat import Qt
         
-        ic(f"download_directory called: source={source_directory}, dest={destination_directory}")
         
         worker = TraversalWorker(
             self.session_id, source_directory, destination_directory,
@@ -847,8 +892,6 @@ class RemoteFileBrowser(FileBrowser):
         creds = get_credentials(self.session_id)
         current_dir = creds.get('current_remote_directory', '/')
         
-        ic(f"populate_tree_view called for session {self.session_id}, current_dir={current_dir}")
-        ic(f"session_api available: {self.session_api is not None}")
         
         # Store root and current paths
         self._tree_root_path = current_dir
@@ -887,7 +930,7 @@ class RemoteFileBrowser(FileBrowser):
                 self._expand_to_path(root_item, root_path, current_path)
             
         except (OSError, IOError, RuntimeError) as e:
-            ic(f"Error building tree: {e}")
+            pass
             self.tree_status_label.setText(f"Error: {e}")
     
     def _populate_tree_children(self, parent_item, path):

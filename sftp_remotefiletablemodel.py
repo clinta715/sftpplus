@@ -4,7 +4,6 @@ from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 import base64
 import queue
 import time
-from icecream import ic
 from PyQt6.QtGui import QFont, QColor
 from sftp_creds import get_credentials, create_random_integer
 from sftp_downloadworkerclass import create_response_queue, delete_response_queue
@@ -191,7 +190,7 @@ class RemoteFileTableModel(QAbstractTableModel):
                     modified_time = QDateTime.fromSecsSinceEpoch(item.st_mtime).toString(Qt.ISODate)
                     new_file_list.append((name, size, mode, modified_time, item))
                 except (Exception) as e:
-                    ic(f"Error parsing item: {e}")
+                    pass
                     continue
 
             self.file_list = new_file_list
@@ -217,9 +216,8 @@ class RemoteFileTableModel(QAbstractTableModel):
         try:
             ops = _get_sftp_operations(self.session_id)
             result_list = ops.list_attr(remote_path)
-            ic(f"sftp_listdir_attr: Success, got {len(result_list)} items")
             return result_list
         except Exception as e:
-            ic(f"sftp_listdir_attr: Error: {e}")
+            pass
             return []
 

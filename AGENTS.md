@@ -4,8 +4,9 @@ This document provides guidelines for AI coding agents working on this PyQt6-bas
 
 ## Features Overview
 
+- **Cross-platform**: Runs on Windows, macOS, and Linux with platform-specific paths
 - **Multi-tabbed interface**: Connect to multiple SFTP servers simultaneously
-- **SSH Terminal**: Interactive SSH shell sessions in addition to SFTP
+- **SSH Terminal**: Interactive SSH shell sessions in addition to SFTP (Unix only; Windows shows placeholder)
 - **Ephemeral connections**: Each operation creates a fresh connection for security
 - **Threaded operations**: Uploads/downloads run in background threads
 - **Dual-pane interface**: Local and remote file browsers side-by-side
@@ -14,7 +15,9 @@ This document provides guidelines for AI coding agents working on this PyQt6-bas
 - **Bookmarks**: Per-host directory bookmarks
 - **Tree view**: Directory tree panel (above or below list)
 - **Progress tracking**: Real-time progress indicators for file transfers
+- **Delete feedback**: Progress dialog and summary when deleting multiple items
 - **Queue management**: Pause/cancel transfer operations
+- **Transfer history**: Log of completed transfers with export capability
 - **Persistent preferences**: User settings saved to home directory
 - **Enhanced security**: Separate key storage, proper file permissions
 
@@ -33,11 +36,44 @@ The project now uses a clean session-based API for SFTP operations. This provide
 | `sftp_connection_pool.py` | Thread-safe SSH/SFTP connection pooling |
 | `sftp_session_executor.py` | Command executor using sessions and pool |
 | `sftp_operations.py` | High-level convenience functions |
-| `sftp_terminal_widget.py` | SSH terminal widget with ANSI code stripping |
+| `sftp_terminal_widget.py` | SSH terminal widget with ANSI code stripping (Unix only) |
+| `sftp_local_terminal_widget.py` | Local terminal widget (Unix only, shows placeholder on Windows) |
 | `sftp_preferences.py` | Persistent user preferences storage |
 | `sftp_preview_widget.py` | File preview side panel (text/images) |
 | `sftp_toolbar_customizer.py` | Toolbar customization dialog |
 | `sftp_qt_compat.py` | Qt6 enum compatibility layer |
+| `sftp_platform.py` | Cross-platform utilities (paths, permissions, shell detection) |
+| `sftp_logging.py` | Application logging to file |
+| `sftp_transfer_history.py` | Transfer history logging and export |
+| `sftp_drag_drop.py` | Drag and drop infrastructure |
+
+### Cross-Platform Support
+
+The application runs on Windows, macOS, and Linux. Use `sftp_platform.py` for platform-specific operations:
+
+```python
+from sftp_platform import (
+    is_windows, is_macos, is_linux,
+    get_config_directory, get_key_file_path,
+    secure_file_permissions, create_secure_directory,
+    supports_local_terminal, get_default_shell
+)
+
+# Check platform
+if is_windows():
+    # Windows-specific code
+
+# Get platform-appropriate paths
+config_dir = get_config_directory()  # %APPDATA%/sftp_client on Windows
+key_file = get_key_file_path()
+
+# Secure file permissions (no-op on Windows)
+secure_file_permissions('/path/to/file')
+
+# Check if local terminal is supported (False on Windows)
+if supports_local_terminal():
+    # Start local shell
+```
 
 ### Quick Start
 

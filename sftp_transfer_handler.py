@@ -6,7 +6,6 @@ from sftp_downloadworkerclass import add_sftp_job
 from sftp_preferences import get_preferences
 import os
 import stat
-from icecream import ic
 
 
 class TreePopulateWorker(QRunnable):
@@ -56,7 +55,6 @@ class TreePopulateWorker(QRunnable):
                 dirs.sort(key=lambda x: x.lower())
                 self.signals.finished.emit(self.path, dirs)
         except (OSError, IOError, RuntimeError) as e:
-            ic(f"TreePopulateWorker error: {sanitize_error_message(str(e))}")
             self.signals.error.emit(self.path, sanitize_error_message(str(e)))
 
 
@@ -113,7 +111,6 @@ class FileListWorker(QRunnable):
                 
                 self.signals.finished.emit(self.path, items)
         except (OSError, IOError, RuntimeError, Exception) as e:
-            ic(f"FileListWorker error: {sanitize_error_message(str(e))}")
             self.signals.error.emit(self.path, sanitize_error_message(str(e)))
 
 
@@ -151,7 +148,6 @@ class FilePreviewWorker(QRunnable):
                 finally:
                     ops.close()
         except (OSError, IOError, RuntimeError) as e:
-            ic(f"FilePreviewWorker error: {sanitize_error_message(str(e))}")
             self.signals.error.emit(self.remote_path, sanitize_error_message(str(e)))
 
 
@@ -259,14 +255,11 @@ class TraversalWorker(QRunnable):
                 if "connection" in error_msg.lower() or "dropped" in error_msg.lower() or "timeout" in error_msg.lower():
                     self.signals.error.emit(f"Connection error while scanning {source_dir}: {error_msg}")
                     self._cancelled = True
-                else:
-                    ic(f"Error listing remote dir {source_dir}: {error_msg}")
                 return
         else:
             try:
                 files = os.listdir(source_dir)
             except (OSError, IOError) as e:
-                ic(f"Error listing local dir {source_dir}: {sanitize_error_message(str(e))}")
                 return
             
         for entry in files:
@@ -306,12 +299,10 @@ class TraversalWorker(QRunnable):
                         break
                 
                 if self.prompt_result is None:
-                    ic(f"Prompt result is None, skipping {dest_path}")
                     continue
                     
                 action = self.prompt_result
                 self.prompt_mutex.unlock()
-                ic(f"Prompt result received: action={action} for {dest_path}")
                 
                 if action == "cancel":
                     return
@@ -327,9 +318,9 @@ class TraversalWorker(QRunnable):
                 elif action == "resume":
                     command = "resume"
                 elif action == "overwrite":
-                    ic(f"Overwrite selected for {dest_path}, proceeding with {command}")
+                    pass  # Proceed with normal upload/download
                 else:
-                    ic(f"Unknown action '{action}' for {dest_path}, treating as skip")
+                    continue  # Unknown action, skip
                     continue
                     
             if self.skip_all:
@@ -340,7 +331,6 @@ class TraversalWorker(QRunnable):
             
             try:
                 job_id = create_random_integer()
-                ic(f"Adding job: source={source_path}, dest={dest_path}, command={command}")
                 add_sftp_job(source_path, self.is_source_remote, dest_path, self.is_dest_remote,
                             self.creds.get('hostname', ''),
                             self.creds.get('username', ''),
