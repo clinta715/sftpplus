@@ -1,6 +1,6 @@
 # SFTP Client - Runtime Dependencies
 # Install with: pip install -r requirements.txt
 
-PyQt6>=6.5.0
+PySide6>=6.5.0
 paramiko>=3.0.0
 cryptography>=41.0.0

@@ -2,15 +2,15 @@
 SSH Terminal Widget
 
 A simple terminal widget for SSH connections using QPlainTextEdit and paramiko.
-No additional dependencies beyond PyQt6 and paramiko.
+No additional dependencies beyond PySide6 and paramiko.
 """
 import threading
 import os
 import re
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QMessageBox
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QMessageBox
 from sftp_qt_compat import Qt
-from PyQt6.QtCore import pyqtSignal, QObject, QEvent
-from PyQt6.QtGui import QTextCursor
+from PySide6.QtCore import Signal, QObject, QEvent
+from PySide6.QtGui import QTextCursor
 import paramiko
 
 from sftp_creds import sanitize_error_message
@@ -43,9 +43,9 @@ class _TerminalOutputEvent(QEvent):
 
 class TerminalSignals(QObject):
     """Signals for terminal events"""
-    disconnected = pyqtSignal()
-    connected = pyqtSignal()
-    error = pyqtSignal(str)
+    disconnected = Signal()
+    connected = Signal()
+    error = Signal(str)
 
 
 class SSHTerminalWidget(QWidget):
@@ -273,7 +273,7 @@ class SSHTerminalWidget(QWidget):
                 pass
         
         try:
-            from PyQt6.QtWidgets import QApplication
+            from PySide6.QtWidgets import QApplication
             QApplication.instance().postEvent(self, _TerminalOutputEvent(append_text))
         except (RuntimeError, AttributeError) as e:
             pass

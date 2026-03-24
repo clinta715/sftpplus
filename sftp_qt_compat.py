@@ -1,11 +1,13 @@
 """
-PyQt6 Compatibility Layer
+PySide6 Compatibility Layer
 
-Provides backward-compatible enum access for code written for PyQt5.
+Provides consistent enum access for Qt6/PySide6.
+This layer exists for backward compatibility with code that uses our
+custom Qt enum names.
 """
-from PyQt6 import QtCore
-from PyQt6.QtWidgets import QApplication, QLineEdit, QComboBox, QCompleter, QTableWidget, QHeaderView, QTableView, QFrame, QSizePolicy, QMessageBox, QTextBrowser
-from PyQt6.QtCore import Qt
+from PySide6 import QtCore
+from PySide6.QtWidgets import QApplication, QLineEdit, QComboBox, QCompleter, QTableWidget, QHeaderView, QTableView, QFrame, QSizePolicy, QMessageBox, QTextBrowser
+from PySide6.QtCore import Qt
 
 # Create backward-compatible Qt namespace
 class QtCompat:
@@ -32,7 +34,7 @@ class QtCompat:
     AlignRight = QtCore.Qt.AlignmentFlag.AlignRight
     AlignCenter = QtCore.Qt.AlignmentFlag.AlignCenter
     
-    # ScrollBarPolicy - use Qt.ScrollBarPolicy enum for compatibility
+    # ScrollBarPolicy
     ScrollBarAsNeeded = Qt.ScrollBarPolicy.ScrollBarAsNeeded
     ScrollBarAlwaysOn = Qt.ScrollBarPolicy.ScrollBarAlwaysOn
     

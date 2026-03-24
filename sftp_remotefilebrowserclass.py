@@ -1,6 +1,6 @@
 from sftp_filebrowserclass import FileBrowser
-from PyQt6.QtWidgets import QTableView, QFileDialog, QMessageBox, QInputDialog, QHeaderView, QMenu, QProgressDialog, QApplication
-from PyQt6.QtCore import QModelIndex, QTimer, QThreadPool
+from PySide6.QtWidgets import QTableView, QFileDialog, QMessageBox, QInputDialog, QHeaderView, QMenu, QProgressDialog, QApplication
+from PySide6.QtCore import QModelIndex, QTimer, QThreadPool
 import os
 import stat
 import time
@@ -817,7 +817,7 @@ class RemoteFileBrowser(FileBrowser):
         Uses QThreadPool for thread-safe background execution with proper prompt handling.
         """
         from sftp_transfer_handler import TraversalWorker
-        from PyQt6.QtCore import QThreadPool
+        from PySide6.QtCore import QThreadPool
         from sftp_qt_compat import Qt
         
         
@@ -887,7 +887,7 @@ class RemoteFileBrowser(FileBrowser):
 
     def populate_tree_view(self):
         """Build tree starting from current remote directory as root"""
-        from PyQt6.QtWidgets import QTreeWidgetItem
+        from PySide6.QtWidgets import QTreeWidgetItem
         
         creds = get_credentials(self.session_id)
         current_dir = creds.get('current_remote_directory', '/')
@@ -906,7 +906,7 @@ class RemoteFileBrowser(FileBrowser):
     
     def _build_tree_from_root(self, root_path, current_path):
         """Build tree starting from root_path, highlighting current_path"""
-        from PyQt6.QtWidgets import QTreeWidgetItem
+        from PySide6.QtWidgets import QTreeWidgetItem
         
         self.tree_widget.clear()
         
@@ -935,8 +935,8 @@ class RemoteFileBrowser(FileBrowser):
     
     def _populate_tree_children(self, parent_item, path):
         """Populate tree with subdirectories of the given remote path (lazy loading) using paramiko"""
-        from PyQt6.QtWidgets import QTreeWidgetItem
-        from PyQt6.QtCore import QThreadPool
+        from PySide6.QtWidgets import QTreeWidgetItem
+        from PySide6.QtCore import QThreadPool
         
         def on_finished(pop_path, directories):
             self.tree_status_label.setText(f"✅ {pop_path} - {len(directories)} subdirectories")
@@ -1095,7 +1095,7 @@ class RemoteFileBrowser(FileBrowser):
 
     def tree_delete_selected(self):
         """Delete selected remote directory"""
-        from PyQt6.QtWidgets import QMessageBox
+        from PySide6.QtWidgets import QMessageBox
 
         # Get selected item
         selected_items = self.tree_widget.selectedItems()
@@ -1157,7 +1157,7 @@ class RemoteFileBrowser(FileBrowser):
     
     def tree_context_menu_handler(self, pos):
         """Handle context menu on tree widget"""
-        from PyQt6.QtWidgets import QMenu, QInputDialog
+        from PySide6.QtWidgets import QMenu, QInputDialog
         
         item = self.tree_widget.itemAt(pos)
         if not item:

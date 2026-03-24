@@ -4,7 +4,7 @@
 # Usage: ./build-nuitka.sh [platform]
 #   platform: macos, windows, linux (default: current platform)
 #
-# NOTE: PyQt6 support in Nuitka is limited on macOS.
+# NOTE: PySide6 support in Nuitka is limited on macOS.
 # For macOS builds, consider using PyInstaller instead (./build.sh macos)
 
 set -e
@@ -34,7 +34,7 @@ fi
 case "$PLATFORM" in
     macos)
         echo ""
-        echo "WARNING: PyQt6 support in Nuitka is limited on macOS."
+        echo "WARNING: PySide6 support in Nuitka is limited on macOS."
         echo "Consider using PyInstaller for macOS builds instead:"
         echo "  ./build.sh macos"
         echo ""
@@ -80,10 +80,10 @@ mkdir -p dist
 NUITKA_OPTS=(
     --assume-yes-for-downloads
     --follow-imports
-    --include-module=PyQt6.QtCore
-    --include-module=PyQt6.QtGui
-    --include-module=PyQt6.QtWidgets
-    --include-module=PyQt6.sip
+    --include-module=PySide6.QtCore
+    --include-module=PySide6.QtGui
+    --include-module=PySide6.QtWidgets
+    --include-module=PySide6.sip
     --include-module=paramiko
     --include-module=cryptography
     --include-module=cryptography.fernet
@@ -138,7 +138,7 @@ done
 case "$PLATFORM" in
     macos)
         echo "Building macOS .app bundle with Nuitka..."
-        echo "Note: This may fail due to PyQt6 limitations. Use ./build.sh macos if it does."
+        echo "Note: This may fail due to PySide6 limitations. Use ./build.sh macos if it does."
         echo ""
         
         # Try build, fallback to PyInstaller recommendation on failure
@@ -166,7 +166,7 @@ case "$PLATFORM" in
             echo "macOS .app bundle: dist/SFTP Client.app/"
         else
             echo ""
-            echo "Nuitka build failed (PyQt6 on macOS has limited support)."
+            echo "Nuitka build failed (PySide6 on macOS has limited support)."
             echo "Falling back to PyInstaller..."
             echo ""
             ./build.sh macos

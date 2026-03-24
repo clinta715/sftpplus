@@ -1,13 +1,13 @@
 import os
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QMessageBox, QHeaderView,
     QLineEdit, QLabel, QFormLayout, QGroupBox, QSplitter, QFrame,
     QCheckBox, QComboBox
 )
-from PyQt6.QtGui import QIntValidator
+from PySide6.QtGui import QIntValidator
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
-from PyQt6.QtCore import pyqtSignal
+from PySide6.QtCore import Signal
 
 from sftp_hostdataeditor import save_connection_data, load_connection_data
 from sftp_theme import CONNECT_BUTTON_STYLE, BUTTON_STYLE_DARK
@@ -25,8 +25,8 @@ class ConnectionsWidget(QWidget):
         open_local_terminal: Emitted when user wants to open local terminal
     """
     
-    connect_requested = pyqtSignal(dict)
-    open_local_terminal = pyqtSignal()
+    connect_requested = Signal(dict)
+    open_local_terminal = Signal()
     
     def __init__(self, parent=None):
         super().__init__(parent)

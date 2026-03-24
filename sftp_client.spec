@@ -17,17 +17,17 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 
-# Collect all PyQt6 data files (plugins, translations, etc.)
+# Collect all PySide6 data files (plugins, translations, etc.)
 datas = []
-datas += collect_data_files('PyQt6')
+datas += collect_data_files('PySide6')
 datas += collect_data_files('paramiko')
 
 # Hidden imports that PyInstaller might miss
 hiddenimports = [
-    'PyQt6.QtCore',
-    'PyQt6.QtGui',
-    'PyQt6.QtWidgets',
-    'PyQt6.sip',
+    'PySide6.QtCore',
+    'PySide6.QtGui',
+    'PySide6.QtWidgets',
+    'PySide6.sip',
     'paramiko',
     'cryptography',
     'cryptography.fernet',

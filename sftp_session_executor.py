@@ -14,7 +14,7 @@ import os
 import errno
 import paramiko
 
-from PyQt6.QtCore import pyqtSignal, QObject
+from PySide6.QtCore import Signal, QObject
 
 from sftp_session import SessionManager, SFTPSession, SFTPCredentials, get_session_manager
 from sftp_commands import (
@@ -37,9 +37,9 @@ class CommandExecutor(QObject):
     Each command is executed in a background thread with progress tracking.
     """
     
-    progress = pyqtSignal(str, int, float, float)
-    message = pyqtSignal(str, str)
-    finished = pyqtSignal(str)
+    progress = Signal(str, int, float, float)
+    message = Signal(str, str)
+    finished = Signal(str)
     
     def __init__(self, session: SFTPSession):
         super().__init__()
@@ -407,9 +407,9 @@ class SFTPSessionAPI(QObject):
         api.download('/remote/file.txt', '/local/file.txt')
     """
     
-    progress = pyqtSignal(str, int, float, float)
-    message = pyqtSignal(str, str)
-    finished = pyqtSignal(str)
+    progress = Signal(str, int, float, float)
+    message = Signal(str, str)
+    finished = Signal(str)
     
     def __init__(self, session: SFTPSession):
         super().__init__()

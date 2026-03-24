@@ -1,7 +1,7 @@
 """
 SFTP Client Package
 
-A PyQt6-based SFTP client application with:
+A PySide6-based SFTP client application with:
 - Multi-tabbed interface for multiple SFTP connections
 - SSH Terminal support alongside SFTP file transfers
 - File preview panel for text and image files

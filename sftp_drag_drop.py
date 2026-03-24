@@ -5,9 +5,9 @@ Provides drag and drop functionality for file transfers between
 local and remote file browsers.
 """
 import os
-from PyQt6.QtCore import Qt, QMimeData, QByteArray, QUrl
-from PyQt6.QtGui import QDrag
-from PyQt6.QtWidgets import QTableView
+from PySide6.QtCore import Qt, QMimeData, QByteArray, QUrl
+from PySide6.QtGui import QDrag
+from PySide6.QtWidgets import QTableView
 import logging
 
 logger = logging.getLogger('sftp.dragdrop')

@@ -1,7 +1,7 @@
 from sftp_browserclass import Browser
 from sftp_filetablemodel import FileTableModel
 from sftp_sortfiltermodel import DirectoryFirstSortProxyModel
-from PyQt6.QtWidgets import QMessageBox, QHeaderView, QTableView, QApplication, QProgressDialog
+from PySide6.QtWidgets import QMessageBox, QHeaderView, QTableView, QApplication, QProgressDialog
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 import os 
 import shutil
@@ -225,7 +225,7 @@ class FileBrowser(Browser):
 
     def populate_tree_view(self):
         """Build tree starting from current directory as root"""
-        from PyQt6.QtWidgets import QTreeWidgetItem
+        from PySide6.QtWidgets import QTreeWidgetItem
         
         creds = get_credentials(self.session_id)
         current_dir = creds.get('current_local_directory', os.getcwd())
@@ -243,7 +243,7 @@ class FileBrowser(Browser):
     
     def _build_tree_from_root(self, root_path, current_path):
         """Build tree starting from root_path, highlighting current_path"""
-        from PyQt6.QtWidgets import QTreeWidgetItem
+        from PySide6.QtWidgets import QTreeWidgetItem
         
         self.tree_widget.clear()
         
@@ -271,7 +271,7 @@ class FileBrowser(Browser):
     
     def _populate_tree_children(self, parent_item, path):
         """Populate tree with subdirectories of the given path (lazy loading)"""
-        from PyQt6.QtWidgets import QTreeWidgetItem, QApplication
+        from PySide6.QtWidgets import QTreeWidgetItem, QApplication
         
         item_count = 0
         
@@ -553,7 +553,7 @@ class FileBrowser(Browser):
 
     def tree_delete_selected(self):
         """Delete selected local directory"""
-        from PyQt6.QtWidgets import QMessageBox
+        from PySide6.QtWidgets import QMessageBox
         import shutil
 
         # Get selected item
@@ -617,7 +617,7 @@ class FileBrowser(Browser):
     
     def tree_context_menu_handler(self, pos):
         """Handle context menu on tree widget"""
-        from PyQt6.QtWidgets import QMenu
+        from PySide6.QtWidgets import QMenu
         
         item = self.tree_widget.itemAt(pos)
         if not item:

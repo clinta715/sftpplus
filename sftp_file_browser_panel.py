@@ -1,9 +1,9 @@
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, 
     QPushButton, QToolButton, QLabel, QFrame
 )
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
-from PyQt6.QtCore import pyqtSignal
+from PySide6.QtCore import Signal
 
 from sftp_filebrowserclass import FileBrowser
 from sftp_remotefilebrowserclass import RemoteFileBrowser
@@ -27,8 +27,8 @@ class FileBrowserPanel(QWidget):
         transfer_started: Emitted when a transfer is initiated
     """
     
-    message = pyqtSignal(str)
-    transfer_started = pyqtSignal(str)  # Emits transfer_id
+    message = Signal(str)
+    transfer_started = Signal(str)  # Emits transfer_id
     
     def __init__(self, session_id, parent=None, auto_initialize=True):
         super().__init__(parent)
@@ -170,7 +170,7 @@ class FileBrowserPanel(QWidget):
     
     def eventFilter(self, obj, event):
         """Track which browser table viewport was last clicked"""
-        from PyQt6.QtCore import QEvent
+        from PySide6.QtCore import QEvent
         if event.type() == QEvent.Type.MouseButtonPress:
             if obj == self.left_browser.table.viewport():
                 self._last_active_browser = self.left_browser

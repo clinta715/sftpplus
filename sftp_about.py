@@ -4,9 +4,9 @@ About Dialog for SFTP Client
 Displays application credits and acknowledgments.
 """
 
-from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea, QWidget
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
 
 from sftp_theme import DARK_THEME, BUTTON_STYLE_DARK
 

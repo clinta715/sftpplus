@@ -16,9 +16,9 @@ from sftp_filebrowserclass import FileBrowser
 from sftp_creds import get_credentials, set_credentials, del_credentials, create_random_integer, clear_all_credentials, get_home_directory
 from sftp_session import get_session_manager
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
-from PyQt6.QtWidgets import QInputDialog, QFileDialog, QLabel, QToolButton, QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QTextEdit, QCompleter, QComboBox, QSpinBox, QTabWidget, QMessageBox, QCheckBox, QMenu
-from PyQt6.QtCore import pyqtSignal, QObject, QCoreApplication, QTimer, QEvent, QMutexLocker
-from PyQt6.QtGui import QKeySequence, QShortcut
+from PySide6.QtWidgets import QInputDialog, QFileDialog, QLabel, QToolButton, QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QTextEdit, QCompleter, QComboBox, QSpinBox, QTabWidget, QMessageBox, QCheckBox, QMenu
+from PySide6.QtCore import Signal, QObject, QCoreApplication, QTimer, QEvent, QMutexLocker
+from PySide6.QtGui import QKeySequence, QShortcut
 import paramiko
 
 from sftp_preferences import get_preferences
@@ -27,7 +27,7 @@ from sftp_about import show_about
 from sftp_logging import setup_logging, get_logger
 
 class CustomComboBox(QComboBox):
-    editingFinished = pyqtSignal()
+    editingFinished = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -38,10 +38,10 @@ class CustomComboBox(QComboBox):
         self.editingFinished.emit()
 
 class WorkerSignals(QObject):
-    error = pyqtSignal(int, str)
+    error = Signal(int, str)
 
 class MainWindow(QMainWindow):  # Inherits from QMainWindow
-    message_signal = pyqtSignal(str)
+    message_signal = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -203,7 +203,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         return sep
 
     def _copy_current_path(self, event):
-        from PyQt6.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
         current_widget = self.tab_widget.currentWidget()
         path = ""
         if hasattr(current_widget, 'right_browser') and current_widget.right_browser:
@@ -1029,7 +1029,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
 
     def _toolbar_rename(self):
         """Handle Rename button click - works for both local and remote browsers"""
-        from PyQt6.QtWidgets import QInputDialog
+        from PySide6.QtWidgets import QInputDialog
         browser = self._get_active_browser()
         if browser:
             current_browser = browser.table

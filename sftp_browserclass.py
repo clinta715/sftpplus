@@ -1,5 +1,5 @@
-from PyQt6.QtWidgets import QTableView, QApplication, QWidget, QVBoxLayout, QLabel, QFileDialog, QMessageBox, QInputDialog, QMenu, QHeaderView, QProgressBar, QSizePolicy, QTreeWidget, QTreeWidgetItem, QPushButton, QHBoxLayout, QProgressDialog, QLineEdit, QToolButton
-from PyQt6.QtCore import pyqtSignal, QTimer, QEventLoop, QModelIndex, QThreadPool
+from PySide6.QtWidgets import QTableView, QApplication, QWidget, QVBoxLayout, QLabel, QFileDialog, QMessageBox, QInputDialog, QMenu, QHeaderView, QProgressBar, QSizePolicy, QTreeWidget, QTreeWidgetItem, QPushButton, QHBoxLayout, QProgressDialog, QLineEdit, QToolButton
+from PySide6.QtCore import Signal, QTimer, QEventLoop, QModelIndex, QThreadPool
 from sftp_qt_compat import Qt
 import stat
 import os
@@ -95,10 +95,10 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         return self._session_api
 
     # Define a signal for sending messages to the console
-    message_signal = pyqtSignal(str)
+    message_signal = Signal(str)
     
     # Signal to indicate a transfer has started
-    transfer_started = pyqtSignal(str)  # Emits transfer_id when transfer starts
+    transfer_started = Signal(str)  # Emits transfer_id when transfer starts
 
     def init_ui(self):
         self.layout = QVBoxLayout()
@@ -493,7 +493,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
 
     def rename_selected(self):
         """Rename the currently selected file or directory"""
-        from PyQt6.QtWidgets import QInputDialog
+        from PySide6.QtWidgets import QInputDialog
         
         current_index = self.table.currentIndex()
         if not current_index.isValid():
@@ -1562,7 +1562,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         Uses QThreadPool for thread-safe background execution with proper prompt handling.
         """
         from sftp_transfer_handler import TraversalWorker
-        from PyQt6.QtCore import QThreadPool
+        from PySide6.QtCore import QThreadPool
         from sftp_qt_compat import Qt
         
         worker = TraversalWorker(

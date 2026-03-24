@@ -16,7 +16,7 @@ sys.path.insert(0, str(project_root))
 @pytest.fixture(scope="session")
 def qapp():
     """Create QApplication instance for the test session."""
-    from PyQt6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
     app = QApplication.instance()
     if app is None:
         app = QApplication(['-platform', 'offscreen'])
@@ -142,7 +142,7 @@ def temp_local_dir(tmp_path):
 def mock_qmessagebox():
     """Mock QMessageBox to avoid actual dialogs."""
     from unittest.mock import patch
-    with patch('PyQt6.QtWidgets.QMessageBox.question') as mock:
+    with patch('PySide6.QtWidgets.QMessageBox.question') as mock:
         mock.return_value = Mock()  # Return value will be set in tests
         yield mock
 
@@ -151,6 +151,6 @@ def mock_qmessagebox():
 def mock_qinputdialog():
     """Mock QInputDialog to avoid actual dialogs."""
     from unittest.mock import patch
-    with patch('PyQt6.QtWidgets.QInputDialog.getText') as mock:
+    with patch('PySide6.QtWidgets.QInputDialog.getText') as mock:
         mock.return_value = ('new_name', True)
         yield mock

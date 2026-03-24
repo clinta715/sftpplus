@@ -1,8 +1,8 @@
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                             QListWidget, QTextEdit, QProgressBar, QSizePolicy,
                             QLabel, QListWidgetItem, QScrollArea, QFrame, QCheckBox)
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
-from PyQt6.QtCore import QThreadPool, QTimer, QMutex, QMutexLocker, pyqtSignal, pyqtSlot
+from PySide6.QtCore import QThreadPool, QTimer, QMutex, QMutexLocker, Signal, Slot
 import inspect
 import os
 import json
@@ -29,7 +29,7 @@ class TransferPanelHeader(QWidget):
     Collapsible header for the transfer panel.
     Shows transfer count and allows collapsing the panel.
     """
-    toggle_panel = pyqtSignal()  # Emitted when header is clicked to toggle collapse
+    toggle_panel = Signal()  # Emitted when header is clicked to toggle collapse
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -117,10 +117,10 @@ class TransferQueueWidget(QWidget):
     """
     
     # Signals for transfer events
-    signal_transfer_started = pyqtSignal(int, str)  # (count, message)
-    signal_transfer_completed = pyqtSignal(int, str)  # (count, message)
-    signal_transfer_error = pyqtSignal(int, str)  # (count, message)
-    signal_transfer_progress = pyqtSignal(int, int, float, float, int, int)  # (transfer_id, percent, speed_bps, eta_sec, bytes_done, bytes_total)
+    signal_transfer_started = Signal(int, str)  # (count, message)
+    signal_transfer_completed = Signal(int, str)  # (count, message)
+    signal_transfer_error = Signal(int, str)  # (count, message)
+    signal_transfer_progress = Signal(int, int, float, float, int, int)  # (transfer_id, percent, speed_bps, eta_sec, bytes_done, bytes_total)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -427,7 +427,7 @@ class TransferQueueWidget(QWidget):
             self._refresh_debounce_timer.stop()
         
         # Schedule a refresh after a short delay to batch multiple rapid updates
-        from PyQt6.QtCore import QTimer
+        from PySide6.QtCore import QTimer
         self._refresh_debounce_timer = QTimer()
         self._refresh_debounce_timer.setSingleShot(True)
         self._refresh_debounce_timer.timeout.connect(self._do_notify_observees)

@@ -1,7 +1,7 @@
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtCore import QAbstractTableModel, QModelIndex
+from PySide6.QtWidgets import QApplication
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
-from PyQt6.QtGui import QFont, QColor
+from PySide6.QtGui import QFont, QColor
 from pathlib import Path
 import os
 import datetime

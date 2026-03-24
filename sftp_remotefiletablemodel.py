@@ -1,10 +1,10 @@
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QTimer, QDateTime, QEventLoop, pyqtSignal, QThreadPool
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QTimer, QDateTime, QEventLoop, Signal, QThreadPool
+from PySide6.QtWidgets import QApplication
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 import base64
 import queue
 import time
-from PyQt6.QtGui import QFont, QColor
+from PySide6.QtGui import QFont, QColor
 from sftp_creds import get_credentials, create_random_integer
 from sftp_downloadworkerclass import create_response_queue, delete_response_queue
 from sftp_operations import SFTPOperations
@@ -51,9 +51,9 @@ def _safe_decode(s, encoding='utf-8', errors='replace'):
 
 class RemoteFileTableModel(QAbstractTableModel):
     # Signals for status updates and loading state
-    status_message = pyqtSignal(str)
-    loading_started = pyqtSignal()
-    loading_finished = pyqtSignal()
+    status_message = Signal(str)
+    loading_started = Signal()
+    loading_finished = Signal()
 
     def __init__(self, session_id, parent=None):
         super().__init__(parent)

@@ -1,4 +1,4 @@
-from PyQt6.QtCore import QRunnable, QObject, pyqtSignal
+from PySide6.QtCore import QRunnable, QObject, Signal
 import enum
 import queue
 import paramiko
@@ -25,9 +25,9 @@ def strip_decorative_chars(filename):
 
 
 class WorkerSignals(QObject):
-    progress = pyqtSignal(int, int, float, float, int, int)   # transfer_id, percent, speed_bytes_per_sec, eta_seconds, bytes_done, bytes_total
-    finished = pyqtSignal(int)
-    message  = pyqtSignal(int, str)
+    progress = Signal(int, int, float, float, int, int)   # transfer_id, percent, speed_bytes_per_sec, eta_seconds, bytes_done, bytes_total
+    finished = Signal(int)
+    message  = Signal(int, str)
 
 response_queues = {}
 sftp_queue = queue.Queue()
@@ -67,7 +67,7 @@ class Transfer:
         self.eta_seconds = 0
 
 class transferSignals(QObject):
-    showhide = pyqtSignal()
+    showhide = Signal()
 
 class QueueItem:
     def __init__(self, name, job_id):

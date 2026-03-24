@@ -1,10 +1,10 @@
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, 
     QPushButton, QLabel, QFileDialog, QMessageBox
 )
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
-from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtGui import QFont, QTextCursor
+from PySide6.QtCore import Signal
+from PySide6.QtGui import QFont, QTextCursor
 
 from sftp_theme import DARK_THEME, BUTTON_STYLE_DARK
 
@@ -35,7 +35,7 @@ def is_text_file(file_path, sample_size=8192):
 class TextViewerWindow(QWidget):
     """A simple text viewer window for viewing/editing text files."""
     
-    file_saved = pyqtSignal(str)
+    file_saved = Signal(str)
     
     def __init__(self, file_path=None, content=None, remote_path=None, session_api=None, parent=None):
         super().__init__(parent)

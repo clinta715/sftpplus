@@ -12,9 +12,9 @@ import os
 import sys
 import platform
 import re
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QLabel
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QTextCursor
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QLabel
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont, QTextCursor
 
 from sftp_platform import is_windows, supports_local_terminal, get_default_shell
 
@@ -211,7 +211,7 @@ class LocalTerminalWidget(QWidget):
                 except (OSError, termios.error):
                     pass
             
-            from PyQt6.QtCore import QSocketNotifier
+            from PySide6.QtCore import QSocketNotifier
             self._notifier = QSocketNotifier(self.master_fd, QSocketNotifier.Type.Read)
             self._notifier.activated.connect(self._on_output)
             
@@ -294,7 +294,7 @@ class LocalTerminalWidget(QWidget):
         if not supports_local_terminal() or UNIX_MODULES is None:
             return super().eventFilter(obj, event)
             
-        from PyQt6.QtCore import QEvent
+        from PySide6.QtCore import QEvent
         if obj == self.terminal and event.type() == QEvent.Type.KeyPress:
             return self._handle_key_press(event)
         return super().eventFilter(obj, event)

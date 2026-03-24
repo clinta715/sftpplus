@@ -8,8 +8,8 @@ Modular functionality for the Browser class, split into logical groups:
 - DragDropMixin: Drag and drop support for file transfers
 """
 
-from PyQt6.QtWidgets import QMenu, QInputDialog, QMessageBox
-from PyQt6.QtCore import Qt
+from PySide6.QtWidgets import QMenu, QInputDialog, QMessageBox
+from PySide6.QtCore import Qt
 import os
 import logging
 import threading

@@ -1,9 +1,9 @@
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextBrowser,
     QToolButton, QScrollArea, QSizePolicy
 )
-from PyQt6.QtCore import QSize, QThreadPool
-from PyQt6.QtGui import QPixmap
+from PySide6.QtCore import QSize, QThreadPool
+from PySide6.QtGui import QPixmap
 from sftp_qt_compat import Qt
 import os
 import tempfile
@@ -171,7 +171,7 @@ class FilePreviewWidget(QWidget):
         self.text_preview.setVisible(True)
 
     def _on_close(self):
-        from PyQt6.QtWidgets import QWidget
+        from PySide6.QtWidgets import QWidget
         parent = self.parent()
         while parent:
             if hasattr(parent, 'toggle_preview'):

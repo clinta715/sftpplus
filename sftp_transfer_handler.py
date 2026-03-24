@@ -1,5 +1,5 @@
-from PyQt6.QtWidgets import QInputDialog, QMessageBox, QApplication
-from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool, QMutex, QWaitCondition
+from PySide6.QtWidgets import QInputDialog, QMessageBox, QApplication
+from PySide6.QtCore import QObject, Signal, QRunnable, QThreadPool, QMutex, QWaitCondition
 from sftp_qt_compat import Qt
 from sftp_creds import get_credentials, create_random_integer, sanitize_error_message
 from sftp_downloadworkerclass import add_sftp_job
@@ -12,8 +12,8 @@ class TreePopulateWorker(QRunnable):
     """Worker that populates tree children in background"""
     
     class Signals(QObject):
-        finished = pyqtSignal(object, list)  # (path, directories)
-        error = pyqtSignal(str, str)  # (path, error_message)
+        finished = Signal(object, list)  # (path, directories)
+        error = Signal(str, str)  # (path, error_message)
     
     def __init__(self, session_id, path, is_remote=True):
         super().__init__()
@@ -62,8 +62,8 @@ class FileListWorker(QRunnable):
     """Worker that fetches file list with attributes in background"""
     
     class Signals(QObject):
-        finished = pyqtSignal(str, list)  # (path, items)
-        error = pyqtSignal(str, str)     # (path, error_message)
+        finished = Signal(str, list)  # (path, items)
+        error = Signal(str, str)     # (path, error_message)
     
     def __init__(self, session_id, path, is_remote=True):
         super().__init__()
@@ -118,8 +118,8 @@ class FilePreviewWorker(QRunnable):
     """Worker that downloads file for preview in background"""
     
     class Signals(QObject):
-        finished = pyqtSignal(str, str)  # (temp_path, original_path)
-        error = pyqtSignal(str, str)  # (original_path, error_message)
+        finished = Signal(str, str)  # (temp_path, original_path)
+        error = Signal(str, str)  # (original_path, error_message)
     
     def __init__(self, session_id, remote_path, local_temp_path, is_remote=True):
         super().__init__()
@@ -153,11 +153,11 @@ class FilePreviewWorker(QRunnable):
 
 class TraversalSignals(QObject):
     """Signals for the directory traversal worker"""
-    status = pyqtSignal(str)
-    job_added = pyqtSignal(str)
-    prompt_overwrite = pyqtSignal(str)
-    finished = pyqtSignal()
-    error = pyqtSignal(str)
+    status = Signal(str)
+    job_added = Signal(str)
+    prompt_overwrite = Signal(str)
+    finished = Signal()
+    error = Signal(str)
 
 
 class TraversalWorker(QRunnable):
