@@ -23,6 +23,7 @@ import paramiko
 
 from sftp_preferences import get_preferences
 from sftp_toolbar_customizer import customize_toolbar
+from sftp_about import show_about
 from sftp_logging import setup_logging, get_logger
 
 class CustomComboBox(QComboBox):
@@ -285,6 +286,10 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.edit_button.setStyleSheet(BUTTON_STYLE_DARK)
         self.clear_queue_button = QPushButton("Clear Queue")
         self.clear_queue_button.setStyleSheet(BUTTON_STYLE_DARK)
+        self.about_button = QPushButton("ℹ About")
+        self.about_button.setToolTip("About SFTP Client")
+        self.about_button.setStyleSheet(BUTTON_STYLE_DARK)
+        self.about_button.clicked.connect(self.show_about_dialog)
         
         prefs = get_preferences()
         self.confirm_exit_checkbox = QCheckBox("Confirm exit")
@@ -473,6 +478,8 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.button_layout.addWidget(self.clear_queue_button)
         self.button_layout.addWidget(self.confirm_exit_checkbox)
         self.button_layout.addWidget(self.edit_button)
+        self.button_layout.addStretch()
+        self.button_layout.addWidget(self.about_button)
         
         self._toolbar_container.setLayout(self.button_layout)
         self._toolbar_container.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -482,6 +489,11 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.connect_button.clicked.connect(self.connect_button_pressed)
         self.terminal_button.clicked.connect(self.terminal_button_pressed)
         self.clear_queue_button.clicked.connect(clear_sftp_queue)
+        self.about_button.clicked.connect(self.show_about_dialog)
+    
+    def show_about_dialog(self):
+        """Show the About dialog"""
+        show_about(self)
     
     def _show_toolbar_context_menu(self, pos):
         menu = QMenu(self)
