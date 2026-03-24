@@ -163,6 +163,49 @@ class TransferQueueWidget(QWidget):
         content_layout.setSpacing(4)
         content_layout.setContentsMargins(8, 8, 8, 8)
         
+        # Overall progress section (at top)
+        self.overall_progress_widget = QWidget()
+        overall_layout = QVBoxLayout()
+        overall_layout.setContentsMargins(0, 0, 0, 4)
+        overall_layout.setSpacing(2)
+        
+        # Overall progress label
+        self.overall_progress_label = QLabel("Overall: No transfers")
+        self.overall_progress_label.setStyleSheet(f"""
+            QLabel {{
+                color: {DARK_THEME['text_primary']};
+                font-size: 11px;
+                font-weight: 600;
+            }}
+        """)
+        overall_layout.addWidget(self.overall_progress_label)
+        
+        # Overall progress bar
+        self.overall_progress_bar = QProgressBar()
+        self.overall_progress_bar.setRange(0, 100)
+        self.overall_progress_bar.setValue(0)
+        self.overall_progress_bar.setFixedHeight(12)
+        self.overall_progress_bar.setTextVisible(True)
+        self.overall_progress_bar.setFormat("%p%")
+        self.overall_progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                background-color: #2a2a2a;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                text-align: center;
+                font-size: 10px;
+                color: #ffffff;
+            }}
+            QProgressBar::chunk {{
+                background-color: {DARK_THEME['accent']};
+                border-radius: 3px;
+            }}
+        """)
+        overall_layout.addWidget(self.overall_progress_bar)
+        
+        self.overall_progress_widget.setLayout(overall_layout)
+        content_layout.addWidget(self.overall_progress_widget)
+        
         # Transfer list widget (container for transfer items)
         self.transfer_list = QListWidget()
         self.transfer_list.setStyleSheet(LIST_WIDGET_STYLE_DARK)
@@ -428,8 +471,85 @@ class TransferQueueWidget(QWidget):
         except (AttributeError, RuntimeError) as e:
             pass
     def update_overall_progress(self):
-        """Update the overall progress - no longer displayed in compact UI"""
-        pass
+        """Update the overall progress bar based on all active transfers"""
+        try:
+            active_transfers = [t for t in self.transfers if t.active]
+            
+            if not active_transfers:
+                self.overall_progress_bar.setValue(0)
+                self.overall_progress_label.setText("No active transfers")
+                self.overall_progress_widget.setVisible(False)
+                self.header.set_active_count(0)
+                return
+            
+            # Show overall progress widget when there are active transfers
+            self.overall_progress_widget.setVisible(True)
+            self.header.set_active_count(len(active_transfers))
+            
+            # Calculate total progress
+            total_bytes_done = 0
+            total_bytes = 0
+            total_speed = 0.0
+            
+            for transfer in active_transfers:
+                # Get bytes from transfer object
+                done = getattr(transfer, 'bytes_done', 0) or 0
+                total = getattr(transfer, 'bytes_total', 0) or 0
+                speed = getattr(transfer, 'speed_bps', 0.0) or 0.0
+                
+                total_bytes_done += done
+                total_bytes += total
+                total_speed += speed
+            
+            # Calculate overall percentage
+            if total_bytes > 0:
+                overall_percent = int((total_bytes_done / total_bytes) * 100)
+            else:
+                overall_percent = 0
+            
+            # Update progress bar
+            self.overall_progress_bar.setValue(overall_percent)
+            
+            # Format speed
+            if total_speed > 0:
+                if total_speed >= 1024 * 1024:
+                    speed_str = f"{total_speed / (1024 * 1024):.1f} MB/s"
+                elif total_speed >= 1024:
+                    speed_str = f"{total_speed / 1024:.1f} KB/s"
+                else:
+                    speed_str = f"{total_speed:.0f} B/s"
+            else:
+                speed_str = ""
+            
+            # Format bytes
+            def humanize_bytes(b):
+                if b >= 1024**3:
+                    return f"{b / 1024**3:.1f} GB"
+                elif b >= 1024**2:
+                    return f"{b / 1024**2:.1f} MB"
+                elif b >= 1024:
+                    return f"{b / 1024:.1f} KB"
+                else:
+                    return f"{b} B"
+            
+            if total_bytes > 0:
+                bytes_str = f"{humanize_bytes(total_bytes_done)}/{humanize_bytes(total_bytes)}"
+            else:
+                bytes_str = ""
+            
+            # Update label
+            count_str = f"{len(active_transfers)} active"
+            if speed_str:
+                label_text = f"Overall: {count_str} • {bytes_str} • {speed_str}"
+            elif bytes_str:
+                label_text = f"Overall: {count_str} • {bytes_str}"
+            else:
+                label_text = f"Overall: {count_str}"
+            
+            self.overall_progress_label.setText(label_text)
+            
+        except (OSError, IOError, RuntimeError):
+            pass
 
     def check_and_start_transfers(self):
         """Check for new transfers in queue and start them"""
@@ -1017,6 +1137,9 @@ class TransferQueueWidget(QWidget):
                         transfer.status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['text_secondary']};")
             except RuntimeError:
                 pass
+            
+            # Update overall progress
+            self.update_overall_progress()
 
         except (OSError, IOError, RuntimeError):
             pass
