@@ -7,7 +7,7 @@ Encryption key is stored separately from encrypted data for enhanced security.
 import os
 import stat
 import json
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 
 from sftp_platform import (
     get_key_file_path, get_connection_data_path,
@@ -169,7 +169,7 @@ def load_connection_data():
         for k, v in encrypted_passwords.items():
             try:
                 host_data["passwords"][k] = cipher_suite.decrypt(v.encode()).decode()
-            except (OSError, IOError, RuntimeError):
+            except (OSError, IOError, RuntimeError, InvalidToken):
                 host_data["passwords"][k] = ""
                 
         host_data["ports"] = data.get("ports", {})
