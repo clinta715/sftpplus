@@ -171,11 +171,14 @@ class LocalTerminalWidget(QWidget):
         self.pid, self.master_fd = pty.fork()
         
         if self.pid == 0:
-            os.environ['TERM'] = 'xterm-256color'
-            os.environ['COLORTERM'] = 'truecolor'
+            # Child process - the shell will run here
+            # Use vt100 for basic terminal support
+            os.environ['TERM'] = 'vt100'
+            os.environ['COLORTERM'] = ''
             os.environ['TERM_PROGRAM'] = 'sftp-client'
-            os.execvpe(shell, [shell, '-i', '-l'], os.environ)
+            os.execvpe(shell, [shell, '-i'], os.environ)
         else:
+            # Parent process
             self._running = True
             self.terminal.setPlaceholderText("")
             
