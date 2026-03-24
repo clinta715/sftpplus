@@ -171,16 +171,45 @@ class LocalTerminalWidget(QWidget):
         self.pid, self.master_fd = pty.fork()
         
         if self.pid == 0:
-            # Child process - the shell will run here
-            # Use vt100 for basic terminal support
-            os.environ['TERM'] = 'vt100'
-            os.environ['COLORTERM'] = ''
+            # Child process - set up slave PTY to disable echo
+            if UNIX_MODULES is not None:
+                termios = UNIX_MODULES['termios']
+                try:
+                    # Get current terminal attributes on stdin (slave PTY)
+                    mode = termios.tcgetattr(0)
+                    # Disable ALL echo - shell will echo what it needs
+                    mode[3] &= ~termios.ECHO
+                    mode[3] &= ~termios.ECHOE
+                    mode[3] &= ~termios.ECHOK
+                    mode[3] &= ~termios.ECHONL
+                    # Also disable canonical mode (line buffering)
+                    mode[3] &= ~termios.ICANON
+                    # Set minimum input to 1
+                    mode[6][termios.VMIN] = 1
+                    mode[6][termios.VTIME] = 0
+                    termios.tcsetattr(0, termios.TCSANOW, mode)
+                except (OSError, termios.error):
+                    pass
+            
+            os.environ['TERM'] = 'dumb'
             os.environ['TERM_PROGRAM'] = 'sftp-client'
-            os.execvpe(shell, [shell, '-i'], os.environ)
+            os.execvpe(shell, [shell], os.environ)
         else:
-            # Parent process
+            # Parent process - disable echo on master side too
             self._running = True
             self.terminal.setPlaceholderText("")
+            
+            if UNIX_MODULES is not None:
+                termios = UNIX_MODULES['termios']
+                try:
+                    mode = termios.tcgetattr(self.master_fd)
+                    mode[3] &= ~termios.ECHO
+                    mode[3] &= ~termios.ECHOE
+                    mode[3] &= ~termios.ECHOK
+                    mode[3] &= ~termios.ECHONL
+                    termios.tcsetattr(self.master_fd, termios.TCSANOW, mode)
+                except (OSError, termios.error):
+                    pass
             
             from PyQt6.QtCore import QSocketNotifier
             self._notifier = QSocketNotifier(self.master_fd, QSocketNotifier.Type.Read)
