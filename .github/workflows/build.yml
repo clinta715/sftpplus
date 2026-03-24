@@ -34,7 +34,6 @@ jobs:
           pyinstaller --windowed \
                       --onedir \
                       --name "SFTP Client" \
-                      --bundle-identifier "com.sftpclient.app" \
                       --exclude-module "tkinter" \
                       --exclude-module "matplotlib" \
                       --exclude-module "numpy" \
@@ -46,7 +45,6 @@ jobs:
                       --hidden-import "PySide6.QtCore" \
                       --hidden-import "PySide6.QtGui" \
                       --hidden-import "PySide6.QtWidgets" \
-                      --hidden-import "PySide6.sip" \
                       --hidden-import "paramiko" \
                       --hidden-import "cryptography" \
                       --hidden-import "cryptography.fernet" \
@@ -145,7 +143,6 @@ jobs:
                       --hidden-import "PySide6.QtCore" \
                       --hidden-import "PySide6.QtGui" \
                       --hidden-import "PySide6.QtWidgets" \
-                      --hidden-import "PySide6.sip" \
                       --hidden-import "paramiko" \
                       --hidden-import "cryptography" \
                       --hidden-import "cryptography.fernet" \

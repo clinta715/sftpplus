@@ -37,14 +37,11 @@ case "$PLATFORM" in
         pyinstaller --windowed \
                     --onedir \
                     --name "SFTP Client" \
-                    --bundle-identifier "com.sftpclient.app" \
-                    --osx-bundle-identifier "com.sftpclient.app" \
                     --add-data "sftp_theme.py:." \
                     --add-data "sftp_qt_compat.py:." \
                     --hidden-import "PySide6.QtCore" \
                     --hidden-import "PySide6.QtGui" \
                     --hidden-import "PySide6.QtWidgets" \
-                    --hidden-import "PySide6.sip" \
                     --hidden-import "paramiko" \
                     --hidden-import "cryptography" \
                     --hidden-import "cryptography.fernet" \
@@ -114,7 +111,6 @@ case "$PLATFORM" in
                     --hidden-import "PySide6.QtCore" \
                     --hidden-import "PySide6.QtGui" \
                     --hidden-import "PySide6.QtWidgets" \
-                    --hidden-import "PySide6.sip" \
                     --hidden-import "paramiko" \
                     --hidden-import "cryptography" \
                     --hidden-import "cryptography.fernet" \

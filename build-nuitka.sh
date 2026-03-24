@@ -83,7 +83,6 @@ NUITKA_OPTS=(
     --include-module=PySide6.QtCore
     --include-module=PySide6.QtGui
     --include-module=PySide6.QtWidgets
-    --include-module=PySide6.sip
     --include-module=paramiko
     --include-module=cryptography
     --include-module=cryptography.fernet
