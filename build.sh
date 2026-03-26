@@ -30,6 +30,51 @@ fi
 echo "Cleaning previous builds..."
 rm -rf build/ dist/ __pycache__/ *.spec 2>/dev/null || true
 
+# Common hidden imports for all platforms
+HIDDEN_IMPORTS=(
+    --hidden-import "PySide6.QtCore"
+    --hidden-import "PySide6.QtGui"
+    --hidden-import "PySide6.QtWidgets"
+    --hidden-import "paramiko"
+    --hidden-import "cryptography"
+    --hidden-import "cryptography.fernet"
+    --hidden-import "cryptography.hazmat.primitives"
+    --hidden-import "cryptography.hazmat.backends"
+    --hidden-import "cryptography.hazmat.backends.openssl"
+    --hidden-import "sftp_about"
+    --hidden-import "sftp_browser_mixins"
+    --hidden-import "sftp_browserclass"
+    --hidden-import "sftp_commands"
+    --hidden-import "sftp_connection_pool"
+    --hidden-import "sftp_connections_widget"
+    --hidden-import "sftp_creds"
+    --hidden-import "sftp_downloadworkerclass"
+    --hidden-import "sftp_drag_drop"
+    --hidden-import "sftp_file_browser_panel"
+    --hidden-import "sftp_filebrowserclass"
+    --hidden-import "sftp_filetablemodel"
+    --hidden-import "sftp_hostdataeditor"
+    --hidden-import "sftp_local_terminal_widget"
+    --hidden-import "sftp_logging"
+    --hidden-import "sftp_operations"
+    --hidden-import "sftp_platform"
+    --hidden-import "sftp_preferences"
+    --hidden-import "sftp_preview_widget"
+    --hidden-import "sftp_qt_compat"
+    --hidden-import "sftp_remotefilebrowserclass"
+    --hidden-import "sftp_remotefiletablemodel"
+    --hidden-import "sftp_session"
+    --hidden-import "sftp_session_executor"
+    --hidden-import "sftp_sortfiltermodel"
+    --hidden-import "sftp_terminal_widget"
+    --hidden-import "sftp_textviewer"
+    --hidden-import "sftp_theme"
+    --hidden-import "sftp_toolbar_customizer"
+    --hidden-import "sftp_transfer_handler"
+    --hidden-import "sftp_transfer_history"
+    --hidden-import "sftp_transfer_queue_widget"
+)
+
 # Build based on platform
 case "$PLATFORM" in
     macos)
@@ -37,17 +82,10 @@ case "$PLATFORM" in
         pyinstaller --windowed \
                     --onedir \
                     --name "SFTP Client" \
+                    --paths "." \
                     --add-data "sftp_theme.py:." \
                     --add-data "sftp_qt_compat.py:." \
-                    --hidden-import "PySide6.QtCore" \
-                    --hidden-import "PySide6.QtGui" \
-                    --hidden-import "PySide6.QtWidgets" \
-                    --hidden-import "paramiko" \
-                    --hidden-import "cryptography" \
-                    --hidden-import "cryptography.fernet" \
-                    --hidden-import "cryptography.hazmat.primitives" \
-                    --hidden-import "cryptography.hazmat.backends" \
-                    --hidden-import "cryptography.hazmat.backends.openssl" \
+                    "${HIDDEN_IMPORTS[@]}" \
                     --exclude-module "tkinter" \
                     --exclude-module "matplotlib" \
                     --exclude-module "numpy" \
@@ -69,6 +107,7 @@ case "$PLATFORM" in
         pyinstaller --windowed \
                     --onedir \
                     --name "SFTP Client" \
+                    --paths "." \
                     --add-data "sftp_theme.py;." \
                     --add-data "sftp_qt_compat.py;." \
                     --collect-all "PySide6" \
@@ -80,15 +119,7 @@ case "$PLATFORM" in
                     --hidden-import "encodings.utf_8" \
                     --hidden-import "encodings.latin_1" \
                     --hidden-import "encodings.charmap" \
-                    --hidden-import "PySide6.QtCore" \
-                    --hidden-import "PySide6.QtGui" \
-                    --hidden-import "PySide6.QtWidgets" \
-                    --hidden-import "paramiko" \
-                    --hidden-import "cryptography" \
-                    --hidden-import "cryptography.fernet" \
-                    --hidden-import "cryptography.hazmat.primitives" \
-                    --hidden-import "cryptography.hazmat.backends" \
-                    --hidden-import "cryptography.hazmat.backends.openssl" \
+                    "${HIDDEN_IMPORTS[@]}" \
                     --hidden-import "paramiko.win_openssh" \
                     --exclude-module "tkinter" \
                     --exclude-module "matplotlib" \
@@ -112,17 +143,10 @@ case "$PLATFORM" in
         pyinstaller --windowed \
                     --onefile \
                     --name "sftp-client" \
+                    --paths "." \
                     --add-data "sftp_theme.py:." \
                     --add-data "sftp_qt_compat.py:." \
-                    --hidden-import "PySide6.QtCore" \
-                    --hidden-import "PySide6.QtGui" \
-                    --hidden-import "PySide6.QtWidgets" \
-                    --hidden-import "paramiko" \
-                    --hidden-import "cryptography" \
-                    --hidden-import "cryptography.fernet" \
-                    --hidden-import "cryptography.hazmat.primitives" \
-                    --hidden-import "cryptography.hazmat.backends" \
-                    --hidden-import "cryptography.hazmat.backends.openssl" \
+                    "${HIDDEN_IMPORTS[@]}" \
                     --hidden-import "pty" \
                     --hidden-import "fcntl" \
                     --hidden-import "termios" \

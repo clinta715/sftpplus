@@ -95,6 +95,7 @@ NUITKA_OPTS=(
 
 # Modules to include
 INCLUDE_MODULES=(
+    sftp_about
     sftp_browserclass
     sftp_browser_mixins
     sftp_commands
@@ -149,7 +150,7 @@ case "$PLATFORM" in
             --macos-app-version="2.1.0" \
             --macos-signed-app-name="com.sftpclient.app" \
             --macos-app-icon=none \
-            --enable-plugin=pyqt6 \
+            --enable-plugin=pyside6 \
             sftp.py 2>&1; then
             
             # Move to dist directory
@@ -180,7 +181,7 @@ case "$PLATFORM" in
             --onefile \
             --windows-console-mode=disable \
             --windows-icon-from-ico=none \
-            --enable-plugin=pyqt6 \
+            --enable-plugin=pyside6 \
             sftp.py
         
         # Move to dist directory
@@ -199,7 +200,7 @@ case "$PLATFORM" in
             "${NUITKA_OPTS[@]}" \
             --standalone \
             --onefile \
-            --enable-plugin=pyqt6 \
+            --enable-plugin=pyside6 \
             sftp.py
         
         # Move to dist directory
