@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Cross-Platform Support**: Application now runs on Windows, macOS, and Linux
   - Platform-specific config directories (`%APPDATA%/sftp_client` on Windows)
-  - Local terminal shows placeholder on Windows (PTY not supported)
+  - Local terminal now fully supported on all platforms (QProcess-based, no PTY dependency)
   - File permissions handled gracefully on all platforms
 - **Delete Progress Feedback**: Deleting multiple items now shows progress dialog and summary
 - **Logging System**: New `sftp_logging.py` module with file logging to platform-specific log directory
@@ -18,11 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Drag & Drop Infrastructure**: New `sftp_drag_drop.py` module with `DragDropInfo` class
 - **Platform Utility Module**: New `sftp_platform.py` with cross-platform utilities
 - **Keyboard Shortcuts Help**: Press F1 to see all available keyboard shortcuts
-- **Test Framework**: 89 tests in `tests/` directory
+- **Test Framework**: 123 tests in `tests/` directory
+- **Local Terminal Tests**: 34 tests for `sftp_local_terminal_widget.py` covering ANSI stripping, architecture verification, line editor, history, and tab completion
 - **Filename Truncation**: Long filenames now show beginning instead of end (elide left)
 - **Tree View Context Menu**: Added Rename and Delete options to tree view right-click menu
 
 ### Fixed
+- **Local Terminal Redesign**: Complete rewrite from PTY-based to QProcess-based architecture. Fixes prompt-redraw bug caused by `TERM=dumb` with fish/bash shells. The new design uses `QProcess` with pipes, built-in line editing, command history, and file path tab completion. Cross-platform (Windows, macOS, Linux).
 - **Active Browser Detection**: Toolbar buttons now correctly detect which browser (local/remote) was last clicked
 - **Tree Download Path**: Tree view downloads now create subfolders instead of flattening directory structure
 - **Permission Error Handling**: Delete operations now handle permission errors gracefully instead of retrying forever

@@ -1183,18 +1183,6 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
 
     def open_local_terminal(self):
         """Handle Local Terminal button click - opens local shell tab"""
-        from sftp_platform import supports_local_terminal
-        
-        if not supports_local_terminal():
-            QMessageBox.information(
-                self, 
-                "Local Terminal", 
-                "Local terminal is not supported on Windows.\n\n"
-                "Please use the SSH Terminal tab for remote shell access,\n"
-                "or use Windows Terminal/CMD/PowerShell for local commands."
-            )
-            return
-        
         container_widget = QWidget()
         container_widget.is_terminal = True
         

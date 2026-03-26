@@ -7,6 +7,7 @@ This document provides guidelines for AI coding agents working on this PyQt6-bas
 - **Cross-platform**: Runs on Windows, macOS, and Linux with platform-specific paths
 - **Multi-tabbed interface**: Connect to multiple SFTP servers simultaneously
 - **SSH Terminal**: Interactive SSH shell sessions in addition to SFTP (Unix only; Windows shows placeholder)
+- **Local Terminal**: Cross-platform local shell using QProcess (Windows, macOS, Linux)
 - **Ephemeral connections**: Each operation creates a fresh connection for security
 - **Threaded operations**: Uploads/downloads run in background threads
 - **Dual-pane interface**: Local and remote file browsers side-by-side
@@ -37,7 +38,7 @@ The project now uses a clean session-based API for SFTP operations. This provide
 | `sftp_session_executor.py` | Command executor using sessions and pool |
 | `sftp_operations.py` | High-level convenience functions |
 | `sftp_terminal_widget.py` | SSH terminal widget with ANSI code stripping (Unix only) |
-| `sftp_local_terminal_widget.py` | Local terminal widget (Unix only, shows placeholder on Windows) |
+| `sftp_local_terminal_widget.py` | Local terminal widget (QProcess-based, cross-platform: Windows/macOS/Linux) |
 | `sftp_preferences.py` | Persistent user preferences storage |
 | `sftp_preview_widget.py` | File preview side panel (text/images) |
 | `sftp_toolbar_customizer.py` | Toolbar customization dialog |
@@ -70,7 +71,7 @@ key_file = get_key_file_path()
 # Secure file permissions (no-op on Windows)
 secure_file_permissions('/path/to/file')
 
-# Check if local terminal is supported (False on Windows)
+# Check if local terminal is supported (always True with QProcess-based terminal)
 if supports_local_terminal():
     # Start local shell
 ```
@@ -673,6 +674,17 @@ Main Window Tabs:
 - Class: `SSHTerminalWidget(QWidget)`
 - Features: Interactive SSH shell, ANSI code stripping, dark theme
 - Uses paramiko `invoke_shell()` for interactive sessions
+
+**Local Terminal:**
+- File: `sftp_local_terminal_widget.py`
+- Class: `LocalTerminalWidget(QWidget)`
+- Architecture: QProcess-based with pipes (no PTY dependency)
+- Cross-platform: Works on Windows, macOS, and Linux
+- Features: Built-in line editor, command history (up/down), file path tab completion, prompt display
+- Shell runs in non-interactive mode; widget handles all line editing
+- Uses `strip_ansi_codes()` for output cleaning (same as SSH terminal)
+- Marker-based command completion detection (`echo ___SFTP_PROMPT_READY___`)
+- Limitations: No job control (Ctrl+Z), no interactive programs (vim, top, less)
 
 ### Key Implementation Notes
 

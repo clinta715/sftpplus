@@ -1,138 +1,104 @@
 """
-Local Terminal Widget
+Local Terminal Widget (QProcess-based)
 
-A terminal widget for local shell using pty module.
-Filters terminal control sequences for cleaner display.
+Cross-platform local shell terminal using QProcess with pipes.
+Implements custom line editing, command history, and prompt display.
 
-Note: Local terminal is only supported on Unix systems (macOS/Linux).
-On Windows, a placeholder message is shown instead.
+No PTY dependency - works on Windows, macOS, and Linux.
+The shell runs in non-interactive mode; all line editing is handled by the widget.
 """
 
 import os
-import sys
-import platform
+import getpass
+import socket
 import re
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QLabel
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit
+from PySide6.QtCore import Qt, QProcess, QTimer, QEvent
 from PySide6.QtGui import QFont, QTextCursor
 
-from sftp_platform import is_windows, supports_local_terminal, get_default_shell
+from sftp_platform import is_windows, get_default_shell
 
 
-def _check_unix_modules():
-    """Check if Unix-only modules are available."""
-    if is_windows():
-        return None
-    try:
-        import pty
-        import fcntl
-        import struct
-        import termios
-        return {'pty': pty, 'fcntl': fcntl, 'struct': struct, 'termios': termios}
-    except ImportError:
-        return None
+def _get_pipe_compatible_shell():
+    """Get a shell that works with pipe stdin.
+
+    Fish shell does not read from pipe stdin properly.
+    Fall back to bash/zsh/sh for QProcess-based terminal.
+    """
+    shell = get_default_shell()
+    shell_name = os.path.basename(shell)
+
+    # Fish doesn't work with pipe stdin
+    if shell_name in ('fish',):
+        # Try bash first, then zsh, then sh
+        for fallback in ('/bin/bash', '/usr/bin/bash', '/bin/zsh', '/bin/sh'):
+            if os.path.exists(fallback):
+                return fallback
+    return shell
 
 
-UNIX_MODULES = _check_unix_modules()
-
-# Comprehensive ANSI escape code pattern
-# Matches CSI sequences, OSC sequences, and other control sequences
-TERMINAL_CONTROL_PATTERN = re.compile(
-    r'\x1b\[[0-9;?]*[a-zA-Z]|'        # CSI sequences: ESC [ ... letter
-    r'\x1b\[[0-9;?]*~|'                # CSI sequences: ESC [ ... ~
-    r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)|'  # OSC sequences: ESC ] ... BEL/ST
-    r'\x1b[()][A-Za-z0-9]|'            # Character set: ESC ( letter
-    r'\x1b[=>]|'                        # Keypad mode: ESC = or ESC >
-    r'\x1b[78]|'                        # Save/restore cursor: ESC 7 or ESC 8
-    r'\x1b[DE]|'                        # Index/newline: ESC D or ESC E
-    r'\x1b[HM]|'                        # Tab sets: ESC H or ESC M
-    r'\x1b[cl]|'                        # Clear/reset: ESC c or ESC l
-    r'\x1b[NO]|'                        # Locks: ESC N or ESC O
-    r'\x1bP[^\\]*(?:\\|$)|'             # DCS sequences: ESC P ... ST
-    r'\x1b\[[\x3e0-9;]*q[0-9;]*~?|'     # Keyboard keys
-    r'\x1b[<>][0-9]*[a-zA-Z]?|'        # Private sequences: ESC < or ESC >
-    r'\x1b[_][^\x07]*\x07|'             # APC sequences: ESC _ ... BEL
-    r'\x1b\^.*?\x1b\\|'                 # PM sequences: ESC ^ ... ST
-    r'\x1bX[^\x1b]*\x1b'                # SOS sequences: ESC X ... ST
+# ANSI escape code pattern (same as SSH terminal)
+ANSI_ESCAPE_PATTERN = re.compile(
+    r'\x1b\[[0-9;?]*[a-zA-Z]|'     # CSI sequences
+    r'\x1b\][^\x07]*(?:\x07|$)|'    # OSC sequences (titles, etc.)
+    r'\x1b[()][A-Za-z]'              # Character set switches
 )
 
-DA_RESPONSE = b'\x1b[?1;0c'
 
-
-def clean_terminal_output(text):
-    """Remove terminal control sequences and clean up output"""
-    text = TERMINAL_CONTROL_PATTERN.sub('', text)
-    text = text.replace('\r\n', '\n').replace('\r', '')
-    return text
+def strip_ansi_codes(text):
+    """Remove ANSI escape codes from text."""
+    return ANSI_ESCAPE_PATTERN.sub('', text)
 
 
 class LocalTerminalWidget(QWidget):
     """
-    Local terminal using pty module for proper terminal emulation.
-    
-    On Unix systems (macOS/Linux):
-    - Spawns $SHELL (fallback: /bin/bash)
-    - Real PTY for proper terminal behavior
-    - Filters control sequences for cleaner display
-    
-    On Windows:
-    - Shows a placeholder message explaining the limitation
-    - Returns early from all operations
+    Local terminal using QProcess with pipes.
+
+    Cross-platform shell interaction with built-in line editing.
+    No PTY dependency - works on Windows, macOS, and Linux.
+
+    The shell runs in non-interactive mode. The widget handles:
+    - Prompt display
+    - Line editing (insert, delete, cursor movement)
+    - Command history (up/down arrows)
+    - Ctrl+C (cancel line), Ctrl+D (exit), Ctrl+L (clear)
     """
-    
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.master_fd = None
-        self.pid = None
+
+        self.process = None
         self._running = False
-        self._notifier = None
-        
-        if not supports_local_terminal():
-            self._init_windows_placeholder()
-            return
-            
-        if UNIX_MODULES is None:
-            self._init_windows_placeholder()
-            return
-            
+
+        # Line editor state
+        self._line_buffer = ""
+        self._cursor_pos = 0
+
+        # Command history
+        self._history = []
+        self._history_index = -1
+        self._saved_line = ""
+
+        # Prompt state
+        self._prompt_text = ""
+        self._at_prompt = False
+
+        # Marker for detecting command completion
+        self._marker = "___SFTP_PROMPT_READY___"
+
+        # Timer for detecting when output has settled
+        self._output_timer = QTimer()
+        self._output_timer.setSingleShot(True)
+        self._output_timer.timeout.connect(self._on_output_settled)
+
         self._init_ui()
         self._start_shell()
-        
-    def _init_windows_placeholder(self):
-        """Initialize placeholder for Windows systems."""
-        layout = QVBoxLayout()
-        layout.setContentsMargins(20, 20, 20, 20)
-        
-        placeholder = QLabel()
-        placeholder.setText(
-            "Local Terminal is not available on Windows.\n\n"
-            "This feature requires Unix PTY support.\n\n"
-            "Please use the SSH Terminal tab for remote\n"
-            "shell access, or use Windows Terminal/CMD/PowerShell\n"
-            "for local commands."
-        )
-        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        placeholder.setStyleSheet("""
-            QLabel {
-                background-color: #1e1e1e;
-                color: #888888;
-                font-family: 'Menlo', 'Courier New', 'Monaco', monospace;
-                font-size: 14px;
-                border: 1px solid #444444;
-                border-radius: 5px;
-                padding: 20px;
-            }
-        """)
-        placeholder.setWordWrap(True)
-        
-        layout.addWidget(placeholder)
-        self.setLayout(layout)
-        self._running = False
-        
+
     def _init_ui(self):
+        """Initialize the terminal UI."""
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
-        
+
         self.terminal = QPlainTextEdit()
         self.terminal.setReadOnly(False)
         self.terminal.setStyleSheet("""
@@ -147,269 +113,430 @@ class LocalTerminalWidget(QWidget):
         font = QFont('Menlo', 12)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self.terminal.setFont(font)
-        
         self.terminal.setMaximumBlockCount(10000)
-        self.terminal.setReadOnly(True)
         self.terminal.installEventFilter(self)
         self.terminal.setPlaceholderText("Starting local shell...")
-        
+
         layout.addWidget(self.terminal)
         self.setLayout(layout)
-        
+
     def _start_shell(self):
-        """Start the local shell process with proper PTY (Unix only)."""
-        if not supports_local_terminal() or UNIX_MODULES is None:
-            return
-            
-        pty = UNIX_MODULES['pty']
-        fcntl = UNIX_MODULES['fcntl']
-        struct = UNIX_MODULES['struct']
-        termios = UNIX_MODULES['termios']
-        
-        shell = get_default_shell()
-        
-        self.pid, self.master_fd = pty.fork()
-        
-        if self.pid == 0:
-            # Child process - set up slave PTY to disable echo
-            if UNIX_MODULES is not None:
-                termios = UNIX_MODULES['termios']
-                try:
-                    # Get current terminal attributes on stdin (slave PTY)
-                    mode = termios.tcgetattr(0)
-                    # Disable ALL echo - shell will echo what it needs
-                    mode[3] &= ~termios.ECHO
-                    mode[3] &= ~termios.ECHOE
-                    mode[3] &= ~termios.ECHOK
-                    mode[3] &= ~termios.ECHONL
-                    # Also disable canonical mode (line buffering)
-                    mode[3] &= ~termios.ICANON
-                    # Set minimum input to 1
-                    mode[6][termios.VMIN] = 1
-                    mode[6][termios.VTIME] = 0
-                    termios.tcsetattr(0, termios.TCSANOW, mode)
-                except (OSError, termios.error):
-                    pass
-            
-            os.environ['TERM'] = 'dumb'
-            os.environ['TERM_PROGRAM'] = 'sftp-client'
-            os.execvpe(shell, [shell], os.environ)
-        else:
-            # Parent process - disable echo on master side too
+        """Start the shell process using QProcess."""
+        self.process = QProcess()
+
+        # Configure environment to force color output
+        env = self.process.processEnvironment()
+        env.insert('TERM', 'xterm-256color')
+        env.insert('FORCE_COLOR', '1')
+        env.insert('CLICOLOR', '1')
+        env.insert('CLICOLOR_FORCE', '1')
+        if is_windows():
+            env.insert('PROMPT', '')
+        self.process.setProcessEnvironment(env)
+
+        # Connect signals
+        self.process.readyReadStandardOutput.connect(self._on_stdout)
+        self.process.readyReadStandardError.connect(self._on_stderr)
+        self.process.finished.connect(self._on_finished)
+        self.process.errorOccurred.connect(self._on_error)
+
+        # Start shell (use pipe-compatible shell - fish doesn't work with pipes)
+        shell = _get_pipe_compatible_shell()
+        self.process.start(shell)
+        if self.process.waitForStarted(3000):
             self._running = True
             self.terminal.setPlaceholderText("")
-            
-            if UNIX_MODULES is not None:
-                termios = UNIX_MODULES['termios']
-                try:
-                    mode = termios.tcgetattr(self.master_fd)
-                    mode[3] &= ~termios.ECHO
-                    mode[3] &= ~termios.ECHOE
-                    mode[3] &= ~termios.ECHOK
-                    mode[3] &= ~termios.ECHONL
-                    termios.tcsetattr(self.master_fd, termios.TCSANOW, mode)
-                except (OSError, termios.error):
-                    pass
-            
-            from PySide6.QtCore import QSocketNotifier
-            self._notifier = QSocketNotifier(self.master_fd, QSocketNotifier.Type.Read)
-            self._notifier.activated.connect(self._on_output)
-            
-            self._set_pty_size()
-            
-    def _set_pty_size(self):
-        """Set the PTY window size (Unix only)."""
-        if not supports_local_terminal() or UNIX_MODULES is None:
+            self._show_prompt()
+        else:
+            self.terminal.setPlaceholderText("Failed to start shell")
+
+    def _get_prompt(self):
+        """Generate prompt string."""
+        cwd = os.getcwd()
+        home = os.path.expanduser("~")
+        if cwd.startswith(home):
+            cwd = "~" + cwd[len(home):]
+
+        if is_windows():
+            return f"{cwd}> "
+        else:
+            user = getpass.getuser()
+            host = socket.gethostname().split('.')[0]
+            return f"{user}@{host}:{cwd}$ "
+
+    def _show_prompt(self):
+        """Display the prompt and prepare for input."""
+        self._prompt_text = self._get_prompt()
+        cursor = self.terminal.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(self._prompt_text)
+        self.terminal.setTextCursor(cursor)
+        self.terminal.ensureCursorVisible()
+        self._at_prompt = True
+        self._line_buffer = ""
+        self._cursor_pos = 0
+
+    def _update_line_display(self):
+        """Update the displayed line to match the line buffer."""
+        text = self.terminal.toPlainText()
+        prompt_pos = text.rfind(self._prompt_text)
+        if prompt_pos < 0:
+            cursor = self.terminal.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.insertText(self._line_buffer)
+            self.terminal.setTextCursor(cursor)
             return
-            
-        fcntl = UNIX_MODULES['fcntl']
-        struct = UNIX_MODULES['struct']
-        termios = UNIX_MODULES['termios']
-        
-        try:
-            font_metrics = self.terminal.fontMetrics()
-            char_width = font_metrics.horizontalAdvance('M')
-            char_height = font_metrics.height()
-            
-            width = max(80, self.terminal.width() // char_width)
-            height = max(24, self.terminal.height() // char_height)
-            
-            winsize = struct.pack('HHHH', height, width, 0, 0)
-            fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, winsize)
-        except Exception:
-            pass
-            
-    def _on_output(self, fd):
-        """Handle output from shell (Unix only)."""
-        if not self._running or self.master_fd is None:
+
+        cursor = self.terminal.textCursor()
+        cursor.setPosition(prompt_pos + len(self._prompt_text))
+        cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        cursor.insertText(self._line_buffer)
+
+        cursor.setPosition(prompt_pos + len(self._prompt_text) + self._cursor_pos)
+        self.terminal.setTextCursor(cursor)
+        self.terminal.ensureCursorVisible()
+
+    def _append_output(self, text):
+        """Append output text to the terminal."""
+        if not text:
             return
-            
-        try:
-            data = os.read(fd, 65536)
-            if data:
-                # Respond to device attribute queries
-                if b'\x1b[c' in data or b'\x1b[?c' in data or b'\x1b[>c' in data:
-                    try:
-                        os.write(self.master_fd, DA_RESPONSE)
-                    except OSError:
-                        pass
-                
-                # Respond to cursor position queries
-                if b'\x1b[6n' in data or b'\x1b[?6n' in data:
-                    try:
-                        os.write(self.master_fd, b'\x1b[1;1R')
-                    except OSError:
-                        pass
-                
-                # Respond to status queries
-                if b'\x1b[5n' in data:
-                    try:
-                        os.write(self.master_fd, b'\x1b[0n')
-                    except OSError:
-                        pass
-                
-                # Strip OSC title sequences before cleaning
-                # These often contain the shell prompt path
-                data_clean = data
-                data_clean = re.sub(rb'\x1b\][^\x07\x1b]*\x07', b'', data_clean)
-                data_clean = re.sub(rb'\x1b\][^\x1b]*\x1b\\\\', b'', data_clean)
-                
-                # Decode and clean
-                text = data_clean.decode('utf-8', errors='replace')
-                text = clean_terminal_output(text)
-                
-                # Remove any remaining control characters except newline and tab
-                text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
-                
-                if text:
-                    cursor = self.terminal.textCursor()
-                    cursor.movePosition(QTextCursor.MoveOperation.End)
-                    cursor.insertText(text)
-                    self.terminal.ensureCursorVisible()
-        except OSError:
-            self._running = False
-            
+        cursor = self.terminal.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(text)
+        self.terminal.setTextCursor(cursor)
+        self.terminal.ensureCursorVisible()
+
+    def _on_stdout(self):
+        """Handle stdout data from shell."""
+        if not self.process:
+            return
+        data = self.process.readAllStandardOutput().data().decode('utf-8', errors='ignore')
+        if not data:
+            return
+
+        clean = strip_ansi_codes(data)
+
+        if self._marker in clean:
+            parts = clean.split(self._marker)
+            output_part = parts[0]
+            if output_part:
+                self._append_output(output_part)
+            self._show_prompt()
+            return
+
+        self._append_output(clean)
+        self._output_timer.start(150)
+
+    def _on_stderr(self):
+        """Handle stderr data from shell."""
+        if not self.process:
+            return
+        data = self.process.readAllStandardError().data().decode('utf-8', errors='ignore')
+        if data:
+            clean = strip_ansi_codes(data)
+            self._append_output(clean)
+            self._output_timer.start(150)
+
+    def _on_output_settled(self):
+        """Called when no output has arrived for a short period."""
+        if not self._at_prompt and self._running:
+            self._show_prompt()
+
+    def _on_finished(self, exit_code, exit_status):
+        """Handle shell process exit."""
+        self._running = False
+        self._append_output(f"\nShell exited (code {exit_code})\n")
+
+    def _on_error(self, error):
+        """Handle shell process error."""
+        self._running = False
+        if error == QProcess.ProcessError.FailedToStart:
+            self._append_output("Error: Failed to start shell process\n")
+
+    def _submit_line(self):
+        """Submit the current line to the shell."""
+        line = self._line_buffer
+        self._line_buffer = ""
+        self._cursor_pos = 0
+        self._at_prompt = False
+
+        self._append_output("\n")
+
+        if line.strip():
+            self._history.append(line)
+            if len(self._history) > 1000:
+                self._history.pop(0)
+        self._history_index = -1
+        self._saved_line = ""
+
+        if self.process and self.process.state() == QProcess.ProcessState.Running:
+            self.process.write((line + f'\necho {self._marker}\n').encode('utf-8'))
+
     def eventFilter(self, obj, event):
-        """Capture keyboard input (Unix only)."""
-        if not supports_local_terminal() or UNIX_MODULES is None:
-            return super().eventFilter(obj, event)
-            
-        from PySide6.QtCore import QEvent
+        """Capture keyboard input."""
         if obj == self.terminal and event.type() == QEvent.Type.KeyPress:
             return self._handle_key_press(event)
         return super().eventFilter(obj, event)
-        
+
     def _handle_key_press(self, event):
-        """Handle key press and send to PTY (Unix only)."""
-        if not self._running or self.master_fd is None:
-            return False
-            
+        """Handle key press events."""
         key = event.key()
         text = event.text()
         modifiers = event.modifiers()
-        
-        try:
-            if modifiers & Qt.KeyboardModifier.ControlModifier:
-                if key == Qt.Key.Key_C:
-                    os.write(self.master_fd, b'\x03')
-                    return True
-                elif key == Qt.Key.Key_D:
-                    os.write(self.master_fd, b'\x04')
-                    return True
-                elif key == Qt.Key.Key_L:
-                    self.terminal.clear()
-                    os.write(self.master_fd, b'\x0c')
-                    return True
-                elif key == Qt.Key.Key_A:
-                    os.write(self.master_fd, b'\x01')
-                    return True
-                elif key == Qt.Key.Key_E:
-                    os.write(self.master_fd, b'\x05')
-                    return True
-                elif key == Qt.Key.Key_U:
-                    os.write(self.master_fd, b'\x15')
-                    return True
-                elif key == Qt.Key.Key_K:
-                    os.write(self.master_fd, b'\x0b')
-                    return True
-                elif key == Qt.Key.Key_W:
-                    os.write(self.master_fd, b'\x17')
-                    return True
-                elif key == Qt.Key.Key_R:
-                    os.write(self.master_fd, b'\x12')
-                    return True
-                    
-            if key == Qt.Key.Key_Enter or key == Qt.Key.Key_Return:
-                os.write(self.master_fd, b'\r')
-                return True
-            elif key == Qt.Key.Key_Backspace:
-                os.write(self.master_fd, b'\x7f')
-                return True
-            elif key == Qt.Key.Key_Delete:
-                os.write(self.master_fd, b'\x1b[3~')
-                return True
-            elif key == Qt.Key.Key_Tab:
-                os.write(self.master_fd, b'\t')
-                return True
-            elif key == Qt.Key.Key_Up:
-                os.write(self.master_fd, b'\x1b[A')
-                return True
-            elif key == Qt.Key.Key_Down:
-                os.write(self.master_fd, b'\x1b[B')
-                return True
-            elif key == Qt.Key.Key_Left:
-                os.write(self.master_fd, b'\x1b[D')
-                return True
-            elif key == Qt.Key.Key_Right:
-                os.write(self.master_fd, b'\x1b[C')
-                return True
-            elif key == Qt.Key.Key_Home:
-                os.write(self.master_fd, b'\x1b[H')
-                return True
-            elif key == Qt.Key.Key_End:
-                os.write(self.master_fd, b'\x1b[F')
-                return True
-            elif key == Qt.Key.Key_Escape:
-                os.write(self.master_fd, b'\x1b')
-                return True
-            elif text:
-                os.write(self.master_fd, text.encode('utf-8'))
-                return True
-                
-        except OSError:
-            self._running = False
-            
+
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            if key == Qt.Key.Key_C:
+                return self._handle_ctrl_c()
+            if not self._running or not self._at_prompt:
+                return False
+            return self._handle_ctrl_key(key)
+
+        if not self._running or not self._at_prompt:
+            return False
+
+        if key in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
+            self._submit_line()
+            return True
+
+        if key == Qt.Key.Key_Backspace:
+            if self._cursor_pos > 0:
+                self._line_buffer = (
+                    self._line_buffer[:self._cursor_pos - 1] +
+                    self._line_buffer[self._cursor_pos:]
+                )
+                self._cursor_pos -= 1
+                self._update_line_display()
+            return True
+
+        if key == Qt.Key.Key_Delete:
+            if self._cursor_pos < len(self._line_buffer):
+                self._line_buffer = (
+                    self._line_buffer[:self._cursor_pos] +
+                    self._line_buffer[self._cursor_pos + 1:]
+                )
+                self._update_line_display()
+            return True
+
+        if key == Qt.Key.Key_Left:
+            if self._cursor_pos > 0:
+                self._cursor_pos -= 1
+                self._update_line_display()
+            return True
+
+        if key == Qt.Key.Key_Right:
+            if self._cursor_pos < len(self._line_buffer):
+                self._cursor_pos += 1
+                self._update_line_display()
+            return True
+
+        if key == Qt.Key.Key_Up:
+            self._handle_history_up()
+            return True
+
+        if key == Qt.Key.Key_Down:
+            self._handle_history_down()
+            return True
+
+        if key == Qt.Key.Key_Home:
+            self._cursor_pos = 0
+            self._update_line_display()
+            return True
+
+        if key == Qt.Key.Key_End:
+            self._cursor_pos = len(self._line_buffer)
+            self._update_line_display()
+            return True
+
+        if key == Qt.Key.Key_Tab:
+            self._handle_tab()
+            return True
+
+        if key == Qt.Key.Key_Escape:
+            self._line_buffer = ""
+            self._cursor_pos = 0
+            self._append_output("\n")
+            self._show_prompt()
+            return True
+
+        if text and text.isprintable():
+            self._line_buffer = (
+                self._line_buffer[:self._cursor_pos] +
+                text +
+                self._line_buffer[self._cursor_pos:]
+            )
+            self._cursor_pos += len(text)
+            self._update_line_display()
+            return True
+
         return False
-        
-    def closeEvent(self, event):
-        """Clean up shell on close."""
+
+    def _handle_ctrl_key(self, key):
+        """Handle Ctrl+key combinations."""
+        if key == Qt.Key.Key_D:
+            if not self._line_buffer:
+                self._append_output("exit\n")
+                if self.process:
+                    self.process.write(b'exit\n')
+            else:
+                if self._cursor_pos < len(self._line_buffer):
+                    self._line_buffer = (
+                        self._line_buffer[:self._cursor_pos] +
+                        self._line_buffer[self._cursor_pos + 1:]
+                    )
+                    self._update_line_display()
+            return True
+
+        if key == Qt.Key.Key_L:
+            self.terminal.clear()
+            self._show_prompt()
+            return True
+
+        if key == Qt.Key.Key_A:
+            self._cursor_pos = 0
+            self._update_line_display()
+            return True
+
+        if key == Qt.Key.Key_E:
+            self._cursor_pos = len(self._line_buffer)
+            self._update_line_display()
+            return True
+
+        if key == Qt.Key.Key_U:
+            self._line_buffer = self._line_buffer[self._cursor_pos:]
+            self._cursor_pos = 0
+            self._update_line_display()
+            return True
+
+        if key == Qt.Key.Key_K:
+            self._line_buffer = self._line_buffer[:self._cursor_pos]
+            self._update_line_display()
+            return True
+
+        if key == Qt.Key.Key_W:
+            before = self._line_buffer[:self._cursor_pos]
+            after = self._line_buffer[self._cursor_pos:]
+            stripped = before.rstrip()
+            if stripped:
+                last_space = stripped.rfind(' ')
+                if last_space >= 0:
+                    before = before[:last_space + 1]
+                else:
+                    before = ""
+            self._line_buffer = before + after
+            self._cursor_pos = len(before)
+            self._update_line_display()
+            return True
+
+        return False
+
+    def _handle_ctrl_c(self):
+        """Handle Ctrl+C - cancel current line."""
+        if self._at_prompt:
+            self._append_output("^C\n")
+            self._line_buffer = ""
+            self._cursor_pos = 0
+            self._show_prompt()
+        return True
+
+    def _handle_history_up(self):
+        """Navigate up in command history."""
+        if not self._history:
+            return
+        if self._history_index == -1:
+            self._saved_line = self._line_buffer
+            self._history_index = len(self._history) - 1
+        elif self._history_index > 0:
+            self._history_index -= 1
+        self._line_buffer = self._history[self._history_index]
+        self._cursor_pos = len(self._line_buffer)
+        self._update_line_display()
+
+    def _handle_history_down(self):
+        """Navigate down in command history."""
+        if self._history_index >= 0:
+            if self._history_index < len(self._history) - 1:
+                self._history_index += 1
+                self._line_buffer = self._history[self._history_index]
+            else:
+                self._history_index = -1
+                self._line_buffer = self._saved_line
+            self._cursor_pos = len(self._line_buffer)
+            self._update_line_display()
+
+    def _handle_tab(self):
+        """Handle tab key - file path completion."""
+        words = self._line_buffer[:self._cursor_pos].split()
+        if not words:
+            return
+
+        partial = words[-1]
+        import glob as glob_mod
+
+        try:
+            expanded = os.path.expanduser(partial)
+            if expanded != partial:
+                matches = glob_mod.glob(expanded + '*')
+                home = os.path.expanduser("~")
+                matches = [
+                    '~' + m[len(home):] if m.startswith(home) else m
+                    for m in matches
+                ]
+            else:
+                matches = glob_mod.glob(partial + '*')
+        except (OSError, ValueError):
+            return
+
+        if len(matches) == 1:
+            completion = matches[0][len(partial):]
+            full_path = os.path.expanduser(matches[0])
+            if os.path.isdir(full_path):
+                completion += os.sep
+            self._line_buffer = (
+                self._line_buffer[:self._cursor_pos] +
+                completion +
+                self._line_buffer[self._cursor_pos:]
+            )
+            self._cursor_pos += len(completion)
+            self._update_line_display()
+        elif len(matches) > 1:
+            common = os.path.commonprefix(matches)
+            if len(common) > len(partial):
+                completion = common[len(partial):]
+                self._line_buffer = (
+                    self._line_buffer[:self._cursor_pos] +
+                    completion +
+                    self._line_buffer[self._cursor_pos:]
+                )
+                self._cursor_pos += len(completion)
+                self._update_line_display()
+            else:
+                self._append_output("\n" + "  ".join(matches) + "\n")
+                self._show_prompt()
+                self._line_buffer = self._line_buffer
+                self._cursor_pos = self._cursor_pos
+                self._update_line_display()
+
+    def close(self):
+        """Clean up shell process."""
         self._running = False
-        
-        if self._notifier:
-            self._notifier.setEnabled(False)
-            
-        if self.master_fd is not None:
-            try:
-                os.close(self.master_fd)
-            except OSError:
-                pass
-                
-        if self.pid is not None:
-            try:
-                os.kill(self.pid, 15)
-                os.waitpid(self.pid, os.WNOHANG)
-            except OSError:
-                pass
-                
+        self._output_timer.stop()
+
+        if self.process:
+            self.process.blockSignals(True)
+            if self.process.state() == QProcess.ProcessState.Running:
+                self.process.terminate()
+                if not self.process.waitForFinished(1000):
+                    self.process.kill()
+                    self.process.waitForFinished(500)
+            self.process = None
+
+    def closeEvent(self, event):
+        """Handle widget close."""
+        self.close()
         event.accept()
-        
+
     def focus(self):
         """Focus the terminal."""
         if hasattr(self, 'terminal'):
             self.terminal.setFocus()
-        
-    def resizeEvent(self, event):
-        """Handle resize to update PTY size."""
-        super().resizeEvent(event)
-        if self._running and self.master_fd is not None:
-            self._set_pty_size()

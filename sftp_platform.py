@@ -166,12 +166,13 @@ def get_default_shell():
 def supports_local_terminal():
     """
     Check if the local terminal feature is supported on this platform.
-    
+
+    With QProcess-based terminal (no PTY dependency), local terminal
+    is supported on all platforms including Windows.
+
     Returns:
         bool: True if local terminal is supported
     """
-    if is_windows():
-        return False
     return True
 
 
