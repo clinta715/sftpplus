@@ -113,6 +113,7 @@ class FilePreviewWidget(QWidget):
         super().__init__(parent)
         self._temp_file = None
         self._current_path = None
+        self._active_workers = set()
         self._init_ui()
         self.setMinimumWidth(250)
         self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
@@ -260,7 +261,9 @@ class FilePreviewWidget(QWidget):
         self.title_label.setText(f"📄 {filename}")
         self.text_preview.setPlainText("⏳ Downloading...")
         
-        def on_finished(temp_path, original_path):
+        def on_finished(temp_path, original_path, _worker=None):
+            if _worker:
+                self._active_workers.discard(_worker)
             try:
                 self._cleanup_temp_file()
                 self._temp_file = temp_path
@@ -276,7 +279,9 @@ class FilePreviewWidget(QWidget):
                 pass
                 self.text_preview.setPlainText(f"Error reading file:\n{str(e)}")
         
-        def on_error(original_path, error_msg):
+        def on_error(original_path, error_msg, _worker=None):
+            if _worker:
+                self._active_workers.discard(_worker)
             self.text_preview.setPlainText(f"Error downloading file:\n{error_msg}")
         
         try:
@@ -286,8 +291,9 @@ class FilePreviewWidget(QWidget):
             _register_temp_file(temp_path)
             
             worker = FilePreviewWorker(session_id, file_path, temp_path, is_remote=True)
-            worker.signals.finished.connect(on_finished)
-            worker.signals.error.connect(on_error)
+            self._active_workers.add(worker)
+            worker.signals.finished.connect(lambda t, o: on_finished(t, o, worker))
+            worker.signals.error.connect(lambda o, e: on_error(o, e, worker))
             QThreadPool.globalInstance().start(worker)
             
         except Exception as e:
@@ -306,7 +312,9 @@ class FilePreviewWidget(QWidget):
         self.title_label.setText(f"🖼️ {filename}")
         self.text_preview.setPlainText("⏳ Downloading...")
         
-        def on_finished(temp_path, original_path):
+        def on_finished(temp_path, original_path, _worker=None):
+            if _worker:
+                self._active_workers.discard(_worker)
             try:
                 self._cleanup_temp_file()
                 self._temp_file = temp_path
@@ -337,7 +345,9 @@ class FilePreviewWidget(QWidget):
                 self.image_label.setVisible(False)
                 self.content_area.setWidget(self.text_preview)
         
-        def on_error(original_path, error_msg):
+        def on_error(original_path, error_msg, _worker=None):
+            if _worker:
+                self._active_workers.discard(_worker)
             self.text_preview.setPlainText(f"Error downloading image:\n{error_msg}")
             self.text_preview.setVisible(True)
             self.image_label.setVisible(False)
@@ -350,8 +360,9 @@ class FilePreviewWidget(QWidget):
             _register_temp_file(temp_path)
             
             worker = FilePreviewWorker(session_id, file_path, temp_path, is_remote=True)
-            worker.signals.finished.connect(on_finished)
-            worker.signals.error.connect(on_error)
+            self._active_workers.add(worker)
+            worker.signals.finished.connect(lambda t, o: on_finished(t, o, worker))
+            worker.signals.error.connect(lambda o, e: on_error(o, e, worker))
             QThreadPool.globalInstance().start(worker)
             
         except Exception as e:

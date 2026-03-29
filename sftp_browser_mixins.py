@@ -271,11 +271,7 @@ class FileOpsMixin:
         """Rename remote file or directory"""
         try:
             ops = self.get_sftp_operations()
-            parent = os.path.dirname(remote_path)
-            new_path = os.path.join(parent, new_name)
-            
-            ssh = ops._api._get_ssh()
-            ssh.exec_command(f'mv "{remote_path}" "{new_path}"')
+            ops.rename(remote_path, new_name)
             
             self.message_signal.emit(f"Renamed to: {new_name}")
             self.refresh_files()

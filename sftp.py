@@ -16,7 +16,7 @@ from sftp_filebrowserclass import FileBrowser
 from sftp_creds import get_credentials, set_credentials, del_credentials, create_random_integer, clear_all_credentials, get_home_directory
 from sftp_session import get_session_manager
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
-from PySide6.QtWidgets import QInputDialog, QFileDialog, QLabel, QToolButton, QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QTextEdit, QCompleter, QComboBox, QSpinBox, QTabWidget, QMessageBox, QCheckBox, QMenu
+from PySide6.QtWidgets import QInputDialog, QFileDialog, QLabel, QToolButton, QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QTextEdit, QCompleter, QComboBox, QSpinBox, QTabWidget, QMessageBox, QCheckBox, QMenu, QSizePolicy
 from PySide6.QtCore import Signal, QObject, QCoreApplication, QTimer, QEvent, QMutexLocker
 from PySide6.QtGui import QKeySequence, QShortcut
 import paramiko
@@ -289,7 +289,6 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.about_button = QPushButton("ℹ About")
         self.about_button.setToolTip("About SFTP Client")
         self.about_button.setStyleSheet(BUTTON_STYLE_DARK)
-        self.about_button.clicked.connect(self.show_about_dialog)
         
         prefs = get_preferences()
         self.confirm_exit_checkbox = QCheckBox("Confirm exit")
@@ -360,6 +359,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.status_path.setToolTip("Click to copy current path")
         self.status_path.setCursor(Qt.PointingHandCursor)
         self.status_path.mousePressEvent = self._copy_current_path
+        self.status_path.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         status_bar_layout.addWidget(self.status_path, stretch=1)
         
         status_bar_layout.addWidget(self._create_separator())
@@ -373,6 +373,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         
         self.status_message = QLabel("Ready")
         self.status_message.setStyleSheet("QLabel { color: #7eb8ff; font-size: 11px; }")
+        self.status_message.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         status_bar_layout.addWidget(self.status_message, stretch=1)
         
         status_bar_widget.setLayout(status_bar_layout)
@@ -404,9 +405,6 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.connections_widget.connect_requested.connect(self.handle_connection_request)
         self.connections_widget.open_local_terminal.connect(self.open_local_terminal)
         self.tab_widget.addTab(self.connections_widget, "🔗 Connections")
-        
-        # Connect the edit button to switch to connections tab
-        self.edit_button.clicked.connect(self._switch_to_connections_tab)
         
         # Set initial tab to Connections (index 1)
         # Tab structure: 0=Transfers, 1=Connections, 2+=Connection tabs
@@ -670,6 +668,10 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         # Connect observers
         self.transfer_queue_widget.add_observee(self.file_browser_panel.left_browser)
         self.transfer_queue_widget.add_observee(self.file_browser_panel.right_browser)
+        
+        # Give browsers a reference to the transfer queue for adding jobs
+        self.file_browser_panel.left_browser.transfer_queue_widget = self.transfer_queue_widget
+        self.file_browser_panel.right_browser.transfer_queue_widget = self.transfer_queue_widget
 
         # Connect message signals
         self.file_browser_panel.message.connect(self.update_console)
@@ -1094,6 +1096,11 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         initial_remote_dir = connection_data.get("initial_remote_dir", "")
         initial_local_dir = connection_data.get("initial_local_dir", "")
         ssh_commands = connection_data.get("ssh_commands", "")
+        follow_symlinks = connection_data.get("follow_symlinks", False)
+        
+        # Apply per-host symlink preference to global preferences
+        from sftp_preferences import get_preferences
+        get_preferences().set_bool("follow_symlinks", bool(follow_symlinks))
         
         # Store initial directories in host_data so navigate_to_initial_directories can find them
         if initial_remote_dir:

@@ -7,7 +7,7 @@ import time
 
 from sftp_remotefiletablemodel import RemoteFileTableModel
 from sftp_qt_compat import Qt
-from sftp_transfer_handler import TreePopulateWorker, TraversalWorker
+from sftp_transfer_handler import TreePopulateWorker, TraversalWorker, DeletionWorker
 from sftp_creds import get_credentials
 from sftp_sortfiltermodel import DirectoryFirstSortProxyModel
 from sftp_creds import (get_credentials, create_random_integer, set_credentials,
@@ -24,6 +24,7 @@ class RemoteFileBrowser(FileBrowser):
     def __init__(self, title, session_id, parent=None):
         super().__init__(title, session_id, parent)  # Initialize the FileBrowser parent class
         self.model = RemoteFileTableModel(self.session_id)
+        self._active_tree_workers = set()  # Track workers to prevent premature deletion
         
         # Connect model signals for status and loading feedback
         self.model.status_message.connect(self.message_signal.emit)
@@ -36,23 +37,24 @@ class RemoteFileBrowser(FileBrowser):
         self.table.setModel(self.proxy_model)
 
         # Set horizontal scroll bar policy for the entire table
-        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        # Set fixed row height for consistent appearance
+        # Prevent word-wrap causing multi-line rows
+        self.table.setWordWrap(False)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(22)
 
-        # Make all columns resizable
-        self.table.horizontalHeader().setSectionResizeMode(Qt.HeaderView_Interactive)
-        
-        # Set minimum width for name column to ensure it's always visible
-        self.table.horizontalHeader().setMinimumSectionSize(150)
-        
-        # Set column widths to prevent text truncation
-        self.table.setColumnWidth(0, 300)  # Name column - wide enough for most filenames
-        self.table.setColumnWidth(1, 80)   # Size column
-        self.table.setColumnWidth(2, 90)   # Permissions column
-        self.table.setColumnWidth(3, 140)  # Modified column
+        # Column layout: name stretches to fill, size/perms/date are fixed
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, Qt.HeaderView_Stretch)
+        header.setSectionResizeMode(1, Qt.HeaderView_Interactive)
+        header.setSectionResizeMode(2, Qt.HeaderView_Interactive)
+        header.setSectionResizeMode(3, Qt.HeaderView_Interactive)
+        header.setMinimumSectionSize(60)
+        self.table.setColumnWidth(1, 90)   # Size
+        self.table.setColumnWidth(2, 100)  # Permissions
+        self.table.setColumnWidth(3, 150)  # Modified
+        header.hideSection(2)  # Hide Permissions by default
 
         # Add these lines to enable full row selection
         self.table.setSelectionBehavior(Qt.TableView_SelectRows)
@@ -323,10 +325,15 @@ class RemoteFileBrowser(FileBrowser):
         else:
             return s
 
-    def remove_directory_with_prompt(self, remote_path=None, always=0):
+    def remove_directory_with_prompt(self, remote_path=None, always=0, _depth=0):
         self.always = always
         creds = get_credentials(self.session_id)
         
+        # Prevent infinite recursion
+        if _depth > 100:
+            self.message_signal.emit(f"Maximum recursion depth exceeded at: {remote_path}")
+            return
+
         # If a specific path is provided (e.g., from tree view), use it directly
         if remote_path:
             selected_paths = [remote_path]
@@ -335,36 +342,36 @@ class RemoteFileBrowser(FileBrowser):
             current_browser = self.table
             if current_browser is None or not isinstance(current_browser, QTableView):
                 return
-            
+
             # Give focus to the table to ensure we can get selection
             current_browser.setFocus()
-            
+
             indexes = current_browser.selectedIndexes()
-            
+
             # If no items selected, use the current item (the one with keyboard focus)
             if not indexes:
                 current_idx = current_browser.currentIndex()
                 if current_idx.isValid():
                     indexes = [current_idx]
-            
+
             if not indexes:
                 self.message_signal.emit("Please select file(s) to delete first.")
                 return
-                
+
             # Get unique rows from selected indexes
             processed_rows = set()
             selected_paths = []
-            
+
             for index in indexes:
                 row = index.row()
                 if row in processed_rows:
                     continue
                 processed_rows.add(row)
-                
+
                 # Get filename from first column
                 filename_index = index.sibling(row, 0)
                 selected_item = current_browser.model().data(filename_index, Qt.DisplayRole)
-                
+
                 # Remove type prefix if present
                 filename = selected_item
                 prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
@@ -372,26 +379,26 @@ class RemoteFileBrowser(FileBrowser):
                     if filename.startswith(prefix):
                         filename = filename[len(prefix):].lstrip()
                         break
-                
+
                 # Get current remote directory
                 if creds.get('current_remote_directory') == '.':
                     temp_path = self.sftp_getcwd()
                     if temp_path:
                         set_credentials(self.session_id, 'current_remote_directory', self.remove_trailing_dot(temp_path))
-        
-            full_path = os.path.join(creds.get('current_remote_directory'), filename)
-            selected_paths.append(full_path)
-        
+
+                full_path = os.path.join(creds.get('current_remote_directory'), filename)
+                selected_paths.append(full_path)
+
         if not selected_paths:
             return
-        
+
         # Prompt for confirmation for all selected items
         if not self.always:
             if len(selected_paths) == 1:
                 prompt_msg = f"Are you sure you want to delete '{selected_paths[0]}'?"
             else:
                 prompt_msg = f"Are you sure you want to delete {len(selected_paths)} items?"
-                
+
             response = QMessageBox.question(
                 None,
                 'Confirm Delete',
@@ -401,95 +408,94 @@ class RemoteFileBrowser(FileBrowser):
             )
             if response != Qt.MsgBtn_Yes:
                 return
-        
-        # Track results for summary
-        success_count = 0
-        failure_count = 0
-        failures = []
-        
-        # Show progress dialog for multiple items
-        show_progress = len(selected_paths) > 1
-        progress = None
-        if show_progress:
-            progress = QProgressDialog("Deleting files...", "Cancel", 0, len(selected_paths), self)
-            progress.setWindowTitle("Delete Progress")
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setMinimumDuration(0)
-            progress.setValue(0)
-        
-        # Remove each selected item
-        for i, remote_path in enumerate(selected_paths):
-            if show_progress and progress:
-                progress.setValue(i)
-                progress.setLabelText(f"Deleting: {os.path.basename(remote_path)}")
-                QApplication.processEvents()
-                if progress.wasCanceled():
-                    break
-            
-            try:
-                # Check if the remote path exists
-                if not self.sftp_exists(remote_path):
-                    failure_count += 1
-                    failures.append((remote_path, "Not found"))
-                    continue
-                
-                # Check if it's a file (catch permission errors)
-                try:
-                    is_file = self.is_remote_file(remote_path)
-                except (OSError, PermissionError):
-                    is_file = False
-                
-                if is_file:
-                    try:
-                        self.sftp_remove(remote_path)
-                        success_count += 1
-                    except PermissionError as e:
-                        failure_count += 1
-                        failures.append((remote_path, str(e)))
-                    continue
-                
-                # It's a directory - recursively remove
-                self._remove_remote_directory_recursive(remote_path)
-                success_count += 1
-            except PermissionError as e:
-                failure_count += 1
-                failures.append((remote_path, str(e)))
-            except (OSError, IOError, RuntimeError) as e:
-                failure_count += 1
-                failures.append((remote_path, str(e)))
-        
-        if show_progress and progress:
-            progress.setValue(len(selected_paths))
+
+        # For single item, do it inline (fast, no need for background thread)
+        if len(selected_paths) == 1:
+            self._delete_single_item(selected_paths[0])
+            return
+
+        # Run batch deletion in background thread to keep UI responsive
+        worker = DeletionWorker(selected_paths, self.session_id, is_remote=True)
+
+        progress = QProgressDialog("Deleting files...", "Cancel", 0, len(selected_paths), self)
+        progress.setWindowTitle("Delete Progress")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        # Keep references to prevent garbage collection
+        self._deletion_worker = worker
+        self._deletion_progress = progress
+
+        def on_progress(idx, filename):
+            if progress.wasCanceled():
+                worker.cancel()
+            progress.setValue(idx)
+            progress.setLabelText(f"Deleting: {filename}")
+
+        def on_finished(success_count, failure_count, failures):
             progress.close()
-        
-        # Show summary dialog
-        if len(selected_paths) > 1:
-            summary_parts = []
-            if success_count > 0:
-                summary_parts.append(f"{success_count} deleted successfully")
-            if failure_count > 0:
-                summary_parts.append(f"{failure_count} failed")
-            summary_msg = ", ".join(summary_parts)
-            
-            if failure_count > 0 and len(failures) <= 3:
-                summary_msg += "\n\nFailed items:"
-                for path, error in failures[:3]:
-                    summary_msg += f"\n• {os.path.basename(path)}: {error}"
-                if len(failures) > 3:
-                    summary_msg += f"\n...and {len(failures) - 3} more"
-            
-            QMessageBox.information(self, "Delete Complete", summary_msg)
-        elif len(selected_paths) == 1:
-            if success_count > 0:
-                self.message_signal.emit("Deleted successfully.")
-            elif failure_count > 0 and failures:
-                self.message_signal.emit(f"Delete failed: {failures[0][1]}")
-        
-        #Refresh the browser
+            self._deletion_worker = None
+            self._deletion_progress = None
+
+            if len(selected_paths) > 1:
+                summary_parts = []
+                if success_count > 0:
+                    summary_parts.append(f"{success_count} deleted successfully")
+                if failure_count > 0:
+                    summary_parts.append(f"{failure_count} failed")
+                summary_msg = ", ".join(summary_parts)
+
+                if failure_count > 0 and len(failures) <= 3:
+                    summary_msg += "\n\nFailed items:"
+                    for path, error in failures[:3]:
+                        summary_msg += f"\n• {os.path.basename(path)}: {error}"
+                    if len(failures) > 3:
+                        summary_msg += f"\n...and {len(failures) - 3} more"
+
+                QMessageBox.information(self, "Delete Complete", summary_msg)
+
+            self.model.get_files(force_refresh=True)
+
+        worker.signals.progress.connect(on_progress)
+        worker.signals.finished.connect(on_finished)
+
+        QThreadPool.globalInstance().start(worker)
+        self.message_signal.emit(f"Deleting {len(selected_paths)} items...")
+
+    def _delete_single_item(self, remote_path):
+        """Delete a single item synchronously (for single-item deletes)"""
+        creds = get_credentials(self.session_id)
+
+        try:
+            if not self.sftp_exists(remote_path):
+                self.message_signal.emit("File not found.")
+                return
+
+            try:
+                is_file = self.is_remote_file(remote_path)
+            except (OSError, PermissionError):
+                is_file = False
+
+            if is_file:
+                self.sftp_remove(remote_path)
+            else:
+                self._remove_remote_directory_recursive(remote_path)
+
+            self.message_signal.emit("Deleted successfully.")
+        except PermissionError as e:
+            self.message_signal.emit(f"Delete failed: {e}")
+        except (OSError, IOError, RuntimeError) as e:
+            self.message_signal.emit(f"Delete failed: {e}")
+
         self.model.get_files(force_refresh=True)
     
-    def _remove_remote_directory_recursive(self, remote_path):
+    def _remove_remote_directory_recursive(self, remote_path, _depth=0):
         """Recursively remove a remote directory and its contents"""
+        # Prevent infinite recursion
+        if _depth > 100:
+            return
+            
         # Check if directory exists
         if not self.sftp_exists(remote_path):
             return
@@ -502,12 +508,18 @@ class RemoteFileBrowser(FileBrowser):
             return
         
         # Separate files and subdirectories
-        subdirectories = [entry for entry in directory_contents_attr if stat.S_ISDIR(entry.st_mode)]
-        files = [entry for entry in directory_contents_attr if stat.S_ISREG(entry.st_mode)]
+        # Items are now dicts, not SFTPAttribute objects
+        # Filter out '.', '..', and symlinks
+        subdirectories = [entry for entry in directory_contents_attr 
+                         if stat.S_ISDIR(entry['st_mode']) 
+                         and entry['filename'] not in ['.', '..']]
+        files = [entry for entry in directory_contents_attr 
+                 if stat.S_ISREG(entry['st_mode'])
+                 and entry['filename'] not in ['.', '..']]
         
         # Remove files
         for entry in files:
-            entry_path = os.path.join(remote_path, entry.filename)
+            entry_path = os.path.join(remote_path, entry['filename'])
             try:
                 self.sftp_remove(entry_path)
             except PermissionError:
@@ -519,8 +531,8 @@ class RemoteFileBrowser(FileBrowser):
         
         # Recursively remove subdirectories
         for entry in subdirectories:
-            entry_path = os.path.join(remote_path, entry.filename)
-            self._remove_remote_directory_recursive(entry_path)
+            entry_path = os.path.join(remote_path, entry['filename'])
+            self._remove_remote_directory_recursive(entry_path, _depth + 1)
         
         # Remove the directory itself
         try:
@@ -574,8 +586,14 @@ class RemoteFileBrowser(FileBrowser):
                 self.message_signal.emit(f"Empty directory '{remote_path}' removed successfully.")
                 return
             # Separate files and subdirectories
-            subdirectories = [entry for entry in directory_contents_attr if stat.S_ISDIR(entry.st_mode)]
-            files = [entry for entry in directory_contents_attr if stat.S_ISREG(entry.st_mode)]
+            # Items are now dicts, not SFTPAttribute objects
+            # Filter out '.', '..', and symlinks
+            subdirectories = [entry for entry in directory_contents_attr 
+                             if stat.S_ISDIR(entry['st_mode']) 
+                             and entry['filename'] not in ['.', '..']]
+            files = [entry for entry in directory_contents_attr 
+                     if stat.S_ISREG(entry['st_mode'])
+                     and entry['filename'] not in ['.', '..']]
             if (subdirectories or files) and not self.always:
                 response = QMessageBox.question(
                     None,
@@ -591,14 +609,14 @@ class RemoteFileBrowser(FileBrowser):
 
             # Remove files
             for entry in files:
-                entry_path = os.path.join(remote_path, entry.filename)
+                entry_path = os.path.join(remote_path, entry['filename'])
                 self.message_signal.emit(f"Removing file: {entry_path}")
                 self.sftp_remove(entry_path)
             # Recursively remove subdirectories
             for entry in subdirectories:
-                entry_path = os.path.join(remote_path, entry.filename)
+                entry_path = os.path.join(remote_path, entry['filename'])
                 self.message_signal.emit(f"Recursing into subdirectory: {entry_path}")
-                self.remove_directory_with_prompt(entry_path, self.always)
+                self.remove_directory_with_prompt(entry_path, self.always, _depth + 1)
             # Remove the directory
             self.sftp_rmdir(remote_path)
             self.message_signal.emit(f"Directory '{remote_path}' removed successfully.")
@@ -665,7 +683,8 @@ class RemoteFileBrowser(FileBrowser):
             # Check if it's a directory using cached metadata
             is_dir = False
             if attr_item:
-                is_dir = stat.S_ISDIR(attr_item.st_mode)
+                # Items are now dicts, not SFTPAttribute objects
+                is_dir = stat.S_ISDIR(attr_item['st_mode']) if isinstance(attr_item, dict) else stat.S_ISDIR(attr_item.st_mode)
             elif selected_item_text == "..":
                 is_dir = True
             
@@ -717,12 +736,18 @@ class RemoteFileBrowser(FileBrowser):
                         # For directories, destination should be local_base_path + directory name
                         # This preserves the directory structure: e.g., /mnt/f/__Drivers -> /Downloads/__Drivers
                         dest_dir = os.path.join(local_base_path, filename)
+                        
+                        # Ask about symlinks when starting directory download
+                        prefs = get_preferences()
+                        if prefs.get("follow_symlinks") is not None:
+                            follow_symlinks = prefs.get_bool("follow_symlinks", False)
+                        else:
+                            follow_symlinks = False
                         if not skip_all and not overwrite_all and not resume_all and os.path.exists(local_entry_path):
-                            prefs = get_preferences()
                             if prefs.get_bool("overwrite_on_transfer", False):
                                 overwrite_all = True
                             else:
-                                action = self.prompt_overwrite(local_entry_path)
+                                action, follow_symlinks = self.prompt_overwrite(local_entry_path, include_symlink_option=True)
                                 if action == "cancel":
                                     return
                                 elif action == "skip":
@@ -734,9 +759,26 @@ class RemoteFileBrowser(FileBrowser):
                                     overwrite_all = True
                                 elif action == "resume_all":
                                     resume_all = True
+                        elif not skip_all and not overwrite_all and not resume_all and prefs.get("follow_symlinks") is None:
+                            msg_box = QMessageBox()
+                            msg_box.setIcon(Qt.MsgIcon_Question)
+                            msg_box.setText(f"Download directory: {filename}")
+                            msg_box.setInformativeText("Do you want to follow symbolic links?")
+                            msg_box.setWindowTitle("Directory Download Options")
+                            
+                            dont_follow_btn = msg_box.addButton("Don't Follow Symlinks", Qt.MsgRole_RejectRole)
+                            follow_btn = msg_box.addButton("Follow Symlinks", Qt.MsgRole_AcceptRole)
+                            cancel_btn = msg_box.addButton("Cancel", Qt.MsgRole_DestructiveRole)
+                            
+                            msg_box.exec()
+                            
+                            if msg_box.clickedButton() == cancel_btn:
+                                continue
+                            elif msg_box.clickedButton() == follow_btn:
+                                follow_symlinks = True
 
                         if not skip_all:
-                            self.download_directory(remote_entry_path, dest_dir, skip_all, overwrite_all, resume_all)
+                            self.download_directory(remote_entry_path, dest_dir, skip_all, overwrite_all, resume_all, follow_symlinks)
                     else:
                         # Handle individual file
                         if not skip_all and not overwrite_all and not resume_all and os.path.exists(local_entry_path):
@@ -744,7 +786,12 @@ class RemoteFileBrowser(FileBrowser):
                             if prefs.get_bool("overwrite_on_transfer", False):
                                 overwrite_all = True
                             else:
-                                action = self.prompt_overwrite(local_entry_path)
+                                result = self.prompt_overwrite(local_entry_path)
+                                # Handle both tuple (directory) and string (file) returns
+                                if isinstance(result, tuple):
+                                    action, _ = result
+                                else:
+                                    action = result
                                 if action == "cancel":
                                     return
                                 elif action == "skip":
@@ -811,7 +858,8 @@ class RemoteFileBrowser(FileBrowser):
                         destination_directory: str,
                         skip_all: bool = False,
                         overwrite_all: bool = False, 
-                        resume_all: bool = False) -> None:
+                        resume_all: bool = False,
+                        follow_symlinks: bool = False) -> tuple:
         """
         Download a directory and its contents from the remote server.
         Uses QThreadPool for thread-safe background execution with proper prompt handling.
@@ -820,19 +868,28 @@ class RemoteFileBrowser(FileBrowser):
         from PySide6.QtCore import QThreadPool
         from sftp_qt_compat import Qt
         
-        
         worker = TraversalWorker(
             self.session_id, source_directory, destination_directory,
             is_source_remote=True, is_dest_remote=False,
-            skip_all=skip_all, overwrite_all=overwrite_all, resume_all=resume_all
+            skip_all=skip_all, overwrite_all=overwrite_all, resume_all=resume_all,
+            follow_symlinks=follow_symlinks
         )
         
         worker.signals.status.connect(
             lambda msg: self.message_signal.emit(msg),
             type=Qt.QueuedConnection
         )
+        worker.signals.discovery_progress.connect(
+            lambda files, dirs: self.transfer_queue_widget.on_discovery_progress(files, dirs)
+            if hasattr(self, 'transfer_queue_widget') and self.transfer_queue_widget else None,
+            type=Qt.QueuedConnection
+        )
+        worker.signals.finished_with_files.connect(
+            lambda file_list: self._add_files_to_queue(file_list, worker),
+            type=Qt.QueuedConnection
+        )
         worker.signals.job_added.connect(
-            lambda jid: self.transfer_started.emit(jid) if hasattr(self, 'transfer_started') and self.transfer_started else None,
+            lambda jid: self.transfer_started.emit(jid) if self.transfer_started else None,
             type=Qt.QueuedConnection
         )
         worker.signals.prompt_overwrite.connect(
@@ -852,6 +909,76 @@ class RemoteFileBrowser(FileBrowser):
         
         QThreadPool.globalInstance().start(worker)
         self.message_signal.emit(f"Started download of {source_directory}")
+        return skip_all, overwrite_all, resume_all
+
+    def _add_files_to_queue(self, file_list, worker):
+        """Add discovered files to transfer queue - just queue them all"""
+        if not hasattr(self, 'transfer_queue_widget') or not self.transfer_queue_widget:
+            return
+        if not file_list:
+            return
+        
+        import time
+        group_id = f"download_{int(time.time() * 1000)}"
+        
+        self.transfer_queue_widget.start_transfer_group(group_id, len(file_list))
+        
+        for source_path, dest_path, command in file_list:
+            job_id = create_random_integer()
+            add_sftp_job(
+                source_path, worker.is_source_remote, dest_path, worker.is_dest_remote,
+                worker.creds.get('hostname', ''),
+                worker.creds.get('username', ''),
+                worker.creds.get('password', ''),
+                worker.creds.get('port', 22),
+                command, job_id, worker.creds.get('key')
+            )
+            self.transfer_queue_widget.add_to_group(job_id, group_id)
+            
+            if self.transfer_started:
+                self.transfer_started.emit(str(job_id))
+        
+        self.transfer_queue_widget.on_discovery_finished()
+
+    def _prompt_batch_overwrite(self, filename, remaining):
+        """Prompt user about overwriting during batch transfer"""
+        msg_box = QMessageBox()
+        msg_box.setIcon(Qt.MsgIcon_Question)
+        msg_box.setText(f"'{filename}' already exists locally.")
+        msg_box.setInformativeText(f"{remaining} files remaining. What would you like to do?")
+        msg_box.setWindowTitle("File Exists")
+        
+        overwrite_all_btn = msg_box.addButton("Overwrite All", Qt.MsgRole_YesRole)
+        overwrite_btn = msg_box.addButton("Overwrite", Qt.MsgRole_YesRole)
+        skip_all_btn = msg_box.addButton("Skip All", Qt.MsgRole_NoRole)
+        skip_btn = msg_box.addButton("Skip", Qt.MsgRole_NoRole)
+        resume_all_btn = msg_box.addButton("Resume All", Qt.MsgRole_AcceptRole)
+        cancel_btn = msg_box.addButton("Cancel All", Qt.MsgRole_RejectRole)
+        
+        msg_box.exec()
+        
+        clicked = msg_box.clickedButton()
+        if clicked == overwrite_all_btn:
+            return "overwrite_all"
+        elif clicked == overwrite_btn:
+            return "overwrite"
+        elif clicked == skip_all_btn:
+            return "skip_all"
+        elif clicked == skip_btn:
+            return "skip"
+        elif clicked == resume_all_btn:
+            return "resume_all"
+        else:
+            return "cancel"
+
+    def _handle_worker_prompt(self, worker, path):
+        """Handle overwrite prompt request from background worker on UI thread"""
+        result = self.prompt_overwrite(path)
+        if isinstance(result, tuple):
+            action, _ = result
+        else:
+            action = result
+        worker.set_prompt_result(action)
 
     def cancel_current_transfer(self):
         """Cancel the current directory transfer"""
@@ -938,23 +1065,30 @@ class RemoteFileBrowser(FileBrowser):
         from PySide6.QtWidgets import QTreeWidgetItem
         from PySide6.QtCore import QThreadPool
         
-        def on_finished(pop_path, directories):
+        def on_finished(pop_path, directories, _worker=None):
+            if _worker:
+                self._active_tree_workers.discard(_worker)
             self.tree_status_label.setText(f"✅ {pop_path} - {len(directories)} subdirectories")
             for attr in directories:
                 child_item = QTreeWidgetItem(parent_item)
-                child_item.setText(0, "📁 " + attr.filename)
-                full_path = os.path.join(pop_path, attr.filename) if pop_path != '/' else '/' + attr.filename
+                # Items are now dicts, not SFTPAttribute objects
+                child_item.setText(0, "📁 " + attr['filename'])
+                full_path = os.path.join(pop_path, attr['filename']) if pop_path != '/' else '/' + attr['filename']
                 child_item.setData(0, Qt.UserRole, {'path': full_path, 'is_dir': True, 'is_root': False})
                 dummy_child = QTreeWidgetItem(child_item)
                 dummy_child.setText(0, "⏳ Loading...")
             self.tree_widget.update()
         
-        def on_error(pop_path, error_msg):
+        def on_error(pop_path, error_msg, _worker=None):
+            if _worker:
+                self._active_tree_workers.discard(_worker)
             self.tree_status_label.setText(f"❌ Error: {error_msg[:50]}")
         
         worker = TreePopulateWorker(self.session_id, path, is_remote=True)
-        worker.signals.finished.connect(on_finished)
-        worker.signals.error.connect(on_error)
+        self._active_tree_workers.add(worker)
+        
+        worker.signals.finished.connect(lambda p, d: on_finished(p, d, worker))
+        worker.signals.error.connect(lambda p, e: on_error(p, e, worker))
         
         self.tree_status_label.setText(f"⏳ Loading {path}...")
         QThreadPool.globalInstance().start(worker)

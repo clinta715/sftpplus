@@ -2,11 +2,13 @@ from sftp_browserclass import Browser
 from sftp_filetablemodel import FileTableModel
 from sftp_sortfiltermodel import DirectoryFirstSortProxyModel
 from PySide6.QtWidgets import QMessageBox, QHeaderView, QTableView, QApplication, QProgressDialog
+from PySide6.QtCore import QThreadPool
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 import os 
 import shutil
 
 from sftp_creds import get_credentials, set_credentials
+from sftp_transfer_handler import DeletionWorker
 
 class FileBrowser(Browser):
     def __init__(self, title, session_id, parent=None):
@@ -21,13 +23,26 @@ class FileBrowser(Browser):
         self.table.setModel(self.proxy_model)
 
         # Set horizontal scroll bar policy for the entire table
-        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        # Make all columns resizable
-        self.table.horizontalHeader().setSectionResizeMode(Qt.HeaderView_Interactive)
-        
-        # Set minimum width for name column to ensure it's always visible
-        self.table.horizontalHeader().setMinimumSectionSize(150)
+        # Prevent word-wrap causing multi-line rows
+        self.table.setWordWrap(False)
+        self.table.verticalHeader().setDefaultSectionSize(22)
+
+        # Column layout: name stretches to fill, size/date are fixed, permissions hidden
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, Qt.HeaderView_Stretch)
+        header.setSectionResizeMode(1, Qt.HeaderView_Interactive)
+        header.setSectionResizeMode(2, Qt.HeaderView_Interactive)
+        header.setSectionResizeMode(3, Qt.HeaderView_Interactive)
+        header.setMinimumSectionSize(60)
+        self.table.setColumnWidth(1, 90)   # Size
+        self.table.setColumnWidth(2, 100)  # Permissions
+        self.table.setColumnWidth(3, 150)  # Modified
+        header.hideSection(2)  # Hide Permissions by default
+
+        # Hide permissions column by default
+        self.table.setColumnHidden(2, True)
         
         # Add these lines to enable full row selection
         self.table.setSelectionBehavior(Qt.TableView_SelectRows)
@@ -37,11 +52,11 @@ class FileBrowser(Browser):
         self.table.setSortingEnabled(True)
         self.table.sortByColumn(0, Qt.AscendingOrder)
 
-        # Set column widths to prevent text truncation
-        self.table.setColumnWidth(0, 300)  # Name column - wide enough for most filenames
-        self.table.setColumnWidth(1, 80)   # Size column
-        self.table.setColumnWidth(2, 90)   # Permissions column
-        self.table.setColumnWidth(3, 140)  # Modified column
+        # Fix tree view buttons for local browser (upload, not download)
+        self.tree_download_btn.setText("⬆️ Upload")
+        self.tree_download_btn.setToolTip("Upload selected directory to remote")
+        self.tree_download_all_btn.setText("⬆️⬆️ Upload All")
+        self.tree_download_all_btn.setToolTip("Upload all visible directories to remote")
 
     def remove_directory_with_prompt(self, local_path=None, always=0):
         self.always = always
@@ -51,25 +66,25 @@ class FileBrowser(Browser):
         current_browser = self.table
         if current_browser is None:
             return
-            
+
         indexes = current_browser.selectedIndexes()
         if not indexes:
             return
-            
+
         # Get unique rows from selected indexes
         processed_rows = set()
         selected_paths = []
-        
+
         for index in indexes:
             row = index.row()
             if row in processed_rows:
                 continue
             processed_rows.add(row)
-            
+
             # Get filename from first column
             filename_index = index.sibling(row, 0)
             selected_item = current_browser.model().data(filename_index, Qt.DisplayRole)
-            
+
             # Remove type prefix if present
             filename = selected_item
             prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
@@ -77,20 +92,20 @@ class FileBrowser(Browser):
                 if filename.startswith(prefix):
                     filename = filename[len(prefix):].lstrip()
                     break
-            
+
             full_path = os.path.join(creds.get('current_local_directory'), filename)
             selected_paths.append(full_path)
-        
+
         if not selected_paths:
             return
-        
+
         # Prompt for confirmation for all selected items
         if not self.always:
             if len(selected_paths) == 1:
                 prompt_msg = f"Are you sure you want to delete '{selected_paths[0]}'?"
             else:
                 prompt_msg = f"Are you sure you want to delete {len(selected_paths)} items?"
-                
+
             response = QMessageBox.question(
                 None,
                 'Confirm Delete',
@@ -100,78 +115,78 @@ class FileBrowser(Browser):
             )
             if response != Qt.MsgBtn_Yes:
                 return
-        
-        # Track results for summary
-        success_count = 0
-        failure_count = 0
-        failures = []
-        
-        # Show progress dialog for multiple items
-        show_progress = len(selected_paths) > 1
-        progress = None
-        if show_progress:
-            progress = QProgressDialog("Deleting files...", "Cancel", 0, len(selected_paths), self)
-            progress.setWindowTitle("Delete Progress")
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setMinimumDuration(0)
-            progress.setValue(0)
-        
-        # Remove each selected item
-        for i, path in enumerate(selected_paths):
-            if show_progress and progress:
-                progress.setValue(i)
-                progress.setLabelText(f"Deleting: {os.path.basename(path)}")
-                QApplication.processEvents()
-                if progress.wasCanceled():
-                    break
-            
-            try:
-                # Check if path exists
-                if not os.path.exists(path):
-                    failure_count += 1
-                    failures.append((path, "Not found"))
-                    continue
-                
-                # Check if it's a file (not directory)
-                if os.path.isfile(path):
-                    os.remove(path)
-                    success_count += 1
-                else:
-                    # It's a directory - recursively remove
-                    shutil.rmtree(path)
-                    success_count += 1
-            except (OSError, IOError, RuntimeError) as e:
-                failure_count += 1
-                failures.append((path, str(e)))
-        
-        if show_progress and progress:
-            progress.setValue(len(selected_paths))
+
+        # For single item, do it inline (fast, no need for background thread)
+        if len(selected_paths) == 1:
+            self._delete_single_item_local(selected_paths[0])
+            return
+
+        # Run batch deletion in background thread to keep UI responsive
+        worker = DeletionWorker(selected_paths, is_remote=False)
+
+        progress = QProgressDialog("Deleting files...", "Cancel", 0, len(selected_paths), self)
+        progress.setWindowTitle("Delete Progress")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        # Keep references to prevent garbage collection
+        self._deletion_worker = worker
+        self._deletion_progress = progress
+
+        def on_progress(idx, filename):
+            if progress.wasCanceled():
+                worker.cancel()
+            progress.setValue(idx)
+            progress.setLabelText(f"Deleting: {filename}")
+
+        def on_finished(success_count, failure_count, failures):
             progress.close()
-        
-        # Show summary dialog
-        if len(selected_paths) > 1:
-            summary_parts = []
-            if success_count > 0:
-                summary_parts.append(f"{success_count} deleted successfully")
-            if failure_count > 0:
-                summary_parts.append(f"{failure_count} failed")
-            summary_msg = ", ".join(summary_parts)
-            
-            if failure_count > 0 and len(failures) <= 3:
-                summary_msg += "\n\nFailed items:"
-                for path, error in failures[:3]:
-                    summary_msg += f"\n• {os.path.basename(path)}: {error}"
-                if len(failures) > 3:
-                    summary_msg += f"\n...and {len(failures) - 3} more"
-            
-            QMessageBox.information(self, "Delete Complete", summary_msg)
-        elif len(selected_paths) == 1:
-            if success_count > 0:
-                self.message_signal.emit(f"Deleted successfully.")
-            elif failure_count > 0:
-                self.message_signal.emit(f"Delete failed: {failures[0][1]}")
-        
-        # Refresh the browser
+            self._deletion_worker = None
+            self._deletion_progress = None
+
+            if len(selected_paths) > 1:
+                summary_parts = []
+                if success_count > 0:
+                    summary_parts.append(f"{success_count} deleted successfully")
+                if failure_count > 0:
+                    summary_parts.append(f"{failure_count} failed")
+                summary_msg = ", ".join(summary_parts)
+
+                if failure_count > 0 and len(failures) <= 3:
+                    summary_msg += "\n\nFailed items:"
+                    for path, error in failures[:3]:
+                        summary_msg += f"\n• {os.path.basename(path)}: {error}"
+                    if len(failures) > 3:
+                        summary_msg += f"\n...and {len(failures) - 3} more"
+
+                QMessageBox.information(self, "Delete Complete", summary_msg)
+
+            self.model.get_files()
+            self.notify_observers()
+
+        worker.signals.progress.connect(on_progress)
+        worker.signals.finished.connect(on_finished)
+
+        QThreadPool.globalInstance().start(worker)
+        self.message_signal.emit(f"Deleting {len(selected_paths)} items...")
+
+    def _delete_single_item_local(self, path):
+        """Delete a single local item synchronously (for single-item deletes)"""
+        try:
+            if not os.path.exists(path):
+                self.message_signal.emit("File not found.")
+                return
+
+            if os.path.isfile(path):
+                os.remove(path)
+            else:
+                shutil.rmtree(path)
+
+            self.message_signal.emit("Deleted successfully.")
+        except (OSError, IOError, RuntimeError) as e:
+            self.message_signal.emit(f"Delete failed: {e}")
+
         self.model.get_files()
         self.notify_observers()
 

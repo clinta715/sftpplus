@@ -21,6 +21,7 @@ DEFAULT_PREFERENCES = {
     "show_hidden_files": False,
     "default_local_directory": "",
     "default_remote_directory": "",
+    "follow_symlinks": False,
     "tree_view_position": "above",
     "toolbar_buttons": [
         {"id": "refresh", "text": "↻ Refresh", "tooltip": "Refresh current directory", "visible": True},

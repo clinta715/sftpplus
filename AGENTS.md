@@ -323,6 +323,23 @@ finally:
         ic(f"Error closing SSH: {e}")
 ```
 
+5. **Always protect signal emissions in QRunnable workers:**
+```python
+# CORRECT - Signal emission won't crash if GC collected the QObject
+def _safe_emit(self, signal, *args):
+    try:
+        signal.emit(*args)
+    except RuntimeError:
+        pass
+
+# INCORRECT - Crashes if WorkerSignals was garbage collected
+self.signals.finished.emit(self.transfer_id)
+```
+Workers store `self.signals = SomeQObject()` with no parent, so Python's GC can collect it while `run()` is still executing. Every `emit()` must be wrapped.
+
+6. **Connection pool respects channel limits:**
+The pool enforces `_max_channels_per_ssh` (default 8). Never destroy an SSH connection just because one channel open failed — it kills all other active transfers sharing that connection.
+
 ### Code Formatting
 
 - **Line length:** Relaxed standard, max 120 characters
@@ -574,6 +591,80 @@ elif action == "overwrite":
     # Falls through to add job with original command
     pass
 ```
+
+### Signal Source Deleted & Connection Pool Cascading Failure (2026-03-29) - CRITICAL FIX
+
+Multiple transfers would fail mid-run with `RuntimeError: Signal source has been deleted`, and once one transfer failed it would cascade to kill all other transfers sharing the same SSH connection.
+
+**Root Cause 1 — Signal GC:**
+Workers store `self.signals = WorkerSignals()` (a QObject with no parent). When the transfer queue's `cleanup_transfer()` removes a `Transfer` from the list, the last Python reference to the worker drops, and Python's GC collects the `WorkerSignals` QObject while the worker's `run()` is still executing in the thread pool.
+
+**Root Cause 2 — Connection pool cascading failure:**
+The pool never enforced `_max_channels_per_ssh` (set to 8). When the Nth transfer tried to open one channel too many, the `except` block called `_close_conn_info()` which **destroyed the SSH connection for all other active transfers sharing it**.
+
+**Fix 1 — `_safe_emit()` pattern:**
+All QRunnable workers must wrap every `signal.emit()` call in a try/except RuntimeError. Both `DownloadWorker` and all workers in `sftp_transfer_handler.py` now use a `_safe_emit()` helper:
+
+```python
+# In DownloadWorker (instance method)
+def _safe_emit(self, signal, *args):
+    try:
+        signal.emit(*args)
+    except RuntimeError:
+        pass
+
+# In sftp_transfer_handler.py (module-level function)
+def _safe_emit(signal, *args):
+    try:
+        signal.emit(*args)
+    except RuntimeError:
+        pass
+```
+
+**Fix 2 — Worker reference retention:**
+`TransferQueueWidget` now maintains a `_running_workers` set holding strong references to active workers. Workers are added on start and removed in `cleanup_transfer()`.
+
+**Fix 3 — Connection pool channel limits:**
+`sftp_connection_pool.py` now checks `total_channels >= _max_channels_per_ssh` *before* attempting to open a new channel. Connections at capacity are kept alive (not destroyed) and a new SSH connection is created instead.
+
+**Files Modified:**
+- `sftp_downloadworkerclass.py` — `_safe_emit()` added; all 15 signal emissions protected
+- `sftp_transfer_handler.py` — `_safe_emit()` module function; all 20+ emissions protected across 5 worker classes
+- `sftp_transfer_queue_widget.py` — `_running_workers` set added
+- `sftp_connection_pool.py` — Channel limit enforced; cascading failure prevented
+
+### File Browser UI Fixes (2026-03-29)
+
+Several long-standing display issues were fixed:
+
+**1. Text elision direction:**
+The base `Browser.init_ui()` had `setTextElideMode(Qt.TextElideMode_Left)` which showed `...long_filename.txt`. Changed to `TextElideMode_Right` so filenames show `long_file...`.
+
+**2. Directory prefix removal:**
+The `[DIR]`, `[LINK]`, `[LINK→DIR]` text prefixes were removed from `DisplayRole` in both `FileTableModel` and `RemoteFileTableModel`. Directories are still visually distinguished by **bold** font (`FontRole`) and **blue** color (`ForegroundRole`). The sort proxy model now uses `FontRole.bold()` to detect directories instead of text prefix matching.
+
+**3. Column layout:**
+- Name column (0) uses `Stretch` mode — fills remaining space, elides from right
+- Size (1) and Modified (3) are `Interactive` (user-resizable)
+- Permissions (2) is **hidden by default** (`hideSection(2)`)
+- `setWordWrap(False)` prevents text from wrapping to a second line
+- Fixed row height (22px) in both local and remote browsers
+
+**4. Status bar resizing:**
+Long pathnames in the status bar would expand the entire window. Both `status_path` and `status_message` labels now use `QSizePolicy.Ignored` so they never drive the window size.
+
+**5. Tree view button labels:**
+Local browser tree view buttons now show "Upload" / "Upload All" instead of "Download" / "Download All". Both tree views already use the same `upload_directory()` / `download_directory()` methods as the browser right-click actions.
+
+**Files Modified:**
+- `sftp_browserclass.py` — Text elide mode, word wrap, row height
+- `sftp_filetablemodel.py` — Removed [DIR]/[LINK] prefixes, added TextAlignmentRole
+- `sftp_remotefiletablemodel.py` — Removed [DIR]/[LINK] prefixes, added TextAlignmentRole
+- `sftp_sortfiltermodel.py` — Directory detection via FontRole instead of text prefix
+- `sftp_filebrowserclass.py` — Column layout, hidden permissions, upload button labels
+- `sftp_remotefilebrowserclass.py` — Column layout, hidden permissions
+- `sftp_qt_compat.py` — Added `TextAlignmentRole`, `AlignLeft`, `ScrollBarAlwaysOff`
+- `sftp.py` — Status bar size policy
 
 ### Remote Directory Tracking (CRITICAL)
 

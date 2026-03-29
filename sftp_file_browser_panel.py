@@ -227,8 +227,12 @@ class FileBrowserPanel(QWidget):
         file_path = f"{current_dir}/{filename}".replace('//', '/')
         
         file_size = file_info.get('size', file_info.get('st_size', 0))
-        if hasattr(file_info.get('attr'), 'st_size'):
-            file_size = file_info['attr'].st_size
+        if 'attr' in file_info:
+            attr = file_info['attr']
+            if isinstance(attr, dict):
+                file_size = attr.get('st_size', 0)
+            elif hasattr(attr, 'st_size'):
+                file_size = attr.st_size
         
         modified = file_info.get('modified', file_info.get('mtime', ''))
         permissions = file_info.get('permissions', file_info.get('mode', ''))

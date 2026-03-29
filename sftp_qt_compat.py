@@ -16,6 +16,7 @@ class QtCompat:
     UserRole = QtCore.Qt.ItemDataRole.UserRole
     FontRole = QtCore.Qt.ItemDataRole.FontRole
     ForegroundRole = QtCore.Qt.ItemDataRole.ForegroundRole
+    TextAlignmentRole = QtCore.Qt.ItemDataRole.TextAlignmentRole
     
     # CheckState
     Unchecked = QtCore.Qt.CheckState.Unchecked
@@ -31,12 +32,14 @@ class QtCompat:
     DescendingOrder = QtCore.Qt.SortOrder.DescendingOrder
     
     # AlignmentFlag
+    AlignLeft = QtCore.Qt.AlignmentFlag.AlignLeft
     AlignRight = QtCore.Qt.AlignmentFlag.AlignRight
     AlignCenter = QtCore.Qt.AlignmentFlag.AlignCenter
     
     # ScrollBarPolicy
     ScrollBarAsNeeded = Qt.ScrollBarPolicy.ScrollBarAsNeeded
     ScrollBarAlwaysOn = Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+    ScrollBarAlwaysOff = Qt.ScrollBarPolicy.ScrollBarAlwaysOff
     
     # FocusPolicy
     StrongFocus = QtCore.Qt.FocusPolicy.StrongFocus
@@ -95,6 +98,7 @@ class QtCompat:
     # SelectionBehavior and SelectionMode for QTableView
     TableView_SelectRows = QTableView.SelectionBehavior.SelectRows
     TableView_ExtendedSelection = QTableView.SelectionMode.ExtendedSelection
+    ScrollMode_PerPixel = QTableView.ScrollMode.ScrollPerPixel
     
     # SelectionMode for QTableWidget
     TableWidget_SingleSelection = QTableWidget.SelectionMode.SingleSelection

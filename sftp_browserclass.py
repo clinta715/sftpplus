@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QTableView, QApplication, QWidget, QVBoxLayout, QLabel, QFileDialog, QMessageBox, QInputDialog, QMenu, QHeaderView, QProgressBar, QSizePolicy, QTreeWidget, QTreeWidgetItem, QPushButton, QHBoxLayout, QProgressDialog, QLineEdit, QToolButton
+from PySide6.QtWidgets import QTableView, QApplication, QWidget, QVBoxLayout, QLabel, QFileDialog, QMessageBox, QInputDialog, QMenu, QHeaderView, QProgressBar, QSizePolicy, QTreeWidget, QTreeWidgetItem, QPushButton, QHBoxLayout, QProgressDialog, QLineEdit, QToolButton, QCheckBox
 from PySide6.QtCore import Signal, QTimer, QEventLoop, QModelIndex, QThreadPool
 from sftp_qt_compat import Qt
 import stat
@@ -18,6 +18,7 @@ from sftp_downloadworkerclass import (create_response_queue, delete_response_que
                                        check_response_queue, wait_for_response, QueueItem, ResponseQueueContext,
                                        add_sftp_job)
 from sftp_session_executor import SFTPSessionAPI, create_session_api
+from sftp_preferences import get_preferences
 from sftp_session import SFTPCredentials, get_session_manager
 from sftp_browser_mixins import TreeViewMixin, BookmarkMixin, FileOpsMixin
 from sftp_drag_drop import start_drag, can_accept_drop, DragDropInfo
@@ -186,11 +187,9 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(22)
         self.table.verticalHeader().setStretchLastSection(False)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.horizontalHeader().setSectionResizeMode(Qt.HeaderView_Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(Qt.HeaderView_Interactive)
-        # Show start of filename instead of end when truncated
-        self.table.setTextElideMode(Qt.TextElideMode_Left)
+        self.table.setWordWrap(False)
+        # Show end of filename truncated with "..." on the right
+        self.table.setTextElideMode(Qt.TextElideMode_Right)
         self.table.setSortingEnabled(True)
 
         self.table.doubleClicked.connect(self.double_click_handler)
@@ -868,14 +867,17 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             if hasattr(self.model, 'attr_cache'):
                 cached_attr = self.model.attr_cache.get(remote_path)
                 if cached_attr and time.time() - self.model.attr_cache_time.get(remote_path, 0) < self.model.cache_duration:
-                    is_dir = stat.S_ISDIR(cached_attr.st_mode)
+                    # Handle both dict and paramiko object
+                    st_mode = cached_attr['st_mode'] if isinstance(cached_attr, dict) else cached_attr.st_mode
+                    is_dir = stat.S_ISDIR(st_mode)
                     return is_dir
 
             if self.session_api is None:
                 return False
 
             attr = self.session_api.stat(remote_path)
-            is_dir = stat.S_ISDIR(attr.st_mode)
+            # Attr is now a dict, not SFTPAttribute object
+            is_dir = stat.S_ISDIR(attr['st_mode'])
 
             if hasattr(self.model, 'attr_cache'):
                 self.model.attr_cache[remote_path] = attr
@@ -908,7 +910,8 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                 return False
 
             attr = self.session_api.stat(remote_path)
-            is_directory = stat.S_ISDIR(attr.st_mode)
+            # Attr is now a dict, not SFTPAttribute object
+            is_directory = stat.S_ISDIR(attr['st_mode'])
             is_file = not is_directory
             return is_file
 
@@ -1266,10 +1269,37 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
 
                         if os.path.isdir(selected_path):
                             self.message_signal.emit(f"Uploading directory: {selected_path}")
+                            
+                            # Ask about symlinks when starting directory upload
+                            from sftp_preferences import get_preferences
+                            prefs = get_preferences()
+                            if prefs.get("follow_symlinks") is not None:
+                                follow_symlinks = prefs.get_bool("follow_symlinks", False)
+                            else:
+                                follow_symlinks = False
+                            if not skip_all and not overwrite_all and not resume_all and prefs.get("follow_symlinks") is None:
+                                msg_box = QMessageBox()
+                                msg_box.setIcon(Qt.MsgIcon_Question)
+                                msg_box.setText(f"Upload directory: {os.path.basename(selected_path)}")
+                                msg_box.setInformativeText("Do you want to follow symbolic links?")
+                                msg_box.setWindowTitle("Directory Upload Options")
+                                
+                                dont_follow_btn = msg_box.addButton("Don't Follow Symlinks", Qt.MsgRole_RejectRole)
+                                follow_btn = msg_box.addButton("Follow Symlinks", Qt.MsgRole_AcceptRole)
+                                cancel_btn = msg_box.addButton("Cancel", Qt.MsgRole_DestructiveRole)
+                                
+                                msg_box.exec()
+                                
+                                if msg_box.clickedButton() == cancel_btn:
+                                    continue
+                                elif msg_box.clickedButton() == follow_btn:
+                                    follow_symlinks = True
+                            
                             # Pass the global flags to directory upload
                             skip_all, overwrite_all, resume_all = self.upload_directory(
                                 selected_path, remote_entry_path, 
-                                skip_all=skip_all, overwrite_all=overwrite_all, resume_all=resume_all)
+                                skip_all=skip_all, overwrite_all=overwrite_all, resume_all=resume_all,
+                                follow_symlinks=follow_symlinks)
                         else:
                             # Handle individual file upload with resume support
                             
@@ -1278,7 +1308,12 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                             
                             # If no global flags are set and file exists, prompt user
                             if file_exists and not skip_all and not overwrite_all and not resume_all:
-                                action = self.prompt_overwrite(remote_entry_path)
+                                result = self.prompt_overwrite(remote_entry_path)
+                                # Handle both tuple and string returns
+                                if isinstance(result, tuple):
+                                    action, _ = result
+                                else:
+                                    action = result
                                 if action == "cancel":
                                     return
                                 elif action == "skip":
@@ -1380,7 +1415,12 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             return None, skip_all, overwrite_all, resume_all
         
         # Prompt user for action
-        action = self.prompt_overwrite(target_path)
+        result = self.prompt_overwrite(target_path)
+        # Handle both tuple and string returns
+        if isinstance(result, tuple):
+            action, _ = result
+        else:
+            action = result
         
         if action == "skip_all":
             return "skip", True, overwrite_all, resume_all
@@ -1556,7 +1596,8 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         return skip_all, overwrite_all, resume_all
 
     def upload_directory(self, source_directory, destination_directory, 
-                        skip_all=False, overwrite_all=False, resume_all=False, always=0):
+                        skip_all=False, overwrite_all=False, resume_all=False, 
+                        follow_symlinks=False, always=0):
         """
         Upload a directory and its contents to the remote server.
         Uses QThreadPool for thread-safe background execution with proper prompt handling.
@@ -1568,11 +1609,22 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         worker = TraversalWorker(
             self.session_id, source_directory, destination_directory,
             is_source_remote=False, is_dest_remote=True,
-            skip_all=skip_all, overwrite_all=overwrite_all, resume_all=resume_all
+            skip_all=skip_all, overwrite_all=overwrite_all, resume_all=resume_all,
+            follow_symlinks=follow_symlinks
         )
         
         worker.signals.status.connect(
             lambda msg: self.message_signal.emit(msg), 
+            type=Qt.QueuedConnection
+        )
+        worker.signals.discovery_progress.connect(
+            lambda files, dirs: self.transfer_queue_widget.on_discovery_progress(files, dirs) 
+            if hasattr(self, 'transfer_queue_widget') and self.transfer_queue_widget else None,
+            type=Qt.QueuedConnection
+        )
+        # Handle files discovered - add them to queue
+        worker.signals.finished_with_files.connect(
+            lambda file_list: self._add_files_to_queue(file_list, worker),
             type=Qt.QueuedConnection
         )
         worker.signals.job_added.connect(
@@ -1598,9 +1650,42 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         self.message_signal.emit(f"Started upload of {source_directory}")
         return skip_all, overwrite_all, resume_all
 
+    def _add_files_to_queue(self, file_list, worker):
+        """Add discovered files to transfer queue - just queue them all"""
+        if not hasattr(self, 'transfer_queue_widget') or not self.transfer_queue_widget:
+            return
+        if not file_list:
+            return
+        
+        import time
+        group_id = f"upload_{int(time.time() * 1000)}"
+        
+        self.transfer_queue_widget.start_transfer_group(group_id, len(file_list))
+        
+        for source_path, dest_path, command in file_list:
+            job_id = create_random_integer()
+            add_sftp_job(
+                source_path, worker.is_source_remote, dest_path, worker.is_dest_remote,
+                worker.creds.get('hostname', ''),
+                worker.creds.get('username', ''),
+                worker.creds.get('password', ''),
+                worker.creds.get('port', 22),
+                command, job_id, worker.creds.get('key')
+            )
+            self.transfer_queue_widget.add_to_group(job_id, group_id)
+            
+            if self.transfer_started:
+                self.transfer_started.emit(str(job_id))
+        
+        self.transfer_queue_widget.on_discovery_finished()
+        
     def _handle_worker_prompt(self, worker, path):
         """Handle overwrite prompt request from background worker on UI thread"""
-        action = self.prompt_overwrite(path)
+        result = self.prompt_overwrite(path)
+        if isinstance(result, tuple):
+            action, _ = result
+        else:
+            action = result
         worker.set_prompt_result(action)
 
     def cancel_current_transfer(self):
@@ -1610,8 +1695,8 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             self.message_signal.emit("Cancelling transfer...")
             self._current_traversal_worker = None
 
-    def prompt_overwrite(self, item_path):
-        """Prompt user for overwrite action - should be implemented in base class"""
+    def prompt_overwrite(self, item_path, include_symlink_option=False):
+        """Prompt user for overwrite action"""
         msg_box = QMessageBox()
         msg_box.setIcon(Qt.MsgIcon_Question)
         msg_box.setText(f"The item '{item_path}' already exists.")
@@ -1625,157 +1710,151 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         overwrite_all_btn = msg_box.addButton("Overwrite All", Qt.MsgRole_YesRole)
         resume_btn = msg_box.addButton("Resume", Qt.MsgRole_AcceptRole)
         resume_all_btn = msg_box.addButton("Resume All", Qt.MsgRole_AcceptRole)
+        
+        follow_symlinks_checkbox = None
+        if include_symlink_option:
+            follow_symlinks_checkbox = QCheckBox("Follow symbolic links")
+            follow_symlinks_checkbox.setChecked(False)
+            msg_box.layout().addWidget(follow_symlinks_checkbox, msg_box.layout().rowCount(), 0, 1, msg_box.layout().columnCount())
 
         msg_box.exec()
 
         if msg_box.clickedButton() == cancel_btn:
-            return "cancel"
+            result = "cancel"
         elif msg_box.clickedButton() == skip_btn:
-            return "skip"
+            result = "skip"
         elif msg_box.clickedButton() == skip_all_btn:
-            return "skip_all"
+            result = "skip_all"
         elif msg_box.clickedButton() == overwrite_btn:
-            return "overwrite"
+            result = "overwrite"
         elif msg_box.clickedButton() == overwrite_all_btn:
-            return "overwrite_all"
+            result = "overwrite_all"
         elif msg_box.clickedButton() == resume_btn:
-            return "resume"
+            result = "resume"
         elif msg_box.clickedButton() == resume_all_btn:
-            return "resume_all"
-            
-    def show_prompt_dialog(self, text, title):
-        dialog = QMessageBox(self.parent())
-        dialog.setWindowTitle(title)
-        dialog.setText(text)
-        dialog.setStandardButtons(Qt.MsgBtn_Yes | Qt.MsgBtn_No | Qt.MsgBtn_YesToAll)
-        dialog.setDefaultButton(Qt.MsgBtn_Yes)
-
-        return dialog.exec()
+            result = "resume_all"
+        else:
+            result = "skip"
+        
+        follow_symlinks = follow_symlinks_checkbox.isChecked() if follow_symlinks_checkbox else False
+        
+        return result, follow_symlinks
 
     def view_edit_file(self):
         """View/Edit a text file - works for both local and remote files."""
         from sftp_textviewer import TextViewerWindow, is_text_file, MAX_FILE_SIZE
         
-        creds = get_credentials(self.session_id)
-        current_browser = self.table
-        if current_browser is not None and isinstance(current_browser, QTableView):
-            indexes = current_browser.selectedIndexes()
-            if indexes:
-                # Use sibling to ensure we always look at column 0 for the filename
-                index = indexes[0].sibling(indexes[0].row(), 0)
-                selected_item_text = current_browser.model().data(index, Qt.DisplayRole)
-                # Remove emoji prefixes
-                prefixes = ['📁', '📄', '🔗', '[DIR]', '[FILE]', '[LINK]']
-                for prefix in prefixes:
-                    if selected_item_text.startswith(prefix):
-                        selected_item_text = selected_item_text[len(prefix):].lstrip()
-                        break
-                
-                # Determine if we're in a remote or local browser context
-                is_remote = self.is_remote_browser()
-                
-                if is_remote:
-                    # Remote file - construct full path
-                    remote_path = self.get_normalized_remote_path(creds.get('current_remote_directory', '.'), selected_item_text)
+        selected_item_text = self.get_selected_item_text()
+        if selected_item_text:
+            creds = get_credentials(self.session_id)
+            current_browser = self.table
+            if current_browser is not None and isinstance(current_browser, QTableView):
+                indexes = current_browser.selectedIndexes()
+                if indexes:
+                    index = indexes[0].sibling(indexes[0].row(), 0)
+                    selected_item_text = current_browser.model().data(index, Qt.DisplayRole)
+                    prefixes = ['📁', '📄', '🔗', '[DIR]', '[FILE]', '[LINK]']
+                    for prefix in prefixes:
+                        if selected_item_text.startswith(prefix):
+                            selected_item_text = selected_item_text[len(prefix):].lstrip()
+                            break
                     
-                    # Check if it's a directory
-                    is_dir = self.is_remote_directory(selected_item_text)
-                    if is_dir:
-                        QMessageBox.information(None, "View", "Cannot view directories. Select a file.")
-                        return
+                    is_remote = self.is_remote_browser()
                     
-                    # Get file size first
-                    try:
-                        file_stat = self.session_api.stat(remote_path)
-                        file_size = file_stat.st_size if hasattr(file_stat, 'st_size') else 0
-                    except (OSError, IOError, paramiko.SSHException) as e:
-                        self.message_signal.emit(f"Could not get file info: {e}")
-                        return
-                    
-                    if file_size > MAX_FILE_SIZE:
-                        result = QMessageBox.question(
-                            None, "Large File",
-                            f"File is large ({file_size / (1024*1024):.1f} MB). Continue?",
-                            Qt.MsgBtn_Yes | Qt.MsgBtn_No,
-                            Qt.MsgBtn_No
-                        )
-                        if result == Qt.MsgBtn_No:
+                    if is_remote:
+                        remote_path = self.get_normalized_remote_path(creds.get('current_remote_directory', '.'), selected_item_text)
+                        
+                        is_dir = self.is_remote_directory(selected_item_text)
+                        if is_dir:
+                            QMessageBox.information(None, "View", "Cannot view directories. Select a file.")
                             return
-                    
-                    # Download to temp file
-                    import tempfile
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(selected_item_text)[1]) as temp_file:
-                        temp_path = temp_file.name
-                    
-                    job_id = create_random_integer()
-                    
-                    try:
-                        ops = self.get_sftp_operations()
-                        ops.download(remote_path, temp_path, job_id=str(job_id))
-                    except Exception as e:
-                        self.message_signal.emit(f"File download failed: {e}")
-                        return
-                    
-                    # Check if it's a text file
-                    if not is_text_file(temp_path):
-                        result = QMessageBox.question(
-                            None, "Binary File",
-                            "This file appears to be binary. View anyway?",
-                            Qt.MsgBtn_Yes | Qt.MsgBtn_No,
-                            Qt.MsgBtn_No
-                        )
-                        if result == Qt.MsgBtn_No:
-                            os.unlink(temp_path)
+                        
+                        try:
+                            file_stat = self.session_api.stat(remote_path)
+                            file_size = file_stat.st_size if hasattr(file_stat, 'st_size') else 0
+                        except (OSError, IOError, paramiko.SSHException) as e:
+                            self.message_signal.emit(f"Could not get file info: {e}")
                             return
-                    
-                    # Open viewer
-                    self.viewer = TextViewerWindow(
-                        file_path=temp_path,
-                        remote_path=remote_path,
-                        session_api=self.session_api
-                    )
-                    self.viewer.setWindowTitle(f"View: {remote_path}")
-                    self.viewer.show()
-                    self.message_signal.emit(f"Opened: {selected_item_text}")
-                    
+                        
+                        if file_size > MAX_FILE_SIZE:
+                            result = QMessageBox.question(
+                                None, "Large File",
+                                f"File is large ({file_size / (1024*1024):.1f} MB). Continue?",
+                                Qt.MsgBtn_Yes | Qt.MsgBtn_No,
+                                Qt.MsgBtn_No
+                            )
+                            if result == Qt.MsgBtn_No:
+                                return
+                        
+                        import tempfile
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(selected_item_text)[1]) as temp_file:
+                            temp_path = temp_file.name
+                        
+                        job_id = create_random_integer()
+                        
+                        try:
+                            ops = self.get_sftp_operations()
+                            ops.download(remote_path, temp_path, job_id=str(job_id))
+                        except Exception as e:
+                            self.message_signal.emit(f"File download failed: {e}")
+                            return
+                        
+                        if not is_text_file(temp_path):
+                            result = QMessageBox.question(
+                                None, "Binary File",
+                                "This file appears to be binary. View anyway?",
+                                Qt.MsgBtn_Yes | Qt.MsgBtn_No,
+                                Qt.MsgBtn_No
+                            )
+                            if result == Qt.MsgBtn_No:
+                                os.unlink(temp_path)
+                                return
+                        
+                        self.viewer = TextViewerWindow(
+                            file_path=temp_path,
+                            remote_path=remote_path,
+                            session_api=self.session_api
+                        )
+                        self.viewer.setWindowTitle(f"View: {remote_path}")
+                        self.viewer.show()
+                        self.message_signal.emit(f"Opened: {selected_item_text}")
+                        
+                    else:
+                        local_path = os.path.join(creds.get('current_local_directory', '.'), selected_item_text)
+                        
+                        if not os.path.exists(local_path):
+                            self.message_signal.emit(f"File not found: {local_path}")
+                            return
+                        
+                        file_size = os.path.getsize(local_path)
+                        if file_size > MAX_FILE_SIZE:
+                            result = QMessageBox.question(
+                                None, "Large File",
+                                f"File is large ({file_size / (1024*1024):.1f} MB). Continue?",
+                                Qt.MsgBtn_Yes | Qt.MsgBtn_No,
+                                Qt.MsgBtn_No
+                            )
+                            if result == Qt.MsgBtn_No:
+                                return
+                        
+                        if not is_text_file(local_path):
+                            result = QMessageBox.question(
+                                None, "Binary File",
+                                "This file appears to be binary. View anyway?",
+                                Qt.MsgBtn_Yes | Qt.MsgBtn_No,
+                                Qt.MsgBtn_No
+                            )
+                            if result == Qt.MsgBtn_No:
+                                return
+                        
+                        self.viewer = TextViewerWindow(file_path=local_path)
+                        self.viewer.setWindowTitle(f"View: {local_path}")
+                        self.viewer.show()
+                        self.message_signal.emit(f"Opened: {selected_item_text}")
                 else:
-                    # Local file
-                    local_path = os.path.join(creds.get('current_local_directory', '.'), selected_item_text)
-                    
-                    if not os.path.exists(local_path):
-                        self.message_signal.emit(f"File not found: {local_path}")
-                        return
-                    
-                    file_size = os.path.getsize(local_path)
-                    if file_size > MAX_FILE_SIZE:
-                        result = QMessageBox.question(
-                            None, "Large File",
-                            f"File is large ({file_size / (1024*1024):.1f} MB). Continue?",
-                            Qt.MsgBtn_Yes | Qt.MsgBtn_No,
-                            Qt.MsgBtn_No
-                        )
-                        if result == Qt.MsgBtn_No:
-                            return
-                    
-                    if not is_text_file(local_path):
-                        result = QMessageBox.question(
-                            None, "Binary File",
-                            "This file appears to be binary. View anyway?",
-                            Qt.MsgBtn_Yes | Qt.MsgBtn_No,
-                            Qt.MsgBtn_No
-                        )
-                        if result == Qt.MsgBtn_No:
-                            return
-                    
-                    # Open viewer
-                    self.viewer = TextViewerWindow(file_path=local_path)
-                    self.viewer.setWindowTitle(f"View: {local_path}")
-                    self.viewer.show()
-                    self.message_signal.emit(f"Opened: {selected_item_text}")
+                    self.message_signal.emit("No item selected.")
             else:
-                self.message_signal.emit("No item selected.")
-        else:
-            self.message_signal.emit("Current browser is not a valid QTableView.")
+                self.message_signal.emit("Current browser is not a valid QTableView.")
 
     def sftp_exists(self, path):
         try:
@@ -1813,18 +1892,15 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             if hostname not in host_data.get('bookmarks', {}):
                 host_data['bookmarks'][hostname] = []
             
-            # Check if already bookmarked
             for bookmark in host_data['bookmarks'][hostname]:
                 if isinstance(bookmark, dict):
                     if bookmark.get('path') == current_dir:
                         self.message_signal.emit(f"Directory already bookmarked: {name}")
                         return False
                 elif bookmark == current_dir:
-                    # Convert old format to new format
                     self.message_signal.emit(f"Directory already bookmarked: {name}")
                     return False
             
-            # Add new bookmark with metadata
             host_data['bookmarks'][hostname].append({
                 'name': name,
                 'path': current_dir,
@@ -1853,7 +1929,6 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             hostname = creds.get('hostname', 'localhost')
             
             bookmarks = host_data.get('bookmarks', {}).get(hostname, [])
-            # Normalize old format (strings) to new format (dicts)
             normalized = []
             for b in bookmarks:
                 if isinstance(b, str):
@@ -1873,7 +1948,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
     def navigate_to_bookmark(self, path):
         """Navigate to a bookmarked directory - to be overridden by subclasses"""
         self.message_signal.emit(f"Navigating to: {path}")
-        return False  # Subclasses should implement actual navigation
+        return False
 
     def _show_bookmarks_menu(self):
         bookmarks = self.get_bookmarks()

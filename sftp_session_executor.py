@@ -112,26 +112,37 @@ class CommandExecutor(QObject):
                 return self._wait_for_result(response_queue, timeout)
                 
             except (OSError, IOError, RuntimeError, paramiko.SSHException) as e:
-                put_response(job_id, "error", str(e))
+                # Invalidate the connection so a fresh one is created next time
+                self._pool.close_connection(
+                    self.credentials.hostname,
+                    self.credentials.port,
+                    self.credentials.username
+                )
+                
                 # Don't retry on permission errors - they're not transient
-                # Check both PermissionError and OSError with EACCES/EPERM
                 is_permission_error = (
                     isinstance(e, PermissionError) or
                     (isinstance(e, OSError) and e.errno in (errno.EACCES, errno.EPERM))
                 )
                 if is_permission_error:
+                    put_response(job_id, "error", str(e))
                     raise
-                else:
-                    # Invalidate the connection so a fresh one is created next time
-                    self._pool.close_connection(
-                        self.credentials.hostname,
-                        self.credentials.port,
-                        self.credentials.username
-                    )
-                    # Retry once with a fresh connection if this was the first attempt
-                    if retry:
-                        return self.execute(command, timeout, retry=False)
-                    raise
+                
+                # Retry once with a fresh connection if this was the first attempt
+                if retry:
+                    print(f"[DEBUG EXECUTOR] Retrying command after error: {e}")
+                    return self.execute(command, timeout, retry=False)
+                
+                put_response(job_id, "error", str(e))
+                raise
+            finally:
+                # Always release connection back to pool
+                self._pool.release_connection(
+                    self.credentials.hostname,
+                    self.credentials.port,
+                    self.credentials.username,
+                    sftp
+                )
     
     def _progress_callback(self, job_id: str, transferred: int, total: int):
         """Progress callback with rate limiting"""
@@ -167,6 +178,27 @@ class CommandExecutor(QObject):
         self._last_bytes = 0
         self._last_time = None
     
+    def _ensure_remote_dir(self, ssh, sftp, remote_path):
+        """Ensure a remote directory exists, creating parents as needed"""
+        try:
+            sftp.stat(remote_path)
+            return
+        except FileNotFoundError:
+            pass
+        except IOError:
+            pass
+        
+        import shlex
+        parent = os.path.dirname(remote_path)
+        if parent and parent != remote_path:
+            self._ensure_remote_dir(ssh, sftp, parent)
+        
+        try:
+            sftp.mkdir(remote_path)
+        except IOError:
+            stdin, stdout, stderr = ssh.exec_command(f'mkdir -p {shlex.quote(remote_path)}')
+            stdout.channel.recv_exit_status()
+    
     def _execute_download(self, ssh, sftp, command: DownloadCommand, job_id: str):
         """Execute download command"""
         self._reset_progress_tracking()
@@ -196,6 +228,10 @@ class CommandExecutor(QObject):
         self._reset_progress_tracking()
         
         try:
+            remote_dir = os.path.dirname(command.remote_path)
+            if remote_dir:
+                self._ensure_remote_dir(ssh, sftp, remote_dir)
+            
             total_size = os.path.getsize(command.local_path)
             
             if command.resume:
@@ -223,7 +259,17 @@ class CommandExecutor(QObject):
     def _execute_list_attr(self, ssh, sftp, command: ListCommand, job_id: str):
         """Execute list directory with attributes command"""
         try:
-            result = sftp.listdir_attr(command.remote_path)
+            raw_items = sftp.listdir_attr(command.remote_path)
+            # CRITICAL: Convert to plain Python dicts BEFORE connection is released
+            # Paramiko SFTPAttribute objects become invalid after SFTP channel is closed
+            result = []
+            for item in raw_items:
+                result.append({
+                    'filename': item.filename,
+                    'st_size': item.st_size,
+                    'st_mode': item.st_mode,
+                    'st_mtime': item.st_mtime
+                })
             put_response(job_id, "success", result)
         except (OSError, IOError, paramiko.SSHException) as e:
             put_response(job_id, "error", str(e))
@@ -232,7 +278,15 @@ class CommandExecutor(QObject):
     def _execute_stat(self, ssh, sftp, command: StatCommand, job_id: str):
         """Execute stat command"""
         try:
-            result = sftp.stat(command.path)
+            stat_result = sftp.stat(command.path)
+            # Convert to plain Python dict before connection is released
+            # Note: stat() returns SFTPAttributes without filename attribute
+            result = {
+                'filename': os.path.basename(command.path),
+                'st_size': stat_result.st_size,
+                'st_mode': stat_result.st_mode,
+                'st_mtime': stat_result.st_mtime
+            }
             put_response(job_id, "success", result)
         except (OSError, IOError, paramiko.SSHException) as e:
             put_response(job_id, "error", str(e))
@@ -380,15 +434,26 @@ class CommandExecutor(QObject):
     
     def _wait_for_result(self, response_queue: queue.Queue, timeout: float) -> Any:
         """Wait for command result with timeout"""
+        start_time = time.time()
         try:
-            result = response_queue.get(timeout=timeout)
+            # First item should be status ("success" or "error")
+            status = response_queue.get(timeout=timeout)
             
-            if result == "error":
-                error = response_queue.get_nowait()
-                raise Exception(error)
+            # Use remaining timeout for the second item
+            remaining = timeout - (time.time() - start_time)
+            if remaining <= 0:
+                remaining = 0.1  # Minimal wait
+                
+            if status == "error":
+                error_msg = response_queue.get(timeout=remaining)
+                raise Exception(error_msg)
             
-            data = response_queue.get_nowait()
-            return data
+            if status == "success":
+                data = response_queue.get(timeout=remaining)
+                return data
+            
+            # If we got something else, it might be the data itself (legacy support)
+            return status
             
         except queue.Empty:
             raise TimeoutError(f"Command timed out after {timeout} seconds")
@@ -546,14 +611,15 @@ class SFTPSessionAPI(QObject):
         try:
             self.stat(path)
             return True
-        except (OSError, IOError, RuntimeError):
+        except (OSError, IOError, RuntimeError, paramiko.SSHException):
             return False
     
     def is_directory(self, path: str) -> bool:
         """Check if path is a directory"""
         try:
             attr = self.stat(path)
-            return S_ISDIR(attr.st_mode)
+            # Attr is now a dict, not SFTPAttribute object
+            return S_ISDIR(attr['st_mode'])
         except (OSError, IOError, RuntimeError):
             return False
     
@@ -561,7 +627,8 @@ class SFTPSessionAPI(QObject):
         """Check if path is a file"""
         try:
             attr = self.stat(path)
-            return not S_ISDIR(attr.st_mode)
+            # Attr is now a dict, not SFTPAttribute object
+            return not S_ISDIR(attr['st_mode'])
         except (OSError, IOError, RuntimeError):
             return False
 

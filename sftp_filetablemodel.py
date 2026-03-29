@@ -14,6 +14,7 @@ class FileTableModel(QAbstractTableModel):
         super().__init__()
         self.file_list = []
         self.session_id = session_id
+        self._resetting = False  # Guard against re-entrant get_files via processEvents
         
         creds = get_credentials(self.session_id)
         current_dir = creds.get('current_local_directory')
@@ -34,38 +35,48 @@ class FileTableModel(QAbstractTableModel):
         return False
 
     def get_files(self):
+        # Guard against re-entrant calls (processEvents inside this method
+        # can trigger signals that call get_files again)
+        if self._resetting:
+            return
+
         creds = get_credentials(self.session_id)
 
         self.directory = Path(creds.get('current_local_directory'))
 
-        self.beginResetModel()
-        self.file_list = []  # Clear the list completely
-
-        # Add the '..' entry to represent the parent directory
-        self.file_list.append(["..", 0, "----", "----"])
-
+        self._resetting = True
         try:
-            all_items = list(self.directory.iterdir())
-            
-            for item in all_items:
-                try:
-                    name = item.name
-                    stat_result = item.stat()
-                    size = stat_result.st_size
-                    permissions = oct(stat_result.st_mode)[-4:]
-                    modified_time = datetime.datetime.fromtimestamp(stat_result.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
-                    self.file_list.append([name, size, permissions, modified_time, item.is_dir()])
-                    # Keep UI responsive during long listings
-                    if len(self.file_list) % 50 == 0:
-                        QApplication.processEvents()
-                except (OSError, PermissionError) as stat_error:
-                    continue
+            self.beginResetModel()
+            self.file_list = []  # Clear the list completely
 
-            # Don't sort here - let DirectoryFirstSortProxyModel handle sorting
-        except (OSError, IOError, RuntimeError) as e:
-            pass
+            # Add the '..' entry to represent the parent directory
+            self.file_list.append(["..", 0, "----", "----"])
 
-        self.endResetModel()
+            try:
+                all_items = list(self.directory.iterdir())
+                
+                for item in all_items:
+                    try:
+                        name = item.name
+                        stat_result = item.stat()
+                        size = stat_result.st_size
+                        permissions = oct(stat_result.st_mode)[-4:]
+                        modified_time = datetime.datetime.fromtimestamp(stat_result.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+                        is_link = item.is_symlink()
+                        self.file_list.append([name, size, permissions, modified_time, item.is_dir(), is_link])
+                        # Keep UI responsive during long listings
+                        if len(self.file_list) % 50 == 0:
+                            QApplication.processEvents()
+                    except (OSError, PermissionError) as stat_error:
+                        continue
+
+                # Don't sort here - let DirectoryFirstSortProxyModel handle sorting
+            except (OSError, IOError, RuntimeError) as e:
+                pass
+
+            self.endResetModel()
+        finally:
+            self._resetting = False
 
     def rowCount(self, parent=QModelIndex()):
         # Return the number of items in your files list
@@ -85,14 +96,8 @@ class FileTableModel(QAbstractTableModel):
 
         if role == Qt.DisplayRole:
             if column == 0:
-                # Name
                 name = file_info[0]
-                full_path = os.path.join(str(self.directory), name)
-                is_dir = os.path.isdir(full_path)
-                if is_dir:
-                    return f"📁 {name}"  # Add folder icon for directories
-                else:
-                    return f"📄 {name}"  # Add document icon for files
+                return name
             elif column == 1:
                 # Size
                 return str(file_info[1])
@@ -103,16 +108,18 @@ class FileTableModel(QAbstractTableModel):
                 # Modified Date
                 return file_info[3]
         elif role == Qt.ForegroundRole:
-            # Check if it's a directory
             name = file_info[0]
             if name == "..":
                 return QColor(Qt.Color_blue)
             full_path = os.path.join(str(self.directory), name)
             is_dir = os.path.isdir(full_path)
-            if is_dir:
-                return QColor(Qt.Color_blue)  # Return blue color for directories
+            is_link = file_info[5] if len(file_info) > 5 else False
+            if is_link:
+                return QColor(0, 180, 180)
+            elif is_dir:
+                return QColor(Qt.Color_blue)
             else:
-                return QColor(Qt.Color_darkGray)  # Return dark gray for files
+                return QColor(Qt.Color_darkGray)
         elif role == Qt.FontRole:
             # Check if it's a directory
             name = file_info[0]
@@ -125,7 +132,11 @@ class FileTableModel(QAbstractTableModel):
             if is_dir:
                 font = QFont()
                 font.setBold(True)
-                return font  # Return bold font for directories
+                return font
+        elif role == Qt.TextAlignmentRole:
+            if column == 1:
+                return Qt.AlignRight
+            return Qt.AlignLeft
         return None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):

@@ -27,10 +27,11 @@ class DirectoryFirstSortProxyModel(QSortFilterProxyModel):
         if right_text == "..":
             return self.sortOrder() != Qt.AscendingOrder
 
-        # 2. Identify if items are directories
-        # Remote model uses [DIR] prefix, local model uses 📁 prefix
-        left_is_dir = left_text.startswith('[DIR]') or left_text.startswith('📁')
-        right_is_dir = right_text.startswith('[DIR]') or right_text.startswith('📁')
+        # 2. Identify if items are directories (bold font = directory)
+        left_font = self.sourceModel().data(left, Qt.FontRole)
+        right_font = self.sourceModel().data(right, Qt.FontRole)
+        left_is_dir = left_font is not None and left_font.bold()
+        right_is_dir = right_font is not None and right_font.bold()
 
         # 3. Directory vs File logic
         if left_is_dir and not right_is_dir:
@@ -57,15 +58,5 @@ class DirectoryFirstSortProxyModel(QSortFilterProxyModel):
                 # Other columns - string sort
                 return str(left_val).lower() < str(right_val).lower()
 
-        # Name column (or fallback) - remove prefixes and compare
-        left_clean = left_text
-        right_clean = right_text
-        
-        prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
-        for prefix in prefixes:
-            if left_clean.startswith(prefix):
-                left_clean = left_clean[len(prefix):].lstrip()
-            if right_clean.startswith(prefix):
-                right_clean = right_clean[len(prefix):].lstrip()
-
-        return left_clean.lower() < right_clean.lower()
+        # Name column (or fallback) - compare directly
+        return left_text.lower() < right_text.lower()

@@ -76,52 +76,35 @@ class ConnectionPool:
             
             conn_list = self._pool[conn_key]
             
-            # 1. Try to find an existing connection with idle channels or space for new ones
+            # 1. Try to find an existing connection with room for a new channel
             valid_connections = []
             for conn_info in conn_list:
                 age = time.time() - conn_info.created_at
-                # Check if SSH connection is still valid
-                if (age < self._max_age and 
-                    conn_info.ssh.get_transport() and 
-                    conn_info.ssh.get_transport().is_active()):
-                    
-                    valid_connections.append(conn_info)
-                    
-                    # A. Reuse idle SFTP channel
-                    while conn_info.idle_sftp_channels:
-                        sftp = conn_info.idle_sftp_channels.pop()
-                        try:
-                            # Verify channel is still healthy
-                            sftp.stat('.')
-                            conn_info.busy_sftp_channels.append(sftp)
-                            conn_info.last_used_at = time.time()
-                            return conn_info.ssh, sftp
-                        except Exception:
-                            try:
-                                sftp.close()
-                            except (OSError, IOError):
-                                pass
-                            continue
-                    
-                    # B. Open new channel if below limit
-                    total_channels = len(conn_info.busy_sftp_channels) + len(conn_info.idle_sftp_channels)
-                    if total_channels < self._max_channels_per_ssh:
-                        try:
-                            sftp = conn_info.ssh.open_sftp()
-                            conn_info.busy_sftp_channels.append(sftp)
-                            conn_info.last_used_at = time.time()
-                            return conn_info.ssh, sftp
-                        except Exception as e:
-                            # Keep looking or create new SSH
-                            pass
-                else:
-                    # Stale or dead connection
+                total_channels = len(conn_info.busy_sftp_channels) + len(conn_info.idle_sftp_channels)
+                
+                if not (age < self._max_age and 
+                        conn_info.ssh.get_transport() and 
+                        conn_info.ssh.get_transport().is_active()):
                     self._close_conn_info(conn_info)
+                    continue
+                
+                if total_channels >= self._max_channels_per_ssh:
+                    valid_connections.append(conn_info)
+                    continue
+                
+                try:
+                    sftp = conn_info.ssh.open_sftp()
+                    conn_info.busy_sftp_channels.append(sftp)
+                    conn_info.last_used_at = time.time()
+                    valid_connections.append(conn_info)
+                    return conn_info.ssh, sftp
+                except Exception as e:
+                    valid_connections.append(conn_info)
+                    continue
             
-            # Update pool list to only include valid connections
             self._pool[conn_key] = valid_connections
             
-            # 2. Create new SSH connection if none suitable found
+            # 2. Create new SSH connection
             try:
                 ssh = self._create_ssh_connection(hostname, port, username, password, key)
                 sftp = ssh.open_sftp()
@@ -228,7 +211,12 @@ class ConnectionPool:
                 for conn_info in self._pool[conn_key]:
                     if sftp in conn_info.busy_sftp_channels:
                         conn_info.busy_sftp_channels.remove(sftp)
-                        conn_info.idle_sftp_channels.append(sftp)
+                        # Always close the SFTP channel - don't reuse stale channels
+                        # to avoid corruption issues
+                        try:
+                            sftp.close()
+                        except (OSError, IOError):
+                            pass
                         conn_info.last_used_at = time.time()
                         return
             

@@ -1,4 +1,4 @@
-from PySide6.QtCore import QRunnable, QObject, Signal
+from PySide6.QtCore import QRunnable, QObject, Signal, QMutex, QWaitCondition
 import enum
 import queue
 import paramiko
@@ -28,6 +28,7 @@ class WorkerSignals(QObject):
     progress = Signal(int, int, float, float, int, int)   # transfer_id, percent, speed_bytes_per_sec, eta_seconds, bytes_done, bytes_total
     finished = Signal(int)
     message  = Signal(int, str)
+    conflict = Signal(int, str, str)  # transfer_id, dest_path, dest_type ("local" or "remote")
 
 response_queues = {}
 sftp_queue = queue.Queue()
@@ -219,6 +220,7 @@ def put_response(transfer_id, *items):
 class DownloadWorker(QRunnable):
     def __init__(self, transfer_id, job_source, job_destination, is_source_remote, is_destination_remote, hostname, port, username, password, command=None, key=None):
         super(DownloadWorker, self).__init__()
+        self.setAutoDelete(False)
         self.transfer_id = transfer_id
         self._stop_flag = False
         self.signals = WorkerSignals()
@@ -244,6 +246,18 @@ class DownloadWorker(QRunnable):
         self.ssh = None
         self.sftp = None
         self.temp_key = key
+        
+        # Conflict resolution
+        self._conflict_mutex = QMutex()
+        self._conflict_cond = QWaitCondition()
+        self._conflict_result = None
+
+    def _safe_emit(self, signal, *args):
+        """Emit a signal safely, catching RuntimeError if the signal source was deleted."""
+        try:
+            signal.emit(*args)
+        except RuntimeError:
+            pass
 
     def _get_local_file_size(self, filepath):
         """Get the size of a local file, returns 0 if file doesn't exist."""
@@ -251,6 +265,61 @@ class DownloadWorker(QRunnable):
             return os.path.getsize(filepath)
         except (OSError, FileNotFoundError):
             return 0
+    
+    def set_conflict_result(self, result):
+        """Called by UI thread to provide result of conflict prompt"""
+        self._conflict_mutex.lock()
+        self._conflict_result = result
+        self._conflict_cond.wakeAll()
+        self._conflict_mutex.unlock()
+    
+    def _wait_for_conflict_result(self):
+        """Wait for UI thread to resolve conflict. Returns action string."""
+        self._conflict_mutex.lock()
+        self._conflict_cond.wait(self._conflict_mutex, 30000)
+        result = self._conflict_result
+        self._conflict_result = None
+        self._conflict_mutex.unlock()
+        return result or "skip"
+    
+    def _check_destination_exists(self, source, dest):
+        """Check if destination file exists and resolve conflict if needed.
+        Returns: "proceed", "skip", "resume", or "cancel"
+        """
+        dest_exists = False
+        if self.is_destination_remote:
+            try:
+                self.sftp.stat(dest)
+                dest_exists = True
+            except (IOError, OSError):
+                pass
+        else:
+            dest_exists = os.path.exists(dest)
+        
+        if not dest_exists:
+            return "proceed"
+        
+        # Check global overwrite preference
+        from sftp_preferences import get_preferences
+        prefs = get_preferences()
+        if prefs.get_bool("overwrite_on_transfer", False):
+            return "proceed"
+        
+        # Signal conflict to UI and wait for resolution
+        dest_type = "remote" if self.is_destination_remote else "local"
+        self._safe_emit(self.signals.conflict, self.transfer_id, dest, dest_type)
+        action = self._wait_for_conflict_result()
+        
+        if action == "overwrite" or action == "overwrite_all":
+            return "proceed"
+        elif action == "resume" or action == "resume_all":
+            return "resume"
+        elif action == "skip" or action == "skip_all":
+            return "skip"
+        elif action == "cancel":
+            return "cancel"
+        
+        return "skip"
 
     def _get_remote_file_size(self, filepath):
         """Get the size of a remote file, returns 0 if file doesn't exist."""
@@ -273,7 +342,8 @@ class DownloadWorker(QRunnable):
             return
         elif existing_size >= remote_size:
             # Local file is same size or larger, nothing to download
-            self.signals.message.emit(
+            self._safe_emit(
+                self.signals.message,
                 self.transfer_id,
                 f"File already complete: {local_path}"
             )
@@ -283,7 +353,8 @@ class DownloadWorker(QRunnable):
             return
         
         # Resume download from existing position
-        self.signals.message.emit(
+        self._safe_emit(
+            self.signals.message,
             self.transfer_id,
             f"Resuming download from {existing_size} bytes"
         )
@@ -331,7 +402,8 @@ class DownloadWorker(QRunnable):
             return
         elif existing_size >= local_size:
             # Remote file is same size or larger, nothing to upload
-            self.signals.message.emit(
+            self._safe_emit(
+                self.signals.message,
                 self.transfer_id,
                 f"File already complete: {remote_path}"
             )
@@ -341,7 +413,8 @@ class DownloadWorker(QRunnable):
             return
         
         # Resume upload from existing position
-        self.signals.message.emit(
+        self._safe_emit(
+            self.signals.message,
             self.transfer_id,
             f"Resuming upload from {existing_size} bytes"
         )
@@ -392,13 +465,15 @@ class DownloadWorker(QRunnable):
                     expanded_path = os.path.expanduser(key_data)
                     key_obj = key_type.from_private_key_file(expanded_path, password=passphrase)
                 
-                self.signals.message.emit(
+                self._safe_emit(
+                    self.signals.message,
                     self.transfer_id, 
                     f"Loaded {key_type.__name__} key successfully"
                 )
                 return key_obj
             except paramiko.PasswordRequiredException:
-                self.signals.message.emit(
+                self._safe_emit(
+                    self.signals.message,
                     self.transfer_id, 
                     "Private key is encrypted but no passphrase provided"
                 )
@@ -409,7 +484,8 @@ class DownloadWorker(QRunnable):
                 continue
                 
         # All attempts failed
-        self.signals.message.emit(
+        self._safe_emit(
+            self.signals.message,
             self.transfer_id, 
             "Failed to load private key: unsupported format or invalid key data"
         )
@@ -434,20 +510,22 @@ class DownloadWorker(QRunnable):
             return True
             
         except paramiko.AuthenticationException as e:
-            self.signals.message.emit(
+            self._safe_emit(
+                self.signals.message,
                 self.transfer_id, 
                 f"Authentication failed for {self.hostname}: {e}"
             )
             return False
         except paramiko.SSHException as e:
-            self.signals.message.emit(
+            self._safe_emit(
+                self.signals.message,
                 self.transfer_id, 
                 f"SSH connection error to {self.hostname}: {e}"
             )
             return False
         except (OSError, IOError) as e:
-            self.signals.message.emit(
-                self.transfer_id, 
+            self._safe_emit(
+                self.signals.message, 
                 f"Connection to {self.hostname} failed: {e}"
             )
             return False
@@ -495,12 +573,10 @@ class DownloadWorker(QRunnable):
         
         if (now - self._last_emit_time >= self._emit_interval) or (percent >= 100):
             try:
-                # Use Qt's QueuedConnection to prevent signal buildup
-                self.signals.progress.emit(self.transfer_id, percent, speed_bps, eta_sec, transferred, total)
+                self._safe_emit(self.signals.progress, self.transfer_id, percent, speed_bps, eta_sec, transferred, total)
                 self._last_emit_time = now
-            except RuntimeError as e:
-                # If signal emission fails, don't crash the transfer
-                print(f"Progress signal emission failed: {e}")
+            except RuntimeError:
+                pass
 
     def _transfer_with_timeout(self, transfer_func, *args, resume=False):
         """Helper used by both get and put with proper cleanup"""
@@ -535,17 +611,19 @@ class DownloadWorker(QRunnable):
                 transfer_func(*args, callback=progress_wrapper)
                 
         except (OSError, IOError, Exception) as exc:
-            # Handle cancellation gracefully - don't show scary error messages
             if self._stop_flag:
-                self.signals.message.emit(
+                self._safe_emit(
+                    self.signals.message,
                     self.transfer_id,
                     f"Transfer cancelled"
                 )
                 put_response(self.transfer_id, "cancelled", "Transfer cancelled by user")
             else:
-                self.signals.message.emit(
+                logger.error(f"Transfer {self.transfer_id} interrupted: {type(exc).__name__}: {exc}")
+                self._safe_emit(
+                    self.signals.message,
                     self.transfer_id,
-                    f"Transfer interrupted"
+                    f"Transfer interrupted: {exc}"
                 )
                 put_response(self.transfer_id, "error", str(exc))
             return
@@ -597,10 +675,24 @@ class DownloadWorker(QRunnable):
 
             logger.debug(f"Transfer {self.transfer_id}: {self.command} {clean_source} → {clean_destination}")
 
+            # Check if destination exists and resolve conflict if needed
+            if not resume:
+                action = self._check_destination_exists(clean_source, clean_destination)
+                if action == "skip":
+                    put_response(self.transfer_id, "success", clean_destination)
+                    self._safe_emit(self.signals.finished, self.transfer_id)
+                    return
+                elif action == "resume":
+                    resume = True
+                elif action == "cancel":
+                    self._safe_emit(self.signals.finished, self.transfer_id)
+                    return
+
             # Handle different transfer types
             if self.is_source_remote and not self.is_destination_remote:
                 # Download
-                self.signals.message.emit(
+                self._safe_emit(
+                    self.signals.message,
                     self.transfer_id,
                     f"Downloading {clean_source} → {clean_destination}"
                 )
@@ -618,7 +710,8 @@ class DownloadWorker(QRunnable):
 
             elif self.is_destination_remote and not self.is_source_remote:
                 # Upload
-                self.signals.message.emit(
+                self._safe_emit(
+                    self.signals.message,
                     self.transfer_id,
                     f"Uploading {clean_source} → {clean_destination}"
                 )
@@ -640,12 +733,12 @@ class DownloadWorker(QRunnable):
         except Exception as e:
             error_occurred = True
             logger.error(f"Transfer {self.transfer_id} failed: {e}")
-            self.signals.message.emit(self.transfer_id, f"Transfer failed: {e}")
+            self._safe_emit(self.signals.message, self.transfer_id, f"Transfer failed: {e}")
             put_response(self.transfer_id, "error", str(e))
         finally:
             # Always cleanup and emit finished signal
             self._cleanup_connections(error=error_occurred)
-            self.signals.finished.emit(self.transfer_id)
+            self._safe_emit(self.signals.finished, self.transfer_id)
 
     def _handle_remote_command(self):
         """Handle remote SFTP commands"""
@@ -695,7 +788,7 @@ class DownloadWorker(QRunnable):
                     error_output = stderr.read()
                     if error_output:
                         error_msg = error_output.decode()
-                        self.signals.message.emit(self.transfer_id, f"{self.command} operation failed: {error_msg}")
+                        self._safe_emit(self.signals.message, self.transfer_id, f"{self.command} operation failed: {error_msg}")
                         put_response(self.transfer_id, "error", error_msg)
                     else:
                         getcwd_path = stdout.read().strip().decode()
@@ -705,12 +798,12 @@ class DownloadWorker(QRunnable):
                     put_response(self.transfer_id, "error", error_msg)
 
         except (OSError, IOError, paramiko.SSHException) as e:
-            self.signals.message.emit(self.transfer_id, f"{self.command} operation failed: {e}")
+            self._safe_emit(self.signals.message, self.transfer_id, f"{self.command} operation failed: {e}")
             put_response(self.transfer_id, "error", str(e))
 
     def stop_transfer(self):
         """Stop the transfer by closing the connection to abort ongoing transfer"""
         self._stop_flag = True
-        self.signals.message.emit(self.transfer_id, f"Transfer {self.transfer_id} stopping...")
-        self.signals.finished.emit(self.transfer_id)
+        self._safe_emit(self.signals.message, self.transfer_id, f"Transfer {self.transfer_id} stopping...")
+        self._safe_emit(self.signals.finished, self.transfer_id)
         self._cleanup_connections(error=True)

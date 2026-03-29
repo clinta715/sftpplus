@@ -159,6 +159,13 @@ class ConnectionsWidget(QWidget):
         self.detail_ssh_commands.setPlaceholderText("Commands to run on connect (one per line, SSH Terminal only)")
         self.detail_ssh_commands.textChanged.connect(self.update_selected_row)
         
+        self.detail_follow_symlinks = QCheckBox("Follow symbolic links during directory transfers")
+        self.detail_follow_symlinks.setToolTip(
+            "When checked, symbolic links in directory transfers will be followed (resolved).\n"
+            "When unchecked (default), symlinks are skipped."
+        )
+        self.detail_follow_symlinks.stateChanged.connect(self.update_selected_row)
+        
         details_layout.addRow("Hostname:", self.detail_hostname)
         details_layout.addRow("Username:", self.detail_username)
         details_layout.addRow("Password:", self.detail_password)
@@ -166,6 +173,7 @@ class ConnectionsWidget(QWidget):
         details_layout.addRow("SSH Key:", self.detail_key)
         details_layout.addRow("Connection Type:", self.detail_connection_type)
         details_layout.addRow("Startup Commands:", self.detail_ssh_commands)
+        details_layout.addRow("Transfers:", self.detail_follow_symlinks)
         
         line = QFrame()
         line.setFrameShape(Qt.Frame_HLine)
@@ -215,7 +223,7 @@ class ConnectionsWidget(QWidget):
         """Load connection data"""
         try:
             self.host_data = load_connection_data()
-            for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks", "ssh_commands"]:
+            for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks", "ssh_commands", "follow_symlinks"]:
                 if key not in self.host_data:
                     self.host_data[key] = {}
             self._update_table()
@@ -231,7 +239,8 @@ class ConnectionsWidget(QWidget):
                 "initial_remote_dir": {},
                 "initial_local_dir": {},
                 "bookmarks": {},
-                "ssh_commands": {}
+                "ssh_commands": {},
+                "follow_symlinks": {}
             }
     
     def _on_selection_changed(self):
@@ -260,6 +269,7 @@ class ConnectionsWidget(QWidget):
                           self.detail_local_dir, self.detail_ssh_commands]:
                 widget.blockSignals(True)
             self.detail_connection_type.blockSignals(True)
+            self.detail_follow_symlinks.blockSignals(True)
             
             self.detail_hostname.setText(hostname)
             self.detail_username.setText(self.host_data["usernames"].get(hostname, ""))
@@ -269,6 +279,8 @@ class ConnectionsWidget(QWidget):
             self.detail_remote_dir.setText(self.host_data["initial_remote_dir"].get(hostname, ""))
             self.detail_local_dir.setText(self.host_data["initial_local_dir"].get(hostname, ""))
             self.detail_ssh_commands.setText(self.host_data["ssh_commands"].get(hostname, ""))
+            
+            self.detail_follow_symlinks.setChecked(self.host_data.get("follow_symlinks", {}).get(hostname, False))
             
             connection_type = self.host_data["connection_type"].get(hostname, "SFTP Browser")
             if connection_type == "SSH Terminal":
@@ -281,6 +293,7 @@ class ConnectionsWidget(QWidget):
                           self.detail_local_dir, self.detail_ssh_commands]:
                 widget.blockSignals(False)
             self.detail_connection_type.blockSignals(False)
+            self.detail_follow_symlinks.blockSignals(False)
     
     def _clear_details(self):
         """Clear all detail fields"""
@@ -289,13 +302,15 @@ class ConnectionsWidget(QWidget):
                       self.detail_local_dir, self.detail_ssh_commands]:
             widget.clear()
         self.detail_connection_type.setCurrentIndex(0)
+        self.detail_follow_symlinks.setChecked(False)
     
     def _set_details_enabled(self, enabled):
         """Enable/disable detail panel"""
         for widget in [self.detail_hostname, self.detail_username, self.detail_password,
                       self.detail_port, self.detail_key, self.detail_remote_dir, 
                       self.detail_local_dir, self.detail_ssh_commands,
-                      self.connect_button, self.detail_connection_type]:
+                      self.connect_button, self.detail_connection_type,
+                      self.detail_follow_symlinks]:
             widget.setEnabled(enabled)
     
     def _update_selected_row(self):
@@ -304,7 +319,7 @@ class ConnectionsWidget(QWidget):
         if selected_row < 0:
             return
         
-        for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "ssh_commands"]:
+        for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "ssh_commands", "follow_symlinks"]:
             if key not in self.host_data:
                 self.host_data[key] = {}
         
@@ -332,10 +347,11 @@ class ConnectionsWidget(QWidget):
         self.host_data["initial_remote_dir"][hostname] = self.detail_remote_dir.text()
         self.host_data["initial_local_dir"][hostname] = self.detail_local_dir.text()
         self.host_data["ssh_commands"][hostname] = self.detail_ssh_commands.text()
+        self.host_data["follow_symlinks"][hostname] = self.detail_follow_symlinks.isChecked()
     
     def _migrate_host_data(self, old_hostname, new_hostname):
         """Migrate data when hostname changes"""
-        for key in ["usernames", "passwords", "ports", "key", "connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks", "ssh_commands"]:
+        for key in ["usernames", "passwords", "ports", "key", "connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks", "ssh_commands", "follow_symlinks"]:
             if key in self.host_data and old_hostname in self.host_data[key]:
                 self.host_data[key][new_hostname] = self.host_data[key].pop(old_hostname)
     
@@ -357,7 +373,7 @@ class ConnectionsWidget(QWidget):
     
     def add_row(self):
         """Add a new empty row"""
-        for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "ssh_commands"]:
+        for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "ssh_commands", "follow_symlinks"]:
             if key not in self.host_data:
                 self.host_data[key] = {}
         
@@ -376,6 +392,7 @@ class ConnectionsWidget(QWidget):
         self.host_data["initial_remote_dir"][new_hostname] = ""
         self.host_data["initial_local_dir"][new_hostname] = ""
         self.host_data["ssh_commands"][new_hostname] = ""
+        self.host_data["follow_symlinks"][new_hostname] = False
         
         self._update_table()
         
@@ -404,7 +421,7 @@ class ConnectionsWidget(QWidget):
                 if reply == Qt.MsgBtn_Yes:
                     for key in ["hostnames", "usernames", "passwords", "ports", "key", 
                                "connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks",
-                               "ssh_commands"]:
+                               "ssh_commands", "follow_symlinks"]:
                         if key in self.host_data:
                             self.host_data[key].pop(hostname, None)
                     self.table.removeRow(selected_row)
@@ -434,7 +451,7 @@ class ConnectionsWidget(QWidget):
             counter += 1
         
         for key in ["usernames", "passwords", "ports", "key", "connection_type", 
-                   "initial_remote_dir", "initial_local_dir", "ssh_commands"]:
+                   "initial_remote_dir", "initial_local_dir", "ssh_commands", "follow_symlinks"]:
             if key not in self.host_data:
                 self.host_data[key] = {}
             if original_hostname in self.host_data[key]:
@@ -455,7 +472,7 @@ class ConnectionsWidget(QWidget):
     def save_data(self):
         """Save all site data"""
         try:
-            for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "ssh_commands"]:
+            for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "ssh_commands", "follow_symlinks"]:
                 if key not in self.host_data:
                     self.host_data[key] = {}
             
@@ -470,7 +487,8 @@ class ConnectionsWidget(QWidget):
             
             for hostname in orphaned:
                 for key in ["hostnames", "usernames", "passwords", "ports", "key", 
-                           "connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks"]:
+                           "connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks",
+                           "ssh_commands", "follow_symlinks"]:
                     if key in self.host_data:
                         self.host_data[key].pop(hostname, None)
             
@@ -518,6 +536,7 @@ class ConnectionsWidget(QWidget):
         initial_local_dir = self.host_data["initial_local_dir"].get(hostname, "")
         connection_type = self.host_data["connection_type"].get(hostname, "SFTP Browser")
         ssh_commands = self.host_data["ssh_commands"].get(hostname, "")
+        follow_symlinks = self.host_data.get("follow_symlinks", {}).get(hostname, False)
         
         if not username:
             QMessageBox.critical(self, "Error", f"Username required for {hostname}")
@@ -536,7 +555,8 @@ class ConnectionsWidget(QWidget):
             "connection_type": connection_type,
             "initial_remote_dir": initial_remote_dir,
             "initial_local_dir": initial_local_dir,
-            "ssh_commands": ssh_commands
+            "ssh_commands": ssh_commands,
+            "follow_symlinks": follow_symlinks
         }
         
         self.connect_requested.emit(connection_data)

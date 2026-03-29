@@ -65,6 +65,8 @@ class RemoteFileTableModel(QAbstractTableModel):
         self.cache_duration = 60  # Cache duration in seconds
         self.attr_cache = {}  # Cache for file attributes
         self.attr_cache_time = {}  # Track when each file's attributes were last checked
+        self._fetch_generation = 0  # Monotonic counter to discard stale worker results
+        self._active_workers = set()  # Keep references to prevent premature deletion
 
     def is_remote_browser(self):
         return True
@@ -102,12 +104,7 @@ class RemoteFileTableModel(QAbstractTableModel):
 
         if role == Qt.DisplayRole:
             if column == 0:
-                # Safely decode filename
-                filename = _safe_decode(name)
-                if is_directory and filename != "..":
-                    return f"[DIR] {filename}"
-                else:
-                    return filename
+                return _safe_decode(name)
             elif column == 1:
                 return str(size)
             elif column == 2:
@@ -122,10 +119,18 @@ class RemoteFileTableModel(QAbstractTableModel):
             return font
 
         if role == Qt.ForegroundRole:
-            if is_directory:
+            is_link = stat.S_ISLNK(mode) if name != ".." else False
+            if is_link:
+                return QColor(0, 180, 180)
+            elif is_directory:
                 return QColor(Qt.Color_blue)
             else:
                 return QColor(Qt.Color_darkGray)
+
+        if role == Qt.TextAlignmentRole:
+            if column == 1:
+                return Qt.AlignRight
+            return Qt.AlignLeft
 
         if role == Qt.UserRole:
             # Return the full attr item if available (file_data[4])
@@ -146,6 +151,7 @@ class RemoteFileTableModel(QAbstractTableModel):
         """
         Get files for the specified directory (Non-blocking).
         """
+        print(f"[DEBUG MODEL] get_files called")
         if directory is not None:
             current_dir = directory
         else:
@@ -156,55 +162,120 @@ class RemoteFileTableModel(QAbstractTableModel):
         if not current_dir or current_dir == '.':
             current_dir = '/'
 
+        print(f"[DEBUG MODEL] current_dir={current_dir}")
+
         if not force_refresh and current_dir in self.cache and time.time() - self.cache_time.get(current_dir, 0) < self.cache_duration:
             cached = self.cache[current_dir]
             if self.file_list == cached:
+                print(f"[DEBUG MODEL] using cached result")
                 return
             self.beginResetModel()
             self.file_list = list(cached)
             self.endResetModel()
             return
 
+        # Bump generation so any in-flight worker's callback will be ignored
+        self._fetch_generation += 1
+        generation = self._fetch_generation
+        print(f"[DEBUG MODEL] starting worker generation={generation}")
+
         # Notify that we're starting a fetch
+        print(f"[DEBUG MODEL] emitting loading_started")
         self.loading_started.emit()
+        print(f"[DEBUG MODEL] emitting status message")
         self.status_message.emit(f"Fetching file list for {current_dir}...")
         
+        print(f"[DEBUG MODEL] creating FileListWorker")
         worker = FileListWorker(self.session_id, current_dir, is_remote=self.is_remote_browser())
-        worker.signals.finished.connect(self._on_files_ready)
-        worker.signals.error.connect(self._on_files_error)
+        self._active_workers.add(worker)
+
+        def on_finished(path, items, _gen=generation, _worker=worker):
+            print(f"[DEBUG MODEL] on_finished called: gen={_gen}, current={self._fetch_generation}")
+            self._active_workers.discard(_worker)
+            if _gen == self._fetch_generation:
+                self._on_files_ready(path, items)
+            else:
+                print(f"[DEBUG MODEL] on_finished ignoring stale")
+
+        def on_error(path, error_msg, _gen=generation, _worker=worker):
+            print(f"[DEBUG MODEL] on_error called: gen={_gen}, current={self._fetch_generation}")
+            self._active_workers.discard(_worker)
+            if _gen == self._fetch_generation:
+                self._on_files_error(path, error_msg)
+            else:
+                print(f"[DEBUG MODEL] on_error ignoring stale")
+
+        print(f"[DEBUG MODEL] connecting signals")
+        worker.signals.finished.connect(on_finished)
+        worker.signals.error.connect(on_error)
         
+        print(f"[DEBUG MODEL] starting worker in thread pool")
         QThreadPool.globalInstance().start(worker)
+        print(f"[DEBUG MODEL] worker started, returning")
 
     def _on_files_ready(self, path, items):
         """Callback for when file list is ready (Called from background thread via signal)"""
+        print(f"[DEBUG MODEL] _on_files_ready called: path={path}, items={len(items)}")
         try:
+            print(f"[DEBUG MODEL] _on_files_ready: beginResetModel")
             self.beginResetModel()
+            print(f"[DEBUG MODEL] _on_files_ready: building file list")
             # Format: (name, size, mode, modified_time, attr_item)
             new_file_list = [("..", 0, stat.S_IFDIR | 0o755, "----", None)]
 
             for item in items:
                 try:
-                    name = _safe_decode(item.filename)
-                    size = item.st_size
-                    mode = item.st_mode
-                    modified_time = QDateTime.fromSecsSinceEpoch(item.st_mtime).toString(Qt.ISODate)
+                    # Handle both dict (from our worker) and paramiko object (fallback)
+                    if isinstance(item, dict):
+                        name = _safe_decode(item.get('filename', ''))
+                        size = item.get('st_size', 0)
+                        mode = item.get('st_mode', 0)
+                        mtime = item.get('st_mtime', 0)
+                    else:
+                        name = _safe_decode(item.filename)
+                        size = item.st_size
+                        mode = item.st_mode
+                        mtime = item.st_mtime
+                    modified_time = QDateTime.fromSecsSinceEpoch(mtime).toString(Qt.ISODate)
                     new_file_list.append((name, size, mode, modified_time, item))
-                except (Exception) as e:
-                    pass
+                except Exception as e:
+                    print(f"[DEBUG MODEL] Error processing item: {e}")
                     continue
 
+            print(f"[DEBUG MODEL] _on_files_ready: updating file_list, count={len(new_file_list)}")
             self.file_list = new_file_list
             self.cache[path] = self.file_list
             self.cache_time[path] = time.time()
+            print(f"[DEBUG MODEL] _on_files_ready: calling endResetModel")
             self.endResetModel()
             
+            print(f"[DEBUG MODEL] _on_files_ready: emitting status message")
             self.status_message.emit(f"Loaded {len(new_file_list)-1} items from {path}")
+        except Exception as e:
+            print(f"[DEBUG MODEL] _on_files_ready exception: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
+            print(f"[DEBUG MODEL] _on_files_ready: emitting loading_finished")
             self.loading_finished.emit()
 
     def _on_files_error(self, path, error_msg):
         """Callback for when file listing fails"""
-        self.status_message.emit(f"Error loading {path}: {error_msg}")
+        print(f"[DEBUG MODEL] _on_files_error: {path} - {error_msg}")
+        
+        # Clear cached operations on error so next attempt gets a fresh connection
+        if self.session_id in _sftp_ops_cache:
+            print(f"[DEBUG MODEL] clearing cached SFTPOperations for {self.session_id}")
+            try:
+                _sftp_ops_cache[self.session_id].close()
+            except (OSError, IOError, RuntimeError):
+                pass
+            del _sftp_ops_cache[self.session_id]
+            
+        try:
+            self.status_message.emit(f"Error loading {path}: {error_msg}")
+        except Exception as e:
+            print(f"[DEBUG MODEL] _on_files_error emit exception: {e}")
         self.loading_finished.emit()
 
     def non_blocking_sleep(self, ms):

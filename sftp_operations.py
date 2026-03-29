@@ -189,6 +189,18 @@ class SFTPOperations:
         """
         return self._api.remove(remote_path, job_id)
     
+    def rename(self, remote_path: str, new_name: str,
+               job_id: Optional[str] = None) -> Any:
+        """
+        Rename remote file or directory.
+        
+        Args:
+            remote_path: Original path
+            new_name: New name (not full path)
+            job_id: Optional job ID for tracking
+        """
+        return self._api.rename(remote_path, new_name, job_id)
+    
     def chdir(self, remote_path: str,
               job_id: Optional[str] = None) -> Any:
         """
@@ -214,6 +226,39 @@ class SFTPOperations:
         """Check if path is a file"""
         return self._api.is_file(path)
     
+    def exec_command(self, command: str, timeout: int = 120):
+        """
+        Execute an SSH command on the remote server.
+
+        Args:
+            command: Shell command to execute
+            timeout: Channel timeout in seconds
+
+        Returns:
+            Tuple of (exit_code, stdout_str, stderr_str)
+        """
+        pool = get_connection_pool()
+        ssh, sftp = pool.get_connection(
+            hostname=self._session.credentials.hostname,
+            port=self._session.credentials.port,
+            username=self._session.credentials.username,
+            password=self._session.credentials.password,
+            key=self._session.credentials.key
+        )
+        try:
+            stdin, stdout, stderr = ssh.exec_command(command, timeout=timeout)
+            exit_code = stdout.channel.recv_exit_status()
+            output = stdout.read().decode('utf-8', errors='replace')
+            error = stderr.read().decode('utf-8', errors='replace')
+            return exit_code, output, error
+        finally:
+            pool.release_connection(
+                self._session.credentials.hostname,
+                self._session.credentials.port,
+                self._session.credentials.username,
+                sftp
+            )
+
     def close(self):
         """Close the session and cleanup"""
         get_session_manager().remove_session(self._session.session_id)

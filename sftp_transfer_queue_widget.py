@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                             QListWidget, QTextEdit, QProgressBar, QSizePolicy,
-                            QLabel, QListWidgetItem, QScrollArea, QFrame, QCheckBox)
+                            QLabel, QListWidgetItem, QScrollArea, QFrame, QCheckBox,
+                            QMessageBox)
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 from PySide6.QtCore import QThreadPool, QTimer, QMutex, QMutexLocker, Signal, Slot
 import inspect
@@ -121,6 +122,7 @@ class TransferQueueWidget(QWidget):
     signal_transfer_completed = Signal(int, str)  # (count, message)
     signal_transfer_error = Signal(int, str)  # (count, message)
     signal_transfer_progress = Signal(int, int, float, float, int, int)  # (transfer_id, percent, speed_bps, eta_sec, bytes_done, bytes_total)
+    signal_discovery_progress = Signal(int, int)  # (files_found, dirs_scanned)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -131,10 +133,33 @@ class TransferQueueWidget(QWidget):
         self._observees_lock = QMutex()  # THREAD SAFETY: Lock for observee list
         self.total_queue_items = 0
         
+        # Directory transfer discovery tracking
+        self._discovery_active = False  # True when a traversal is discovering files
+        self._discovery_files_found = 0  # Files found during discovery
+        self._discovery_dirs_scanned = 0  # Directories scanned during discovery
+        self._discovery_total_files = None  # Will be set when discovery completes
+        
+        # Per-group conflict resolution flags
+        self._group_overwrite_all = set()  # group_ids with overwrite_all set
+        self._group_skip_all = set()       # group_ids with skip_all set
+        self._group_resume_all = set()     # group_ids with resume_all set
+        self._group_cancel_all = set()     # group_ids with cancel_all set
+        
+        # Serialize conflict dialogs so only one shows at a time
+        self._conflict_queue = []          # Pending (transfer_id, dest_path, dest_type)
+        self._conflict_dialog_active = False
+        
+        # Transfer groups - track batch progress for directory transfers
+        self._transfer_groups = {}  # group_id -> {"total_files": int, "completed_files": int, "total_bytes": int, "completed_bytes": int}
+        self._current_group_id = None  # Group being actively transferred
+        
         # Thread safety locks
         self._transfer_lock = QMutex()
         self._released_transfers = set()
         self._active_transfers_lock = QMutex()
+        
+        # Keep strong references to running workers to prevent GC of signal objects
+        self._running_workers = set()
         
         # Debounce timer for refresh - prevents excessive refreshing during bulk transfers
         self._refresh_debounce_timer = None
@@ -239,17 +264,23 @@ class TransferQueueWidget(QWidget):
         # Preferences checkboxes
         prefs = get_preferences()
         
-        self.clear_on_complete_checkbox = QCheckBox("Auto-clear")
+        self.clear_on_complete_checkbox = QCheckBox("Overwrite")
         self.clear_on_complete_checkbox.setToolTip("Automatically clear completed transfers")
-        self.clear_on_complete_checkbox.setChecked(prefs.get_bool("clear_completed_on_complete", False))
-        self.clear_on_complete_checkbox.stateChanged.connect(self._on_clear_on_complete_changed)
+        self.clear_on_complete_checkbox.setStyleSheet(f"""
+            QCheckBox {{
+                color: {DARK_THEME['text_secondary']};
+                font-size: 11px;
+            }}
+        """)
         
-        self.overwrite_checkbox = QCheckBox("Overwrite")
-        self.overwrite_checkbox.setToolTip("Overwrite existing files without prompting")
-        self.overwrite_checkbox.setChecked(prefs.get_bool("overwrite_on_transfer", False))
-        self.overwrite_checkbox.stateChanged.connect(self._on_overwrite_changed)
-        
-        # Console toggle button
+        self.overwrite_checkbox = QCheckBox("Follow symlinks")
+        self.overwrite_checkbox.setToolTip(
+            "When checked, symbolic links in directory transfers will be followed (resolved).\n"
+            "When unchecked (default), symlinks are skipped during transfers.\n"
+            "This sets a persistent preference — directory transfers will use this setting automatically."
+        )
+        self.overwrite_checkbox.setChecked(prefs.get_bool("follow_symlinks", False))
+        self.overwrite_checkbox.stateChanged.connect(self._on_follow_symlinks_changed)
         self.console_toggle = QPushButton("▼ Console")
         self.console_toggle.setCheckable(True)
         self.console_toggle.setChecked(False)
@@ -385,6 +416,11 @@ class TransferQueueWidget(QWidget):
         prefs = get_preferences()
         prefs.set_bool("overwrite_on_transfer", bool(state))
 
+    def _on_follow_symlinks_changed(self, state):
+        """Handle follow symlinks checkbox change"""
+        prefs = get_preferences()
+        prefs.set_bool("follow_symlinks", bool(state))
+
     def _setup_timers(self):
         """Setup timers for queue processing"""
         # Timer to periodically check the queue
@@ -406,6 +442,60 @@ class TransferQueueWidget(QWidget):
                            if item['transfer_id'] != transfer_id]
         self.total_queue_items = len(self.queue_items)
         self.update_overall_progress()
+
+    def on_discovery_progress(self, files_found, dirs_scanned):
+        """Handle discovery progress from TraversalWorker"""
+        self._discovery_files_found = files_found
+        self._discovery_dirs_scanned = dirs_scanned
+        self._discovery_active = True
+        self.update_overall_progress()
+
+    def on_discovery_finished(self):
+        """Handle discovery completion - now we know total files"""
+        self._discovery_active = False
+        self._discovery_total_files = self._discovery_files_found
+        self._discovery_files_found = 0
+        self._discovery_dirs_scanned = 0
+        self.update_overall_progress()
+
+    def start_transfer_group(self, group_id, total_files):
+        """Start tracking a new transfer group (batch of files from directory transfer)"""
+        self._current_group_id = group_id
+        self._transfer_groups[group_id] = {
+            "total_files": total_files,
+            "completed_files": 0,
+            "total_bytes": 0,
+            "completed_bytes": 0
+        }
+        self.update_overall_progress()
+
+    def add_to_group(self, transfer_id, group_id, file_size=0):
+        """Add a transfer to a group"""
+        if group_id in self._transfer_groups:
+            self._transfer_groups[group_id]["total_bytes"] += file_size
+        # Store group_id on the transfer for tracking
+        with QMutexLocker(self._transfer_lock):
+            for t in self.transfers:
+                if t.transfer_id == transfer_id:
+                    t.group_id = group_id
+                    return
+        # Transfer not created yet - queue it for assignment when start_transfer runs
+        if not hasattr(self, '_pending_group_assignments'):
+            self._pending_group_assignments = {}
+        self._pending_group_assignments[transfer_id] = group_id
+
+    def update_group_progress(self, transfer_id, bytes_done):
+        """Update progress for a transfer that's part of a group"""
+        with QMutexLocker(self._transfer_lock):
+            for t in self.transfers:
+                if t.transfer_id == transfer_id and hasattr(t, 'group_id') and t.group_id:
+                    group_id = t.group_id
+                    if group_id in self._transfer_groups:
+                        old_bytes = getattr(t, '_last_bytes_done', 0)
+                        delta = bytes_done - old_bytes
+                        self._transfer_groups[group_id]["completed_bytes"] += delta
+                        t._last_bytes_done = bytes_done
+                    break
 
     def add_observee(self, observee):
         """Add an observer to be notified when transfers complete. Thread-safe."""
@@ -473,18 +563,70 @@ class TransferQueueWidget(QWidget):
     def update_overall_progress(self):
         """Update the overall progress bar based on all active transfers"""
         try:
+            # Handle discovery phase - show scanning status instead of percentage
+            if self._discovery_active:
+                self.overall_progress_widget.setVisible(True)
+                self.overall_progress_bar.setRange(0, 0)  # Indeterminate
+                self.overall_progress_bar.setValue(0)
+                
+                # Format discovery status
+                files_str = f"{self._discovery_files_found:,} files"
+                dirs_str = f"{self._discovery_dirs_scanned:,} dirs"
+                label_text = f"Scanning: {files_str} found in {dirs_str}..."
+                self.overall_progress_label.setText(label_text)
+                self.header.set_active_count(0)
+                return
+            
+            # Transfer phase - show actual progress
             active_transfers = [t for t in self.transfers if t.active]
             
             if not active_transfers:
+                self.overall_progress_bar.setRange(0, 100)
                 self.overall_progress_bar.setValue(0)
                 self.overall_progress_label.setText("No active transfers")
                 self.overall_progress_widget.setVisible(False)
                 self.header.set_active_count(0)
+                self._discovery_total_files = None  # Reset discovery state
                 return
             
             # Show overall progress widget when there are active transfers
             self.overall_progress_widget.setVisible(True)
+            self.overall_progress_bar.setRange(0, 100)
             self.header.set_active_count(len(active_transfers))
+            
+            # Check if we have an active group to track
+            group = None
+            if self._current_group_id and self._current_group_id in self._transfer_groups:
+                group = self._transfer_groups[self._current_group_id]
+            
+            # If we have a group with known total files, show file count progress
+            if group and group["total_files"] > 0:
+                # Calculate file-based progress for the group
+                completed = group["completed_files"]
+                total = group["total_files"]
+                overall_percent = int((completed / total) * 100)
+                self.overall_progress_bar.setValue(overall_percent)
+                
+                # Sum speed from active transfers
+                total_speed = 0.0
+                for transfer in active_transfers:
+                    total_speed += getattr(transfer, 'speed_bps', 0.0) or 0.0
+                
+                # Show file count progress
+                label_text = f"Transferring: {completed}/{total} files ({overall_percent}%)"
+                if total_speed > 0:
+                    if total_speed >= 1024 * 1024:
+                        speed_str = f"{total_speed / (1024 * 1024):.1f} MB/s"
+                    elif total_speed >= 1024:
+                        speed_str = f"{total_speed / 1024:.1f} KB/s"
+                    else:
+                        speed_str = f"{total_speed:.0f} B/s"
+                    label_text += f" • {speed_str}"
+                
+                self.overall_progress_label.setText(label_text)
+                return
+            
+            # No group - show traditional bytes-based progress
             
             # Calculate total progress
             total_bytes_done = 0
@@ -783,12 +925,21 @@ class TransferQueueWidget(QWidget):
                     lambda tid, msg: self._handle_worker_message(tid, msg),
                     Qt.QueuedConnection
                 )
+                download_worker.signals.conflict.connect(
+                    lambda tid, dest, dtype: self._handle_conflict(tid, dest, dtype),
+                    Qt.QueuedConnection
+                )
             
             # Add to transfers list
             with QMutexLocker(self._transfer_lock):
                 self.transfers.append(new_transfer)
             
+            # Apply pending group assignment if any
+            if hasattr(self, '_pending_group_assignments') and transfer_id in self._pending_group_assignments:
+                new_transfer.group_id = self._pending_group_assignments.pop(transfer_id)
+            
             # Start the worker
+            self._running_workers.add(new_transfer.download_worker)
             self.thread_pool.start(new_transfer.download_worker)
             
             # Emit transfer started signal
@@ -872,6 +1023,8 @@ class TransferQueueWidget(QWidget):
                 pass
 
             # Clean up references
+            if hasattr(transfer, 'download_worker'):
+                self._running_workers.discard(transfer.download_worker)
             self.transfers = [t for t in self.transfers if t.transfer_id != transfer_id]
             
         except (OSError, IOError, RuntimeError):
@@ -905,6 +1058,12 @@ class TransferQueueWidget(QWidget):
                 return
 
             transfer.active = False
+            
+            # Update group progress if this transfer is part of a group
+            if hasattr(transfer, 'group_id') and transfer.group_id:
+                group_id = transfer.group_id
+                if group_id in self._transfer_groups:
+                    self._transfer_groups[group_id]["completed_files"] += 1
             
             # Check if cancelled or errored
             is_cancelled = False
@@ -1090,6 +1249,120 @@ class TransferQueueWidget(QWidget):
         except (OSError, IOError, RuntimeError) as e:
             print(f"Error handling worker message: {e}")
 
+    def _handle_conflict(self, transfer_id, dest_path, dest_type):
+        """Handle file conflict - queue prompt so only one dialog shows at a time"""
+        transfer = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
+        if not transfer or not transfer.download_worker:
+            return
+        
+        # Check per-group flags first (no dialog needed)
+        if hasattr(transfer, 'group_id') and transfer.group_id:
+            gid = transfer.group_id
+            if gid in self._group_cancel_all:
+                transfer.download_worker.set_conflict_result("cancel")
+                return
+            if gid in self._group_overwrite_all:
+                transfer.download_worker.set_conflict_result("overwrite_all")
+                return
+            elif gid in self._group_skip_all:
+                transfer.download_worker.set_conflict_result("skip_all")
+                return
+            elif gid in self._group_resume_all:
+                transfer.download_worker.set_conflict_result("resume_all")
+                return
+        
+        # Queue the conflict and process serially
+        self._conflict_queue.append((transfer_id, dest_path, dest_type))
+        if not self._conflict_dialog_active:
+            self._process_next_conflict()
+    
+    def _process_next_conflict(self):
+        """Show the next conflict dialog in the queue"""
+        if not self._conflict_queue:
+            self._conflict_dialog_active = False
+            return
+        
+        self._conflict_dialog_active = True
+        transfer_id, dest_path, dest_type = self._conflict_queue.pop(0)
+        
+        try:
+            transfer = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
+            if not transfer or not transfer.download_worker:
+                self._process_next_conflict()
+                return
+            
+            # Re-check group flags (may have been set by a previous dialog)
+            if hasattr(transfer, 'group_id') and transfer.group_id:
+                gid = transfer.group_id
+                if gid in self._group_cancel_all:
+                    transfer.download_worker.set_conflict_result("cancel")
+                    self._process_next_conflict()
+                    return
+                if gid in self._group_overwrite_all:
+                    transfer.download_worker.set_conflict_result("overwrite_all")
+                    self._process_next_conflict()
+                    return
+                elif gid in self._group_skip_all:
+                    transfer.download_worker.set_conflict_result("skip_all")
+                    self._process_next_conflict()
+                    return
+                elif gid in self._group_resume_all:
+                    transfer.download_worker.set_conflict_result("resume_all")
+                    self._process_next_conflict()
+                    return
+            
+            filename = os.path.basename(dest_path)
+            location = "on remote" if dest_type == "remote" else "locally"
+            
+            msg_box = QMessageBox()
+            msg_box.setIcon(Qt.MsgIcon_Question)
+            msg_box.setText(f"'{filename}' already exists {location}.")
+            msg_box.setInformativeText("What would you like to do?")
+            msg_box.setWindowTitle("File Exists")
+            
+            overwrite_all_btn = msg_box.addButton("Overwrite All", Qt.MsgRole_YesRole)
+            overwrite_btn = msg_box.addButton("Overwrite", Qt.MsgRole_YesRole)
+            skip_all_btn = msg_box.addButton("Skip All", Qt.MsgRole_NoRole)
+            skip_btn = msg_box.addButton("Skip", Qt.MsgRole_NoRole)
+            resume_all_btn = msg_box.addButton("Resume All", Qt.MsgRole_AcceptRole)
+            cancel_btn = msg_box.addButton("Cancel All", Qt.MsgRole_RejectRole)
+            
+            msg_box.exec()
+            
+            clicked = msg_box.clickedButton()
+            if clicked == overwrite_all_btn:
+                action = "overwrite_all"
+            elif clicked == overwrite_btn:
+                action = "overwrite"
+            elif clicked == skip_all_btn:
+                action = "skip_all"
+            elif clicked == skip_btn:
+                action = "skip"
+            elif clicked == resume_all_btn:
+                action = "resume_all"
+            else:
+                action = "cancel"
+            
+            # Store per-group flags
+            if hasattr(transfer, 'group_id') and transfer.group_id:
+                gid = transfer.group_id
+                if action == "overwrite_all":
+                    self._group_overwrite_all.add(gid)
+                elif action == "skip_all":
+                    self._group_skip_all.add(gid)
+                elif action == "resume_all":
+                    self._group_resume_all.add(gid)
+                elif action == "cancel":
+                    self._group_cancel_all.add(gid)
+            
+            transfer.download_worker.set_conflict_result(action)
+            
+        except (RuntimeError, AttributeError):
+            pass
+        
+        # Process next queued conflict
+        self._process_next_conflict()
+
     def update_progress(self, transfer_id, value, speed_bps=None, eta_sec=None, bytes_done=0, bytes_total=0):
         """Update transfer progress with bytes tracking"""
         try:
@@ -1237,13 +1510,22 @@ class TransferQueueWidget(QWidget):
             # Clear the transfer queue to stop new transfers from starting
             clear_sftp_queue()
             
-            # Stop all active transfers
+            # Stop all active download/upload workers
             for transfer in self.transfers:
                 if transfer.active:
                     if hasattr(transfer.download_worker, '_stop_flag'):
                         transfer.download_worker._stop_flag = True
                     if hasattr(transfer.download_worker, 'stop_transfer'):
                         transfer.download_worker.stop_transfer()
+            
+            # Cancel any active traversal or deletion workers in browser observees
+            with QMutexLocker(self._observees_lock):
+                for observee in self._observees:
+                    if hasattr(observee, '_current_traversal_worker') and observee._current_traversal_worker:
+                        observee._current_traversal_worker.cancel()
+                        observee._current_traversal_worker = None
+                    if hasattr(observee, '_deletion_worker') and observee._deletion_worker:
+                        observee._deletion_worker.cancel()
             
             self.text_console.append("Cancelling all transfers and clearing queue...")
             
