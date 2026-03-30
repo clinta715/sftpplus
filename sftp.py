@@ -26,6 +26,8 @@ from sftp_toolbar_customizer import customize_toolbar
 from sftp_about import show_about
 from sftp_logging import setup_logging, get_logger
 
+logger = logging.getLogger('sftp')
+
 class CustomComboBox(QComboBox):
     editingFinished = Signal()
 
@@ -634,91 +636,59 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.hostnames = list(self.host_data['hostnames'].keys())
 
     def browse_ssh_key(self):
-        """Let the user pick a private-key file (*.key, *, etc.) and add it to the key combo."""
         path, _ = QFileDialog.getOpenFileName(
             self,
-            caption="Select SSH private-key file",
-            directory=os.path.expanduser("~"),
-            filter="SSH key (*.key *.pem *.ppk *.pub);;All files (*)"
+            "Select SSH private-key file",
+            os.path.expanduser("~/.ssh"),
+            "SSH key (*.key *.pem *.ppk *.pub);;All files (*)"
         )
         if path:
-            # Verify the file exists and is readable
             if not os.path.exists(path):
                 QMessageBox.warning(self, "Key Error", f"Selected key file does not exist: {path}")
                 return
-                
-            # avoid duplicates
             if self.key_combo.findData(path) == -1:
-                # self.key_combo.addItem(os.path.basename(path), path)
                 self.key_combo.addItem(os.path.basename(path), path)
-                self.key_combo.setCurrentIndex(self.key_combo.findData(path))
-            else:
-                # Key already exists, just select it
-                self.key_combo.setCurrentIndex(self.key_combo.findData(path))
+            self.key_combo.setCurrentIndex(self.key_combo.findData(path))
+            self.key_combo.addItem(os.path.basename(path), path)
+            self.key_combo.setCurrentIndex(self.key_combo.findData(path))
 
     def prepare_container_widget(self):
-        """Create a container widget with file browsers"""
         container_widget = QWidget()
-
-        # Create the file browser panel with toggleable local browser
-        # Use auto_initialize=False to defer remote browser initialization
-        # until after connection is fully established
         self.file_browser_panel = FileBrowserPanel(self.session_id, auto_initialize=False)
         
-        # Connect observers
         self.transfer_queue_widget.add_observee(self.file_browser_panel.left_browser)
         self.transfer_queue_widget.add_observee(self.file_browser_panel.right_browser)
         
-        # Give browsers a reference to the transfer queue for adding jobs
         self.file_browser_panel.left_browser.transfer_queue_widget = self.transfer_queue_widget
         self.file_browser_panel.right_browser.transfer_queue_widget = self.transfer_queue_widget
 
-        # Connect message signals
         self.file_browser_panel.message.connect(self.update_console)
-        
-        # Connect transfer started signal to switch to transfers tab
         self.file_browser_panel.transfer_started.connect(self._switch_to_transfers_tab)
-
-        # Create the main layout (no per-tab output console - using global status bar instead)
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.file_browser_panel)
-        
-        # Store references in container widget
         container_widget.left_browser = self.file_browser_panel.left_browser
         container_widget.right_browser = self.file_browser_panel.right_browser
         container_widget.file_browser_panel = self.file_browser_panel
         container_widget.session_id = self.session_id
         container_widget.is_terminal = False
-        
-        # Add get_active_browser method that delegates to FileBrowserPanel
         container_widget.get_active_browser = self.file_browser_panel.get_active_browser
-
-        # Set the main layout to the container widget
         container_widget.setLayout(main_layout)
         self.message_signal.emit("Connection successful")
-
         return container_widget
 
     def prepare_terminal_widget(self, hostname, username, password, port, key, ssh_commands=""):
-        """Create a container widget with SSH terminal"""
         self.session_id = create_random_integer()
-        
         container_widget = QWidget()
-        
         self.terminal_widget = SSHTerminalWidget(self.session_id)
-        
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.terminal_widget)
         container_widget.setLayout(main_layout)
-        
         container_widget.terminal_widget = self.terminal_widget
         container_widget.is_terminal = True
         container_widget.session_id = self.session_id
-        
         tab_title = f"Terminal: {hostname}"
         new_tab_index = self.tab_widget.addTab(container_widget, tab_title)
         self.tab_widget.setCurrentIndex(new_tab_index)
-        
         self.terminal_widget.connect_ssh(hostname, username, password, port, key, ssh_commands)
         self.message_signal.emit(f"Terminal session opened to {hostname}")
 
@@ -748,13 +718,13 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
                 try:
                     widget_to_remove.terminal_widget.disconnect_ssh()
                 except Exception as e:
-                    print(f"Error disconnecting SSH terminal: {e}")
+                    logger.debug(f"Error disconnecting SSH terminal: {e}")
             # Local terminal
             if hasattr(widget_to_remove, 'local_terminal_widget') and widget_to_remove.local_terminal_widget:
                 try:
                     widget_to_remove.local_terminal_widget.close()
                 except Exception as e:
-                    print(f"Error closing local terminal: {e}")
+                    logger.debug(f"Error closing local terminal: {e}")
         
         self.tab_widget.removeTab(index)
 
@@ -763,13 +733,13 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             try:
                 widget_to_remove.right_browser.close_sftp_connection()
             except Exception as e:
-                print(f"Error closing SFTP connection: {e}")
+                logger.debug(f"Error closing SFTP connection: {e}")
 
         # Delete the widget if necessary
         try:
             widget_to_remove.deleteLater()
         except Exception as e:
-            print(f"Error deleting widget: {e}")
+            logger.debug(f"Error deleting widget: {e}")
         
         # Clean up session and credentials
         if session_id:
@@ -1601,7 +1571,7 @@ Do you want to trust this host and add it to known_hosts?"""
                 from sftp_downloadworkerclass import clear_sftp_queue
                 clear_sftp_queue()
         except (OSError, IOError, RuntimeError) as e:
-            print(f"Error stopping background thread: {e}")
+            logger.debug(f"Error stopping background thread: {e}")
 
     def _on_confirm_exit_changed(self, state):
         """Handle confirm exit checkbox change"""
@@ -1619,8 +1589,10 @@ Do you want to trust this host and add it to known_hosts?"""
             active_count = 0
             queued_count = 0
             if hasattr(self, 'transfer_queue_widget'):
-                with QMutexLocker(self.transfer_queue_widget._active_transfers_lock):
-                    active_count = self.transfer_queue_widget.active_transfers
+                tw = self.transfer_queue_widget
+                with QMutexLocker(tw._transfer_lock):
+                    active_count = len([t for t in tw.transfers if t.active])
+                tw.active_transfers = active_count
                 from sftp_downloadworkerclass import sftp_queue
                 queued_count = sftp_queue.qsize()
 
@@ -1649,9 +1621,9 @@ Do you want to trust this host and add it to known_hosts?"""
 
             event.accept()
         except (OSError, IOError, RuntimeError) as e:
-            print(f"Error during application shutdown: {e}")
+            logger.debug(f"Error during application shutdown: {e}")
             import traceback
-            traceback.print_exc()
+            logger.debug(traceback.format_exc())
             event.accept()
 
     def eventFilter(self, source, event):
