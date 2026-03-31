@@ -1,5 +1,14 @@
 # SFTP Client - Known Issues and Action Items
 
+## Active Action Items
+
+### SFTPSessionAPI Enhancement
+- Expand `SFTPSessionAPI.__init__()` to accept optional `ssh` and `sftp` keyword arguments
+- This would allow passing pre-established SSH/SFTP connections for specialized use cases like:
+  - Reserved discovery channels for faster directory traversal during large downloads
+  - Custom connection handling scenarios
+- Currently causes TypeError because SFTPSessionAPI doesn't support these kwargs
+
 ## Resolved Issues
 
 ### ✅ Session-Based API (2026-02-27)
@@ -78,6 +87,15 @@ All priority items have been addressed. The codebase is now:
 - Using specific exception types
 - Sanitizing sensitive data from errors
 - Using efficient blocking operations instead of busy-polling
+
+## Future Improvements
+
+### SFTPSessionAPI Enhancement
+- Expand `SFTPSessionAPI.__init__()` to accept optional `ssh` and `sftp` keyword arguments
+- This would allow passing pre-established SSH/SFTP connections for specialized use cases like:
+  - Reserved discovery channels for faster directory traversal during large downloads
+  - Custom connection handling scenarios
+- Currently reverted: discovery channel feature caused TypeError because SFTPSessionAPI doesn't support these kwargs
 
 ## Archived Files
 
