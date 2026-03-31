@@ -183,9 +183,10 @@ class ConnectionPool:
             except Exception as e:
                 pass
         
-        # Use WarningPolicy to warn about unknown hosts but allow connection
-        # This is appropriate for a file transfer client where user initiates connections
-        ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
+        # Use AutoAddPolicy to automatically add new hosts and allow connection
+        # This is appropriate for a desktop SFTP client where user initiates connections
+        # and may connect to different servers over time
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
         connect_kwargs = {
             'hostname': hostname,
