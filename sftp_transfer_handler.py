@@ -378,15 +378,55 @@ class TraversalWorker(QRunnable):
         # Collect files for batch transfer (instead of streaming)
         self._collected_files = []  # List of (source_path, dest_path, command)
         
-        # SFTPOperations for listing
-        from sftp_operations import SFTPOperations
-        self.ops = SFTPOperations(
-            hostname=self.creds.get('hostname', ''),
-            username=self.creds.get('username', ''),
-            password=self.creds.get('password', ''),
-            port=self.creds.get('port', 22),
-            key=self.creds.get('key')
+        # Try to acquire a discovery channel for faster traversal
+        from sftp_connection_pool import get_connection_pool
+        from sftp_session import SFTPSession, SFTPCredentials
+        from sftp_session_executor import SFTPSessionAPI
+        
+        pool = get_connection_pool()
+        hostname = self.creds.get('hostname', '')
+        username = self.creds.get('username', '')
+        password = self.creds.get('password', '')
+        port = self.creds.get('port', 22)
+        key = self.creds.get('key')
+        
+        discovery_ssh, discovery_sftp = pool.acquire_discovery_channel(
+            hostname, port, username, password, key
         )
+        
+        if discovery_ssh and discovery_sftp:
+            # Use discovery channel for operations
+            creds = SFTPCredentials(
+                hostname=hostname,
+                username=username,
+                password=password,
+                port=port,
+                key=key
+            )
+            self._discovery_session = SFTPSession(create_random_integer(), creds)
+            # Store the SSH directly on session for exec_command access
+            self._discovery_session._ssh = discovery_ssh
+            self._discovery_api = SFTPSessionAPI(
+                self._discovery_session, 
+                ssh=discovery_ssh, 
+                sftp=discovery_sftp
+            )
+            self._discovery_channel = True
+            self.ops = None  # Will use _discovery_api instead
+        else:
+            # Fall back to regular SFTPOperations
+            from sftp_operations import SFTPOperations
+            self.ops = SFTPOperations(
+                hostname=hostname,
+                username=username,
+                password=password,
+                port=port,
+                key=key
+            )
+            self._discovery_api = None
+            self._discovery_session = None
+            self._discovery_channel = False
+        
         self._cancelled = False
         self._files_found = 0
         self._dirs_scanned = 0
@@ -408,6 +448,20 @@ class TraversalWorker(QRunnable):
         if self._cancelled: 
             return
         
+        # Helper to execute commands - uses discovery API if available, else ops
+        def execute_cmd(cmd_type, *args, **kwargs):
+            if self._discovery_channel and self._discovery_session:
+                if cmd_type == 'exec_command':
+                    # Use discovery SSH directly for find command
+                    return self._discovery_session._ssh.exec_command(*args, **kwargs)
+                elif cmd_type == 'list':
+                    return self._discovery_api.list(*args, **kwargs)
+                elif cmd_type == 'list_attr':
+                    return self._discovery_api.list_attr(*args, **kwargs)
+            return getattr(self.ops, cmd_type)(*args, **kwargs)
+        
+        self._execute_cmd = execute_cmd
+        
         try:
             _safe_emit(self.signals.status, f"Starting traversal of {self.source_dir}...")
             
@@ -423,7 +477,13 @@ class TraversalWorker(QRunnable):
         except Exception as e:
             _safe_emit(self.signals.error, str(e))
         finally:
-            if self.ops:
+            # Clean up discovery channel if used
+            if self._discovery_channel:
+                pool = get_connection_pool()
+                pool.release_discovery_channel()
+                if self._discovery_session:
+                    get_session_manager().remove_session(self._discovery_session.session_id)
+            elif self.ops:
                 self.ops.close()
         
         if not self._cancelled:
@@ -446,7 +506,7 @@ class TraversalWorker(QRunnable):
         
         _safe_emit(self.signals.status, f"Fast scanning: {source_dir}")
         
-        exit_code, output, error = self.ops.exec_command(find_cmd, timeout=300)
+        exit_code, output, error = self._execute_cmd('exec_command', find_cmd, timeout=300)
         
         if exit_code != 0:
             return False
@@ -511,7 +571,7 @@ class TraversalWorker(QRunnable):
         
         if self.is_source_remote:
             try:
-                raw_files = self.ops.list_attr(source_dir)
+                raw_files = self._execute_cmd('list_attr', source_dir)
                 # Filter out '.' and '..' which can cause infinite recursion
                 # Items are now dicts, not SFTPAttribute objects
                 files = [f for f in raw_files if f['filename'] not in ['.', '..']]

@@ -2,14 +2,14 @@
 
 ## Active Action Items
 
-### SFTPSessionAPI Enhancement
-- Expand `SFTPSessionAPI.__init__()` to accept optional `ssh` and `sftp` keyword arguments
-- This would allow passing pre-established SSH/SFTP connections for specialized use cases like:
-  - Reserved discovery channels for faster directory traversal during large downloads
-  - Custom connection handling scenarios
-- Currently causes TypeError because SFTPSessionAPI doesn't support these kwargs
+(None currently - see resolved issues below)
 
 ## Resolved Issues
+
+### ✅ SFTPSessionAPI Enhancement (2026-03-31)
+- Expanded `SFTPSessionAPI.__init__()` to accept optional `ssh` and `sftp` keyword arguments
+- This allows passing pre-established SSH/SFTP connections for specialized use cases
+- Enables reserved discovery channels for faster directory traversal during large downloads
 
 ### ✅ Session-Based API (2026-02-27)
 - Complete migration from legacy 11-parameter `add_sftp_job()` to session-based API

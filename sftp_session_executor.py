@@ -42,12 +42,16 @@ class CommandExecutor(QObject):
     message = Signal(str, str)
     finished = Signal(str)
     
-    def __init__(self, session: SFTPSession):
+    def __init__(self, session: SFTPSession, ssh=None, sftp=None):
         super().__init__()
         self.session = session
         self.credentials = session.credentials
         self._pool = get_connection_pool()
         self._lock = Lock()
+        
+        # Allow passing pre-established connections for specialized use cases
+        self._provided_ssh = ssh
+        self._provided_sftp = sftp
         
         self._last_emit_time = 0
         self._emit_interval = 0.2
@@ -72,14 +76,18 @@ class CommandExecutor(QObject):
         """
         command.validate()
         
-        with self._lock:
-            ssh, sftp = self._pool.get_connection(
-                hostname=self.credentials.hostname,
-                port=self.credentials.port,
-                username=self.credentials.username,
-                password=self.credentials.password,
-                key=self.credentials.key
-            )
+        # Use provided connections if available, otherwise get from pool
+        if self._provided_ssh and self._provided_sftp:
+            ssh, sftp = self._provided_ssh, self._provided_sftp
+        else:
+            with self._lock:
+                ssh, sftp = self._pool.get_connection(
+                    hostname=self.credentials.hostname,
+                    port=self.credentials.port,
+                    username=self.credentials.username,
+                    password=self.credentials.password,
+                    key=self.credentials.key
+                )
         
         job_id = self.session.get_next_job_id()
         
