@@ -75,7 +75,6 @@ python -m nuitka ^
     --standalone ^
     --onefile ^
     --windows-console-mode=disable ^
-    --windows-icon-from-ico=none ^
     --enable-plugin=pyside6 ^
     sftp.py
 
