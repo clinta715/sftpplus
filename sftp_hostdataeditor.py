@@ -4,6 +4,7 @@ Connection Data Storage Module
 Handles secure storage and retrieval of SFTP connection data.
 Encryption key is stored separately from encrypted data for enhanced security.
 """
+import logging
 import os
 import stat
 import json
@@ -13,6 +14,8 @@ from sftp_platform import (
     get_key_file_path, get_connection_data_path,
     secure_file_permissions, create_secure_directory, is_windows
 )
+
+logger = logging.getLogger('sftp')
 
 KEY_FILE_PATH = get_key_file_path()
 DATA_FILE_PATH = get_connection_data_path()
@@ -24,9 +27,9 @@ cipher_suite = None
 def _load_encryption_key():
     """Load encryption key from separate file, or generate new one."""
     global encryption_key, cipher_suite
-    
+
     create_secure_directory(os.path.dirname(KEY_FILE_PATH))
-    
+
     key_loaded = False
     try:
         if os.path.exists(KEY_FILE_PATH):
@@ -35,13 +38,13 @@ def _load_encryption_key():
             if len(key_data) == 44:
                 encryption_key = key_data
                 key_loaded = True
-    except (OSError, IOError, ValueError):
-        pass
-    
+    except (OSError, ValueError) as e:
+        logger.warning(f"Error reading encryption key: {e}")
+
     if not key_loaded:
         encryption_key = Fernet.generate_key()
         _save_encryption_key(encryption_key)
-    
+
     cipher_suite = Fernet(encryption_key)
     return encryption_key
 
@@ -49,14 +52,10 @@ def _load_encryption_key():
 def _save_encryption_key(key):
     """Save encryption key to separate file with restricted permissions."""
     global encryption_key
-    try:
-        create_secure_directory(os.path.dirname(KEY_FILE_PATH))
-        with open(KEY_FILE_PATH, 'wb') as f:
-            f.write(key)
-        secure_file_permissions(KEY_FILE_PATH)
-    except (OSError, IOError):
-        pass
-        raise
+    create_secure_directory(os.path.dirname(KEY_FILE_PATH))
+    with open(KEY_FILE_PATH, 'wb') as f:
+        f.write(key)
+    secure_file_permissions(KEY_FILE_PATH)
     encryption_key = key
 
 
@@ -69,6 +68,7 @@ def _migrate_old_key_format(data):
             old_key = old_key.encode()
         _save_encryption_key(old_key)
         cipher_suite = Fernet(old_key)
+        logger.info("Migrated encryption key from old format to separate key file")
         return True
     return False
 
@@ -79,10 +79,10 @@ _load_encryption_key()
 def save_connection_data(host_data):
     """
     Save connection data to encrypted JSON file.
-    
+
     Args:
         host_data: Dictionary containing connection information
-        
+
     Returns:
         bool: True if successful, False otherwise
     """
@@ -91,7 +91,7 @@ def save_connection_data(host_data):
         if not all(key in host_data for key in ["hostnames", "usernames", "passwords", "ports", "key"]):
             raise ValueError("Incomplete host data structure")
 
-        encrypted_passwords = {k: cipher_suite.encrypt(v.encode()).decode() 
+        encrypted_passwords = {k: cipher_suite.encrypt(v.encode()).decode()
                              for k, v in host_data["passwords"].items()}
 
         data = {
@@ -110,7 +110,7 @@ def save_connection_data(host_data):
         }
 
         create_secure_directory(os.path.dirname(DATA_FILE_PATH))
-        
+
         if is_windows():
             with open(DATA_FILE_PATH, 'w') as f:
                 json.dump(data, f, indent=4)
@@ -123,18 +123,15 @@ def save_connection_data(host_data):
             finally:
                 os.umask(old_umask)
         return True
-    except PermissionError:
-        return False
-    except OSError:
-        return False
-    except (OSError, IOError, RuntimeError):
+    except (OSError, RuntimeError) as e:
+        logger.error(f"Failed to save connection data: {e}")
         return False
 
 
 def load_connection_data():
     """
     Load connection data from encrypted JSON file.
-    
+
     Returns:
         dict: Connection data dictionary with decrypted passwords
     """
@@ -148,7 +145,7 @@ def load_connection_data():
 
     try:
         filepath = DATA_FILE_PATH
-        
+
         if not os.path.exists(filepath):
             old_filepath = 'connection_data.json'
             if os.path.exists(old_filepath):
@@ -166,16 +163,17 @@ def load_connection_data():
 
         host_data["hostnames"] = data.get("hostnames", {})
         host_data["usernames"] = data.get("usernames", {})
-        
+
         encrypted_passwords = data.get("passwords", {})
         host_data["passwords"] = {}
         for k, v in encrypted_passwords.items():
             try:
                 host_data["passwords"][k] = cipher_suite.decrypt(v.encode()).decode()
-            except (OSError, IOError, RuntimeError, InvalidToken):
+            except (InvalidToken, Exception) as e:
+                logger.warning(f"Failed to decrypt password for '{k}': {e}")
                 host_data["passwords"][k] = ""
-                
-        host_data["ports"] = data.get("ports", {})
+
+        host_data["ports"] = {k: int(v) if v else 22 for k, v in data.get("ports", {}).items()}
         host_data["key"] = data.get("key", {})
         host_data["connection_type"] = data.get("connection_type", {})
         host_data["initial_remote_dir"] = data.get("initial_remote_dir", {})
@@ -188,16 +186,22 @@ def load_connection_data():
         return host_data
 
     except FileNotFoundError:
+        logger.info("No connection data file found, starting fresh")
         encryption_key = Fernet.generate_key()
+        _save_encryption_key(encryption_key)
         cipher_suite = Fernet(encryption_key)
         return host_data
-        
-    except json.JSONDecodeError:
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Corrupted connection data file: {e}")
         encryption_key = Fernet.generate_key()
+        _save_encryption_key(encryption_key)
         cipher_suite = Fernet(encryption_key)
         return host_data
-        
-    except (OSError, IOError, RuntimeError):
+
+    except (OSError, RuntimeError) as e:
+        logger.error(f"Error loading connection data: {e}")
         encryption_key = Fernet.generate_key()
+        _save_encryption_key(encryption_key)
         cipher_suite = Fernet(encryption_key)
         return host_data

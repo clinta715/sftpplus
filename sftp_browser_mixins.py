@@ -8,14 +8,13 @@ Modular functionality for the Browser class, split into logical groups:
 - DragDropMixin: Drag and drop support for file transfers
 """
 
-from PySide6.QtWidgets import QMenu, QInputDialog, QMessageBox
+from PySide6.QtWidgets import QMenu
 from PySide6.QtCore import Qt
 import os
 import logging
 import threading
 
 from sftp_creds import get_credentials, sanitize_error_message
-from sftp_hostdataeditor import load_connection_data, save_connection_data
 from sftp_operations import SFTPOperations
 from sftp_drag_drop import start_drag, can_accept_drop, DragDropInfo
 
@@ -63,136 +62,12 @@ class TreeViewMixin:
 
 
 class BookmarkMixin:
-    """Mixin for directory bookmark management"""
-    
-    def add_bookmark(self):
-        """Add current directory to bookmarks"""
-        try:
-            creds = get_credentials(self.session_id)
-            hostname = creds.get('hostname', '')
-            is_remote = self.is_remote_browser() if hasattr(self, 'is_remote_browser') else False
-            current_dir = creds.get('current_remote_directory' if is_remote else 'current_local_directory', '.')
-            
-            if not hostname:
-                self.message_signal.emit("Cannot add bookmark: no hostname")
-                return False
-            
-            name, ok = QInputDialog.getText(
-                self, "Add Bookmark",
-                f"Enter name for bookmark:\n{current_dir}",
-                text=os.path.basename(current_dir) or "Root"
-            )
-            
-            if not ok or not name:
-                return False
-            
-            host_data = load_connection_data()
-            
-            if 'bookmarks' not in host_data:
-                host_data['bookmarks'] = {}
-            
-            if hostname not in host_data['bookmarks']:
-                host_data['bookmarks'][hostname] = []
-            
-            for existing in host_data['bookmarks'][hostname]:
-                if isinstance(existing, dict) and existing.get('path') == current_dir:
-                    self.message_signal.emit("Bookmark already exists for this directory")
-                    return False
-            
-            host_data['bookmarks'][hostname].append({
-                'name': name,
-                'path': current_dir,
-                'is_remote': is_remote
-            })
-            
-            if save_connection_data(host_data):
-                self.message_signal.emit(f"Bookmark added: {name}")
-                return True
-            else:
-                self.message_signal.emit("Failed to save bookmark")
-                return False
-                
-        except (OSError, IOError, RuntimeError) as e:
-            self.message_signal.emit(f"Error adding bookmark: {sanitize_error_message(str(e))}")
-            return False
-    
-    def get_bookmarks(self):
-        """Get bookmarks for current hostname"""
-        try:
-            host_data = load_connection_data()
-            creds = get_credentials(self.session_id)
-            hostname = creds.get('hostname', 'localhost')
-            
-            bookmarks = host_data.get('bookmarks', {}).get(hostname, [])
-            normalized = []
-            for b in bookmarks:
-                if isinstance(b, str):
-                    normalized.append({'name': b, 'path': b})
-                else:
-                    normalized.append(b)
-            return normalized
-        except (OSError, IOError, RuntimeError):
-            return []
-    
-    def navigate_to_bookmark(self, path):
-        """Navigate to bookmarked path"""
-        self.change_directory(path)
-        return True
-    
-    def _show_bookmarks_menu(self):
-        """Show bookmarks dropdown menu"""
-        bookmarks = self.get_bookmarks()
-        menu = QMenu(self)
-        
-        add_action = menu.addAction("⭐ Add Current Directory")
-        add_action.triggered.connect(lambda: self.add_bookmark())
-        
-        if bookmarks:
-            menu.addSeparator()
-            for bm in bookmarks:
-                if isinstance(bm, dict):
-                    name = bm.get('name', bm.get('path', 'Unknown'))
-                    path = bm.get('path', '')
-                    action = menu.addAction(f"📁 {name}")
-                    action.triggered.connect(lambda checked, p=path: self.navigate_to_bookmark(p))
-        
-        menu.addSeparator()
-        manage_action = menu.addAction("⚙️ Manage Bookmarks...")
-        manage_action.triggered.connect(self._manage_bookmarks)
-        
-        menu.exec(self.bookmarks_btn.mapToGlobal(self.bookmarks_btn.rect().bottomLeft()))
-    
-    def _manage_bookmarks(self):
-        """Manage existing bookmarks"""
-        bookmarks = self.get_bookmarks()
-        if not bookmarks:
-            QMessageBox.information(self, "Manage Bookmarks", "No bookmarks to manage.")
-            return
-        
-        items = []
-        for bm in bookmarks:
-            if isinstance(bm, dict):
-                items.append(f"{bm.get('name', 'Unknown')} - {bm.get('path', '')}")
-        
-        item, ok = QInputDialog.getItem(
-            self, "Manage Bookmarks", 
-            "Select bookmark to delete:", 
-            items, 0, False
-        )
-        
-        if ok and item:
-            host_data = load_connection_data()
-            creds = get_credentials(self.session_id)
-            hostname = creds.get('hostname', 'localhost')
-            
-            name = item.split(' - ')[0]
-            host_data['bookmarks'][hostname] = [
-                bm for bm in host_data.get('bookmarks', {}).get(hostname, [])
-                if isinstance(bm, dict) and bm.get('name') != name
-            ]
-            
-            if save_connection_data(host_data):
-                self.message_signal.emit(f"Bookmark '{name}' deleted")
+    """Mixin stub for directory bookmark management.
+
+    All bookmark methods are defined directly on Browser in sftp_browserclass.py.
+    This mixin is kept only for MRO compatibility.
+    """
+    pass
 
 
 class FileOpsMixin:

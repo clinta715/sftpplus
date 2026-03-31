@@ -51,7 +51,6 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.message_signal.connect(self.update_console)
 
         # Custom data structure to store hostname, username, and password together
-        self.create_initial_data()
         self.host_data = {
             "hostnames" : {},
             "usernames" : {},
@@ -806,7 +805,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         if self.current_hostname in self.host_data['hostnames']:
             username = self.host_data['usernames'].get(self.current_hostname, '')
             password = self.host_data['passwords'].get(self.current_hostname, '')
-            port     = self.host_data['ports'].get(self.current_hostname, '')
+            port     = self.host_data['ports'].get(self.current_hostname, 22)
             
             # Handle key data - it might be a single string or a list
             key_data = self.host_data['key'].get(self.current_hostname,'')
@@ -1453,21 +1452,22 @@ Do you want to trust this host and add it to known_hosts?"""
 
     def save_connection_data_async(self):
         try:
-            # Update host data with new connection info
-            self.host_data["hostnames"][self.temp_hostname] = self.temp_hostname
-            self.host_data["usernames"][self.temp_hostname] = self.temp_username
-            self.host_data["passwords"][self.temp_hostname] = self.temp_password
-            self.host_data["ports"][self.temp_hostname] = str(self.temp_port)
-            self.host_data["key"][self.temp_hostname] = self.temp_key
+            host_data = load_connection_data()
 
-            # Save to file
-            if not save_connection_data(self.host_data):
+            host_data["hostnames"][self.temp_hostname] = self.temp_hostname
+            host_data["usernames"][self.temp_hostname] = self.temp_username
+            host_data["passwords"][self.temp_hostname] = self.temp_password
+            host_data["ports"][self.temp_hostname] = int(self.temp_port)
+            host_data["key"][self.temp_hostname] = self.temp_key
+
+            if not save_connection_data(host_data):
                 self.message_signal.emit("Failed to save connection data")
             else:
                 self.message_signal.emit("Connection data saved successfully")
-                
+                self.host_data = host_data
+
             self.update_completer()
-        except (OSError, IOError, RuntimeError) as e:
+        except (OSError, RuntimeError) as e:
             self.message_signal.emit(f"Error saving connection data: {str(e)}")
 
     def navigate_to_initial_directories(self):
@@ -1494,21 +1494,6 @@ Do you want to trust this host and add it to known_hosts?"""
         except (OSError, IOError, RuntimeError) as e:
             self.message_signal.emit(f"Warning: Could not navigate to initial directories: {e}")
 
-    def create_initial_data(self):
-        """
-        Create initial data for the application.
-        This includes defining the data to be written to the JSON file.
-        """
-        # Example data for demonstration purposes
-        self.host_data = {
-            "localhost": {
-                "username": "guest",
-                "password": "WjNWbGMzUT0=",  # Note: This should be securely stored/encrypted
-                "port": 22,  # Port should be an integer
-                "key": "None"
-            }
-        }
-            
     def cleanup(self):
         if hasattr(self, '_cleanup_performed') and self._cleanup_performed:
             return

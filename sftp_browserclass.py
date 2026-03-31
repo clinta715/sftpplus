@@ -1914,10 +1914,10 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             })
             
             if save_connection_data(host_data):
-                self.message_signal.emit(f"Bookmark '{name}' deleted")
+                self.message_signal.emit(f"Bookmark '{name}' added")
                 return True
         except Exception as e:
-            self.message_signal.emit(f"Error removing bookmark: {e}")
+            self.message_signal.emit(f"Error adding bookmark: {e}")
             return False
     
     def cleanup(self):

@@ -11,7 +11,7 @@ import shlex
 import logging
 
 from sftp_connection_pool import ConnectionPool
-from sftp_hostdataeditor import cipher_suite
+import sftp_hostdataeditor
 
 logger = logging.getLogger('sftp.transfer')
 
@@ -92,9 +92,9 @@ class SFTPJob:
     def to_dict(self):
         """Convert job to dictionary with encrypted password for secure serialization."""
         encrypted_password = ''
-        if self.password and cipher_suite:
+        if self.password and sftp_hostdataeditor.cipher_suite:
             try:
-                encrypted_password = cipher_suite.encrypt(self.password.encode()).decode()
+                encrypted_password = sftp_hostdataeditor.cipher_suite.encrypt(self.password.encode()).decode()
             except Exception:
                 pass
         return {
@@ -115,9 +115,9 @@ class SFTPJob:
     def from_dict(data):
         """Create job from dictionary with decrypted password."""
         encrypted_password = data.get("password", "")
-        if encrypted_password and cipher_suite:
+        if encrypted_password and sftp_hostdataeditor.cipher_suite:
             try:
-                data["password"] = cipher_suite.decrypt(encrypted_password.encode()).decode()
+                data["password"] = sftp_hostdataeditor.cipher_suite.decrypt(encrypted_password.encode()).decode()
             except Exception:
                 data["password"] = ""
         else:

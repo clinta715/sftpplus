@@ -15,7 +15,7 @@ from sftp_downloadworkerclass import Transfer, DownloadWorker, SFTPJob, sftp_que
 from sftp_theme import (BUTTON_STYLE_DARK, LIST_WIDGET_STYLE_DARK, PROGRESS_BAR_STYLE_DARK,
                         TEXT_EDIT_STYLE_DARK, DARK_THEME)
 from sftp_preferences import get_preferences
-from sftp_hostdataeditor import cipher_suite
+import sftp_hostdataeditor
 from sftp_transfer_history import log_transfer
 from sftp_platform import get_transfer_queue_path, create_secure_directory, secure_file_permissions, is_windows
 
@@ -1627,9 +1627,9 @@ class TransferQueueWidget(QWidget):
                             continue
                         # Encrypt password for secure storage
                         password = getattr(job, 'password', '') or ''
-                        if password and cipher_suite:
+                        if password and sftp_hostdataeditor.cipher_suite:
                             try:
-                                encrypted_password = cipher_suite.encrypt(password.encode()).decode()
+                                encrypted_password = sftp_hostdataeditor.cipher_suite.encrypt(password.encode()).decode()
                             except Exception:
                                 encrypted_password = ''
                         else:
@@ -1664,9 +1664,9 @@ class TransferQueueWidget(QWidget):
                                 continue
                             # Encrypt password for secure storage
                             password = getattr(worker, 'password', '') or ''
-                            if password and cipher_suite:
+                            if password and sftp_hostdataeditor.cipher_suite:
                                 try:
-                                    encrypted_password = cipher_suite.encrypt(password.encode()).decode()
+                                    encrypted_password = sftp_hostdataeditor.cipher_suite.encrypt(password.encode()).decode()
                                 except Exception:
                                     encrypted_password = ''
                             else:
@@ -1731,9 +1731,9 @@ class TransferQueueWidget(QWidget):
                     
                     # Decrypt password from secure storage
                     encrypted_password = job_data.get('password', '')
-                    if encrypted_password and cipher_suite:
+                    if encrypted_password and sftp_hostdataeditor.cipher_suite:
                         try:
-                            password = cipher_suite.decrypt(encrypted_password.encode()).decode()
+                            password = sftp_hostdataeditor.cipher_suite.decrypt(encrypted_password.encode()).decode()
                         except Exception:
                             logger.warning("Failed to decrypt saved password")
                             password = ''
