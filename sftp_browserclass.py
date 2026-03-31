@@ -1687,7 +1687,6 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         
         # Show feedback that items were added to queue
         self.message_signal.emit(f"Added {len(file_list)} item(s) to transfer queue")
-        self.status_message.setText(f"Added {len(file_list)} item(s) to transfer queue")
         
     def _handle_worker_prompt(self, worker, path):
         """Handle overwrite prompt request from background worker on UI thread"""
