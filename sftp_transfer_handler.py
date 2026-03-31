@@ -125,6 +125,10 @@ class DeletionWorker(QRunnable):
                     failure_count += 1
                     failures.append((remote_path, str(e)))
                     _safe_emit(self.signals.item_failed, remote_path, str(e))
+                except Exception as e:
+                    failure_count += 1
+                    failures.append((remote_path, str(e)))
+                    _safe_emit(self.signals.item_failed, remote_path, str(e))
 
             _safe_emit(self.signals.finished, success_count, failure_count, failures)
         finally:
@@ -142,7 +146,9 @@ class DeletionWorker(QRunnable):
             items = ops.list_attr(remote_path)
         except (OSError, IOError, RuntimeError):
             return
-
+        except Exception:
+            return
+        
         # Items are dicts with 'filename' and 'st_mode' keys
         files = [item for item in items if stat.S_ISREG(item['st_mode'])]
         dirs = [item for item in items if stat.S_ISDIR(item['st_mode'])]
@@ -155,12 +161,17 @@ class DeletionWorker(QRunnable):
                 ops.remove(entry_path)
             except (PermissionError, OSError):
                 continue
+            except Exception:
+                continue
 
         for entry in dirs:
             if self._cancel_requested:
                 return
             entry_path = os.path.join(remote_path, entry['filename'])
-            self._remove_remote_dir_recursive(ops, entry_path, _depth + 1)
+            try:
+                self._remove_remote_dir_recursive(ops, entry_path, _depth + 1)
+            except Exception:
+                pass
 
         try:
             ops.rmdir(remote_path)
