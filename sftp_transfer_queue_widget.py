@@ -484,6 +484,16 @@ class TransferQueueWidget(QWidget):
             self._pending_group_assignments = {}
         self._pending_group_assignments[transfer_id] = group_id
 
+    def set_group_conflict_action(self, group_id, action):
+        if action == "overwrite_all":
+            self._group_overwrite_all.add(group_id)
+        elif action == "skip_all":
+            self._group_skip_all.add(group_id)
+        elif action == "resume_all":
+            self._group_resume_all.add(group_id)
+        elif action == "cancel":
+            self._group_cancel_all.add(group_id)
+
     def update_group_progress(self, transfer_id, bytes_done):
         """Update progress for a transfer that's part of a group"""
         with QMutexLocker(self._transfer_lock):
@@ -1045,7 +1055,7 @@ class TransferQueueWidget(QWidget):
             self.update_overall_progress()
             
         except (OSError, IOError, RuntimeError) as e:
-            print(f"Error releasing transfer {transfer_id}: {e}")
+            logger.debug(f"Error releasing transfer {transfer_id}: {e}")
 
     def transfer_finished(self, transfer_id):
         """Handle transfer completion"""
@@ -1092,6 +1102,18 @@ class TransferQueueWidget(QWidget):
                     if transfer.status_label:
                         transfer.status_label.setText("✗ Error")
                         transfer.status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['error']}; font-weight: bold;")
+                    if transfer.progress_bar:
+                        transfer.progress_bar.setStyleSheet(f"""
+                            QProgressBar {{
+                                border: none;
+                                border-radius: 3px;
+                                background-color: {DARK_THEME['border']};
+                            }}
+                            QProgressBar::chunk {{
+                                background-color: {DARK_THEME['error']};
+                                border-radius: 3px;
+                            }}
+                        """)
                 else:
                     if transfer.status_label:
                         transfer.status_label.setText("✓ Done")
@@ -1236,7 +1258,7 @@ class TransferQueueWidget(QWidget):
             self._release_transfer(transfer_id)
             
         except (OSError, IOError, RuntimeError) as e:
-            print(f"Error in transfer_error handler: {e}")
+            logger.debug(f"Error in transfer_error handler: {e}")
 
     def _handle_worker_message(self, transfer_id, message):
         """Handle messages from worker threads"""
@@ -1247,7 +1269,7 @@ class TransferQueueWidget(QWidget):
                 if hasattr(self, 'text_console'):
                     self.text_console.append(f"Transfer {transfer_id}: {message}")
         except (OSError, IOError, RuntimeError) as e:
-            print(f"Error handling worker message: {e}")
+            logger.debug(f"Error handling worker message: {e}")
 
     def _handle_conflict(self, transfer_id, dest_path, dest_type):
         """Handle file conflict - queue prompt so only one dialog shows at a time"""
@@ -1587,7 +1609,7 @@ class TransferQueueWidget(QWidget):
             self.active_transfers = 0
 
         except (OSError, IOError, RuntimeError) as e:
-            print(f"Error in cleanup: {e}")
+            logger.debug(f"Error in cleanup: {e}")
     
     def save_pending_transfers(self):
         """Save pending and paused transfers to disk for restoration on next launch"""

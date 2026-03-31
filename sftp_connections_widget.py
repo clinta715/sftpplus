@@ -351,7 +351,7 @@ class ConnectionsWidget(QWidget):
     
     def _migrate_host_data(self, old_hostname, new_hostname):
         """Migrate data when hostname changes"""
-        for key in ["usernames", "passwords", "ports", "key", "connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks", "ssh_commands", "follow_symlinks"]:
+        for key in ["hostnames", "usernames", "passwords", "ports", "key", "connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks", "ssh_commands", "follow_symlinks"]:
             if key in self.host_data and old_hostname in self.host_data[key]:
                 self.host_data[key][new_hostname] = self.host_data[key].pop(old_hostname)
     

@@ -912,7 +912,6 @@ class RemoteFileBrowser(FileBrowser):
         return skip_all, overwrite_all, resume_all
 
     def _add_files_to_queue(self, file_list, worker):
-        """Add discovered files to transfer queue - just queue them all"""
         if not hasattr(self, 'transfer_queue_widget') or not self.transfer_queue_widget:
             return
         if not file_list:
@@ -922,6 +921,13 @@ class RemoteFileBrowser(FileBrowser):
         group_id = f"download_{int(time.time() * 1000)}"
         
         self.transfer_queue_widget.start_transfer_group(group_id, len(file_list))
+        
+        if worker.overwrite_all:
+            self.transfer_queue_widget.set_group_conflict_action(group_id, "overwrite_all")
+        if worker.skip_all:
+            self.transfer_queue_widget.set_group_conflict_action(group_id, "skip_all")
+        if worker.resume_all:
+            self.transfer_queue_widget.set_group_conflict_action(group_id, "resume_all")
         
         for source_path, dest_path, command in file_list:
             job_id = create_random_integer()

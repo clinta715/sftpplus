@@ -691,6 +691,9 @@ class DownloadWorker(QRunnable):
             # Handle different transfer types
             if self.is_source_remote and not self.is_destination_remote:
                 # Download
+                local_parent = os.path.dirname(clean_destination)
+                if local_parent and not os.path.exists(local_parent):
+                    os.makedirs(local_parent, exist_ok=True)
                 self._safe_emit(
                     self.signals.message,
                     self.transfer_id,
@@ -710,6 +713,7 @@ class DownloadWorker(QRunnable):
 
             elif self.is_destination_remote and not self.is_source_remote:
                 # Upload
+                self._ensure_remote_dir(os.path.dirname(clean_destination))
                 self._safe_emit(
                     self.signals.message,
                     self.transfer_id,
@@ -800,6 +804,21 @@ class DownloadWorker(QRunnable):
         except (OSError, IOError, paramiko.SSHException) as e:
             self._safe_emit(self.signals.message, self.transfer_id, f"{self.command} operation failed: {e}")
             put_response(self.transfer_id, "error", str(e))
+
+    def _ensure_remote_dir(self, remote_dir):
+        if not remote_dir or remote_dir == '/':
+            return
+        parts = remote_dir.strip('/').split('/')
+        current = ''
+        for part in parts:
+            current += '/' + part
+            try:
+                self.sftp.stat(current)
+            except (OSError, IOError):
+                try:
+                    self.sftp.mkdir(current)
+                except (OSError, IOError):
+                    pass
 
     def stop_transfer(self):
         """Stop the transfer by closing the connection to abort ongoing transfer"""

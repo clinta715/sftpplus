@@ -41,11 +41,11 @@ def setup_logging(log_level=None, log_file=None):
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
-    # Console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(log_level)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    if log_level <= logging.DEBUG:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(log_level)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
     
     # File handler
     if log_file is None:
@@ -57,7 +57,7 @@ def setup_logging(log_level=None, log_file=None):
     
     try:
         file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(log_level)
+        file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
     except (OSError, IOError) as e:

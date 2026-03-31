@@ -1,7 +1,8 @@
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QTimer, QDateTime, QEventLoop, Signal, QThreadPool
 from PySide6.QtWidgets import QApplication
-from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
+from sftp_qt_compat import Qt
 import base64
+import logging
 import queue
 import time
 from PySide6.QtGui import QFont, QColor
@@ -10,6 +11,8 @@ from sftp_downloadworkerclass import create_response_queue, delete_response_queu
 from sftp_operations import SFTPOperations
 from sftp_transfer_handler import FileListWorker
 import stat
+
+logger = logging.getLogger('sftp.model')
 
 
 _sftp_ops_cache = {}
@@ -151,7 +154,7 @@ class RemoteFileTableModel(QAbstractTableModel):
         """
         Get files for the specified directory (Non-blocking).
         """
-        print(f"[DEBUG MODEL] get_files called")
+        logger.debug("get_files called")
         if directory is not None:
             current_dir = directory
         else:
@@ -162,12 +165,12 @@ class RemoteFileTableModel(QAbstractTableModel):
         if not current_dir or current_dir == '.':
             current_dir = '/'
 
-        print(f"[DEBUG MODEL] current_dir={current_dir}")
+        logger.debug(f"current_dir={current_dir}")
 
         if not force_refresh and current_dir in self.cache and time.time() - self.cache_time.get(current_dir, 0) < self.cache_duration:
             cached = self.cache[current_dir]
             if self.file_list == cached:
-                print(f"[DEBUG MODEL] using cached result")
+                logger.debug("using cached result")
                 return
             self.beginResetModel()
             self.file_list = list(cached)
@@ -177,49 +180,49 @@ class RemoteFileTableModel(QAbstractTableModel):
         # Bump generation so any in-flight worker's callback will be ignored
         self._fetch_generation += 1
         generation = self._fetch_generation
-        print(f"[DEBUG MODEL] starting worker generation={generation}")
+        logger.debug(f"starting worker generation={generation}")
 
         # Notify that we're starting a fetch
-        print(f"[DEBUG MODEL] emitting loading_started")
+        logger.debug("emitting loading_started")
         self.loading_started.emit()
-        print(f"[DEBUG MODEL] emitting status message")
+        logger.debug("emitting status message")
         self.status_message.emit(f"Fetching file list for {current_dir}...")
         
-        print(f"[DEBUG MODEL] creating FileListWorker")
+        logger.debug("creating FileListWorker")
         worker = FileListWorker(self.session_id, current_dir, is_remote=self.is_remote_browser())
         self._active_workers.add(worker)
 
         def on_finished(path, items, _gen=generation, _worker=worker):
-            print(f"[DEBUG MODEL] on_finished called: gen={_gen}, current={self._fetch_generation}")
+            logger.debug(f"on_finished called: gen={_gen}, current={self._fetch_generation}")
             self._active_workers.discard(_worker)
             if _gen == self._fetch_generation:
                 self._on_files_ready(path, items)
             else:
-                print(f"[DEBUG MODEL] on_finished ignoring stale")
+                logger.debug("on_finished ignoring stale")
 
         def on_error(path, error_msg, _gen=generation, _worker=worker):
-            print(f"[DEBUG MODEL] on_error called: gen={_gen}, current={self._fetch_generation}")
+            logger.debug(f"on_error called: gen={_gen}, current={self._fetch_generation}")
             self._active_workers.discard(_worker)
             if _gen == self._fetch_generation:
                 self._on_files_error(path, error_msg)
             else:
-                print(f"[DEBUG MODEL] on_error ignoring stale")
+                logger.debug("on_error ignoring stale")
 
-        print(f"[DEBUG MODEL] connecting signals")
+        logger.debug("connecting signals")
         worker.signals.finished.connect(on_finished)
         worker.signals.error.connect(on_error)
         
-        print(f"[DEBUG MODEL] starting worker in thread pool")
+        logger.debug("starting worker in thread pool")
         QThreadPool.globalInstance().start(worker)
-        print(f"[DEBUG MODEL] worker started, returning")
+        logger.debug("worker started, returning")
 
     def _on_files_ready(self, path, items):
         """Callback for when file list is ready (Called from background thread via signal)"""
-        print(f"[DEBUG MODEL] _on_files_ready called: path={path}, items={len(items)}")
+        logger.debug(f"_on_files_ready: path={path}, items={len(items)}")
         try:
-            print(f"[DEBUG MODEL] _on_files_ready: beginResetModel")
+            logger.debug("_on_files_ready: beginResetModel")
             self.beginResetModel()
-            print(f"[DEBUG MODEL] _on_files_ready: building file list")
+            logger.debug("_on_files_ready: building file list")
             # Format: (name, size, mode, modified_time, attr_item)
             new_file_list = [("..", 0, stat.S_IFDIR | 0o755, "----", None)]
 
@@ -239,33 +242,33 @@ class RemoteFileTableModel(QAbstractTableModel):
                     modified_time = QDateTime.fromSecsSinceEpoch(mtime).toString(Qt.ISODate)
                     new_file_list.append((name, size, mode, modified_time, item))
                 except Exception as e:
-                    print(f"[DEBUG MODEL] Error processing item: {e}")
+                    logger.debug(f"Error processing item: {e}")
                     continue
 
-            print(f"[DEBUG MODEL] _on_files_ready: updating file_list, count={len(new_file_list)}")
+            logger.debug(f"_on_files_ready: updating file_list, count={len(new_file_list)}")
             self.file_list = new_file_list
             self.cache[path] = self.file_list
             self.cache_time[path] = time.time()
-            print(f"[DEBUG MODEL] _on_files_ready: calling endResetModel")
+            logger.debug("_on_files_ready: calling endResetModel")
             self.endResetModel()
             
-            print(f"[DEBUG MODEL] _on_files_ready: emitting status message")
+            logger.debug("_on_files_ready: emitting status message")
             self.status_message.emit(f"Loaded {len(new_file_list)-1} items from {path}")
         except Exception as e:
-            print(f"[DEBUG MODEL] _on_files_ready exception: {e}")
+            logger.debug(f"_on_files_ready exception: {e}")
             import traceback
-            traceback.print_exc()
+            logger.debug(traceback.format_exc())
         finally:
-            print(f"[DEBUG MODEL] _on_files_ready: emitting loading_finished")
+            logger.debug("_on_files_ready: emitting loading_finished")
             self.loading_finished.emit()
 
     def _on_files_error(self, path, error_msg):
         """Callback for when file listing fails"""
-        print(f"[DEBUG MODEL] _on_files_error: {path} - {error_msg}")
+        logger.debug(f"_on_files_error: {path} - {error_msg}")
         
         # Clear cached operations on error so next attempt gets a fresh connection
         if self.session_id in _sftp_ops_cache:
-            print(f"[DEBUG MODEL] clearing cached SFTPOperations for {self.session_id}")
+            logger.debug(f"clearing cached SFTPOperations for {self.session_id}")
             try:
                 _sftp_ops_cache[self.session_id].close()
             except (OSError, IOError, RuntimeError):
@@ -275,7 +278,7 @@ class RemoteFileTableModel(QAbstractTableModel):
         try:
             self.status_message.emit(f"Error loading {path}: {error_msg}")
         except Exception as e:
-            print(f"[DEBUG MODEL] _on_files_error emit exception: {e}")
+            logger.debug(f"_on_files_error emit exception: {e}")
         self.loading_finished.emit()
 
     def non_blocking_sleep(self, ms):

@@ -12,6 +12,7 @@ import queue
 import time
 import os
 import errno
+import logging
 import paramiko
 
 from PySide6.QtCore import Signal, QObject
@@ -130,7 +131,8 @@ class CommandExecutor(QObject):
                 
                 # Retry once with a fresh connection if this was the first attempt
                 if retry:
-                    print(f"[DEBUG EXECUTOR] Retrying command after error: {e}")
+                    logger = logging.getLogger('sftp.executor')
+                    logger.debug(f"Retrying command after error: {e}")
                     return self.execute(command, timeout, retry=False)
                 
                 put_response(job_id, "error", str(e))
