@@ -945,6 +945,9 @@ class RemoteFileBrowser(FileBrowser):
                 self.transfer_started.emit(str(job_id))
         
         self.transfer_queue_widget.on_discovery_finished()
+        
+        # Show feedback that items were added to queue
+        self.message_signal.emit(f"Added {len(file_list)} item(s) to transfer queue")
 
     def _prompt_batch_overwrite(self, filename, remaining):
         """Prompt user about overwriting during batch transfer"""
