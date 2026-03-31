@@ -409,12 +409,7 @@ class RemoteFileBrowser(FileBrowser):
             if response != Qt.MsgBtn_Yes:
                 return
 
-        # For single item, do it inline (fast, no need for background thread)
-        if len(selected_paths) == 1:
-            self._delete_single_item(selected_paths[0])
-            return
-
-        # Run batch deletion in background thread to keep UI responsive
+        # Run deletion in background thread to keep UI responsive (even for single items)
         worker = DeletionWorker(selected_paths, self.session_id, is_remote=True)
 
         progress = QProgressDialog("Deleting files...", "Cancel", 0, len(selected_paths), self)
@@ -456,6 +451,11 @@ class RemoteFileBrowser(FileBrowser):
                 QMessageBox.information(self, "Delete Complete", summary_msg)
 
             self.model.get_files(force_refresh=True)
+        
+        worker.signals.progress.connect(on_progress)
+        worker.signals.finished.connect(on_finished)
+        
+        QThreadPool.globalInstance().start(worker)
 
         worker.signals.progress.connect(on_progress)
         worker.signals.finished.connect(on_finished)

@@ -264,7 +264,7 @@ class TransferQueueWidget(QWidget):
         # Preferences checkboxes
         prefs = get_preferences()
         
-        self.clear_on_complete_checkbox = QCheckBox("Overwrite")
+        self.clear_on_complete_checkbox = QCheckBox("Auto-clear completed")
         self.clear_on_complete_checkbox.setToolTip("Automatically clear completed transfers")
         self.clear_on_complete_checkbox.setStyleSheet(f"""
             QCheckBox {{
@@ -272,15 +272,22 @@ class TransferQueueWidget(QWidget):
                 font-size: 11px;
             }}
         """)
+        self.clear_on_complete_checkbox.setChecked(prefs.get_bool("clear_completed_on_complete", False))
+        self.clear_on_complete_checkbox.stateChanged.connect(self._on_clear_on_complete_changed)
         
-        self.overwrite_checkbox = QCheckBox("Follow symlinks")
-        self.overwrite_checkbox.setToolTip(
+        self.overwrite_checkbox = QCheckBox("Overwrite")
+        self.overwrite_checkbox.setToolTip("When enabled, existing files will be overwritten during transfers")
+        self.overwrite_checkbox.setChecked(prefs.get_bool("overwrite_on_transfer", False))
+        self.overwrite_checkbox.stateChanged.connect(self._on_overwrite_changed)
+        
+        self.follow_symlinks_checkbox = QCheckBox("Follow symlinks")
+        self.follow_symlinks_checkbox.setToolTip(
             "When checked, symbolic links in directory transfers will be followed (resolved).\n"
             "When unchecked (default), symlinks are skipped during transfers.\n"
             "This sets a persistent preference — directory transfers will use this setting automatically."
         )
-        self.overwrite_checkbox.setChecked(prefs.get_bool("follow_symlinks", False))
-        self.overwrite_checkbox.stateChanged.connect(self._on_follow_symlinks_changed)
+        self.follow_symlinks_checkbox.setChecked(prefs.get_bool("follow_symlinks", False))
+        self.follow_symlinks_checkbox.stateChanged.connect(self._on_follow_symlinks_changed)
         self.console_toggle = QPushButton("▼ Console")
         self.console_toggle.setCheckable(True)
         self.console_toggle.setChecked(False)
@@ -308,6 +315,7 @@ class TransferQueueWidget(QWidget):
         self.control_layout.addWidget(self.stop_button)
         self.control_layout.addWidget(self.clear_on_complete_checkbox)
         self.control_layout.addWidget(self.overwrite_checkbox)
+        self.control_layout.addWidget(self.follow_symlinks_checkbox)
         self.control_layout.addStretch(1)
         self.control_layout.addWidget(self.console_toggle)
         self.control_layout.addWidget(self.clear_button)
