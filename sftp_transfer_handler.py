@@ -563,6 +563,105 @@ class TraversalWorker(QRunnable):
             command = "upload" if self.is_dest_remote else "download"
             
             # Add to collected files (skip prompts during discovery)
+            # Conflict handling happens when transfers actually start
+            command = "upload" if self.is_dest_remote else "download"
+            
+            # Add to collected files (skip prompts during discovery)
             self._collected_files.append((source_path, dest_path, command))
             self._files_found += 1
             _safe_emit(self.signals.discovery_progress, self._files_found, self._dirs_scanned)
+
+
+class DirectTransferWorker(QRunnable):
+    """Direct transfer worker using SFTPSessionAPI.execute() directly.
+    
+    This worker bypasses the legacy queue and uses SFTPSessionAPI directly
+    for file transfers. It coexists with the legacy add_sftp_job() queue
+    during the transition period.
+    
+    Signals:
+        progress: (bytes_transferred, total_bytes, speed, eta)
+        finished: (success_count, failure_count)
+        error: (error_message)
+    """
+    
+    class Signals(QObject):
+        progress = Signal(int, int, float, float)  # (bytes, total, speed, eta)
+        finished = Signal(int, int)
+        error = Signal(str)
+    
+    def __init__(self, session_id, source_path, dest_path, 
+                 is_source_remote, is_dest_remote, command):
+        super().__init__()
+        self.setAutoDelete(False)
+        self.session_id = session_id
+        self.source_path = source_path
+        self.dest_path = dest_path
+        self.is_source_remote = is_source_remote
+        self.is_dest_remote = is_dest_remote
+        self.command = command  # "upload" or "download"
+        self.signals = self.Signals()
+        self._cancel_requested = False
+    
+    def cancel(self):
+        self._cancel_requested = True
+    
+    def run(self):
+        if self._cancel_requested:
+            return
+        
+        from sftp_creds import get_credentials
+        from sftp_session import SFTPSession, SFTPCredentials
+        from sftp_session_executor import SFTPSessionAPI
+        from sftp_commands import DownloadCommand, UploadCommand
+        
+        try:
+            creds = get_credentials(self.session_id)
+            
+            sftp_creds = SFTPCredentials(
+                hostname=creds.get('hostname', ''),
+                username=creds.get('username', ''),
+                password=creds.get('password', ''),
+                port=creds.get('port', 22),
+                key=creds.get('key')
+            )
+            
+            session = SFTPSession(create_random_integer(), sftp_creds)
+            api = SFTPSessionAPI(session)
+            
+            job_id = create_random_integer()
+            
+            if self.command == "upload":
+                cmd = UploadCommand(
+                    job_id=job_id,
+                    local_path=self.source_path,
+                    remote_path=self.dest_path,
+                    resume=False
+                )
+            elif self.command == "download":
+                cmd = DownloadCommand(
+                    job_id=job_id,
+                    remote_path=self.source_path,
+                    local_path=self.dest_path,
+                    resume=False
+                )
+            else:
+                _safe_emit(self.signals.error, f"Unknown command: {self.command}")
+                _safe_emit(self.signals.finished, 0, 1)
+                return
+            
+            result = api.execute(cmd)
+            
+            if result.success:
+                _safe_emit(self.signals.finished, 1, 0)
+            else:
+                error_msg = result.error or "Transfer failed"
+                _safe_emit(self.signals.error, error_msg)
+                _safe_emit(self.signals.finished, 0, 1)
+            
+            get_session_manager().remove_session(session.session_id)
+            
+        except Exception as e:
+            error_msg = sanitize_error_message(str(e))
+            _safe_emit(self.signals.error, error_msg)
+            _safe_emit(self.signals.finished, 0, 1)
