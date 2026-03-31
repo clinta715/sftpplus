@@ -104,7 +104,9 @@ def save_connection_data(host_data):
             "initial_remote_dir": host_data.get("initial_remote_dir", {}),
             "initial_local_dir": host_data.get("initial_local_dir", {}),
             "show_manager_on_startup": host_data.get("show_manager_on_startup", True),
-            "bookmarks": host_data.get("bookmarks", {})
+            "bookmarks": host_data.get("bookmarks", {}),
+            "ssh_commands": host_data.get("ssh_commands", {}),
+            "follow_symlinks": host_data.get("follow_symlinks", {})
         }
 
         create_secure_directory(os.path.dirname(DATA_FILE_PATH))
@@ -140,7 +142,8 @@ def load_connection_data():
     host_data = {
         "hostnames": {}, "usernames": {}, "passwords": {}, "ports": {}, "key": {},
         "connection_type": {}, "initial_remote_dir": {}, "initial_local_dir": {},
-        "show_manager_on_startup": True, "bookmarks": {}
+        "show_manager_on_startup": True, "bookmarks": {},
+        "ssh_commands": {}, "follow_symlinks": {}
     }
 
     try:
@@ -179,6 +182,8 @@ def load_connection_data():
         host_data["initial_local_dir"] = data.get("initial_local_dir", {})
         host_data["show_manager_on_startup"] = data.get("show_manager_on_startup", True)
         host_data["bookmarks"] = data.get("bookmarks", {})
+        host_data["ssh_commands"] = data.get("ssh_commands", {})
+        host_data["follow_symlinks"] = data.get("follow_symlinks", {})
 
         return host_data
 

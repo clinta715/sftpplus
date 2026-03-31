@@ -1057,6 +1057,13 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
     
     def handle_connection_request(self, connection_data):
         """Handle connection request from Connections widget"""
+        try:
+            self._handle_connection_request_impl(connection_data)
+        except Exception as e:
+            QMessageBox.critical(self, "Connection Error", f"Failed to connect: {str(e)}")
+            self.message_signal.emit(f"Connection failed: {str(e)}")
+
+    def _handle_connection_request_impl(self, connection_data):
         hostname = connection_data.get("hostname")
         username = connection_data.get("username")
         password = connection_data.get("password")
@@ -1304,7 +1311,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             error_message = str(ve)
             QMessageBox.critical(self, "Connection Error", error_message)
             self.message_signal.emit(f"Connection failed: {error_message}")
-        except (OSError, IOError, RuntimeError) as e:
+        except Exception as e:
             error_message = f"Unexpected error: {str(e)}"
             QMessageBox.critical(self, "Connection Error", error_message)
             self.message_signal.emit(f"Connection failed: {error_message}")
@@ -1417,9 +1424,9 @@ Do you want to trust this host and add it to known_hosts?"""
 
             return home_dir
 
-        except (OSError, IOError, RuntimeError) as e:
+        except Exception as e:
             self.message_signal.emit(f"SSH connection failed: {str(e)}")
-            raise Exception(f"Failed to connect: {str(e)}")
+            raise RuntimeError(f"Failed to connect: {str(e)}")
         finally:
             # Ensure SFTP session is closed
             if sftp:
@@ -1519,7 +1526,8 @@ Do you want to trust this host and add it to known_hosts?"""
             self.close_sftp_connections()
 
             try:
-                save_connection_data(self.host_data)
+                fresh_data = load_connection_data()
+                save_connection_data(fresh_data)
             except (OSError, IOError, RuntimeError) as e:
                 pass
         except (OSError, IOError, RuntimeError) as e:
