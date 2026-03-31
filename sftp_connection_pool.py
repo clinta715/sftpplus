@@ -53,11 +53,25 @@ class ConnectionPool:
                     cls._instance._max_channels_per_ssh = 8 # Safe limit below standard 10
                     cls._instance._cleanup_interval = 60
                     cls._instance._last_cleanup = 0
+                    cls._instance._discovery_channels_used = 0  # Track discovery channel usage
+                    cls._instance._max_discovery_channels = 2  # Reserve up to 2 channels for discovery
         return cls._instance
     
     def get_connection_key(self, hostname: str, port: int, username: str) -> Tuple:
         """Create a hashable key for connection pooling"""
         return (hostname, port, username)
+    
+    def get_effective_max_channels(self, for_discovery=False):
+        """Get the maximum channels per SSH connection.
+        
+        Args:
+            for_discovery: If True, allow discovery to use reserved channels
+        """
+        if for_discovery:
+            # Discovery can use all channels including reserved ones
+            return self._max_channels_per_ssh
+        # Regular transfers leave some channels for discovery
+        return max(1, self._max_channels_per_ssh - self._max_discovery_channels)
     
     def get_connection(self, hostname: str, port: int, username: str, 
                        password: Optional[str] = None, 
@@ -88,7 +102,7 @@ class ConnectionPool:
                     self._close_conn_info(conn_info)
                     continue
                 
-                if total_channels >= self._max_channels_per_ssh:
+                if total_channels >= self.get_effective_max_channels(for_discovery=False):
                     valid_connections.append(conn_info)
                     continue
                 
@@ -123,7 +137,38 @@ class ConnectionPool:
                 return ssh, sftp
             except Exception as e:
                 raise
-    
+
+    def acquire_discovery_channel(self, hostname: str, port: int, username: str,
+                                   password: Optional[str] = None,
+                                   key: Optional[str] = None) -> Tuple[paramiko.SSHClient, Any]:
+        """
+        Acquire a connection channel reserved for discovery/traversal operations.
+        Discovery channels are prioritized to ensure directory scans complete quickly.
+        
+        Returns:
+            Tuple of (ssh_client, sftp_client) or (None, None) if no channels available
+        """
+        conn_key = self.get_connection_key(hostname, port, username)
+        
+        with self._pool_lock:
+            if self._discovery_channels_used >= self._max_discovery_channels:
+                return (None, None)
+            
+            self._discovery_channels_used += 1
+        
+        try:
+            ssh, sftp = self.get_connection(hostname, port, username, password, key)
+            return (ssh, sftp)
+        except Exception:
+            with self._pool_lock:
+                self._discovery_channels_used = max(0, self._discovery_channels_used - 1)
+            raise
+
+    def release_discovery_channel(self):
+        """Release a discovery channel, making it available again"""
+        with self._pool_lock:
+            self._discovery_channels_used = max(0, self._discovery_channels_used - 1)
+
     def _create_ssh_connection(self, hostname: str, port: int, username: str,
                                 password: Optional[str] = None,
                                 key: Optional[str] = None) -> paramiko.SSHClient:
