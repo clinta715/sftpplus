@@ -1657,6 +1657,9 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             return
         
         import time
+        from PySide6.QtCore import QThreadPool
+        from sftp_transfer_handler import DirectTransferWorker
+        
         group_id = f"upload_{int(time.time() * 1000)}"
         
         self.transfer_queue_widget.start_transfer_group(group_id, len(file_list))
@@ -1669,18 +1672,23 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             self.transfer_queue_widget.set_group_conflict_action(group_id, "resume_all")
         
         for source_path, dest_path, command in file_list:
-            job_id = create_random_integer()
-            add_sftp_job(
-                source_path, worker.is_source_remote, dest_path, worker.is_dest_remote,
-                worker.creds.get('hostname', ''),
-                worker.creds.get('username', ''),
-                worker.creds.get('password', ''),
-                worker.creds.get('port', 22),
-                command, job_id, worker.creds.get('key')
+            # Use DirectTransferWorker instead of add_sftp_job for direct session-based API
+            transfer_worker = DirectTransferWorker(
+                worker.session_id,
+                source_path,
+                dest_path,
+                worker.is_source_remote,
+                worker.is_dest_remote,
+                command
             )
-            self.transfer_queue_widget.add_to_group(job_id, group_id)
+            transfer_worker.signals.error.connect(
+                lambda err, sp=source_path: self.message_signal.emit(f"Transfer error: {err}")
+            )
+            
+            QThreadPool.globalInstance().start(transfer_worker)
             
             if self.transfer_started:
+                job_id = create_random_integer()
                 self.transfer_started.emit(str(job_id))
         
         self.transfer_queue_widget.on_discovery_finished()

@@ -2,27 +2,18 @@
 
 ## Active Action Items
 
-### Phase 1: SFTPOperations Enhancement (ssh/sftp kwargs)
-- Add optional `ssh` and `sftp` keyword arguments to `SFTPOperations.__init__()`
-- Pass through to `SFTPSessionAPI` for connection reuse
-- Enables passing pre-established connections for specialized use cases
-- **Effort**: ~5 lines of code
-
-### Phase 2: New Transfer Worker (SFTPSessionAPI-based)
-- Create new `DirectTransferWorker` class using `SFTPSessionAPI.execute()` directly
-- Coexist alongside existing `add_sftp_job()` queue during transition
-- Update callers to optionally use new worker
-- **Effort**: ~200-300 lines
-
-### Phase 3: Full Migration (Deprecate Legacy Queue)
-- Gradually migrate all transfers to new worker
-- Remove `add_sftp_job()` and legacy queue
-- Remove `SFTPOperations` wrapper (use `SFTPSessionAPI` directly)
-- **Effort**: Medium-High
+(None currently - all phases complete)
 
 ---
 
 ## Resolved Issues
+
+### ✅ Full Migration to SFTPSessionAPI (2026-03-31)
+- **Phase 1**: Added ssh/sftp kwargs to SFTPOperations for connection reuse
+- **Phase 2**: Added DirectTransferWorker using SFTPSessionAPI.execute() directly
+- **Phase 3**: Migrated directory transfer (_add_files_to_queue) to use DirectTransferWorker
+- Legacy add_sftp_job() still available for remaining callers during transition
+- New DirectTransferWorker coexists with legacy queue
 
 ### ✅ SFTPSessionAPI Enhancement (2026-03-31)
 - Expanded `SFTPSessionAPI.__init__()` to accept optional `ssh` and `sftp` keyword arguments
