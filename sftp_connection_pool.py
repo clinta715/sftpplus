@@ -183,9 +183,8 @@ class ConnectionPool:
             except Exception as e:
                 pass
         
-        # Use AutoAddPolicy to automatically add new hosts and allow connection
-        # This is appropriate for a desktop SFTP client where user initiates connections
-        # and may connect to different servers over time
+        # Use AutoAddPolicy to automatically add new hosts
+        # For changed hosts, we handle the exception below
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
         connect_kwargs = {
@@ -204,8 +203,16 @@ class ConnectionPool:
         
         if password:
             connect_kwargs['password'] = password
-            
-        ssh.connect(**connect_kwargs)
+        
+        try:
+            ssh.connect(**connect_kwargs)
+        except paramiko.BadHostKeyException as e:
+            # Host key changed - raise with info for UI to handle
+            raise paramiko.BadHostKeyException(
+                e.hostname, e.key, 
+                f"Host key mismatch for {e.hostname}. The server's host key has changed. "
+                f"This could be a security issue or the server may have been rebuilt."
+            )
         
         transport = ssh.get_transport()
         if transport:

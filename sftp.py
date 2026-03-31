@@ -1400,6 +1400,45 @@ Do you want to trust this host and add it to known_hosts?"""
 
             return home_dir
 
+        except paramiko.BadHostKeyException as e:
+            # Host key changed - ask user what to do
+            msg = f"""Host key mismatch for {e.hostname}
+
+The server's host key has changed. This could indicate:
+- The server was rebuilt or updated
+- A man-in-the-middle attack
+- The known_hosts file was corrupted
+
+Old key: {e.key.get_fingerprint().hex() if e.key else 'unknown'}
+
+Do you want to update the host key and continue connecting?"""
+            
+            reply = QMessageBox.question(
+                self,
+                "Host Key Changed",
+                msg,
+                Qt.MsgBtn_Yes | Qt.MsgBtn_No,
+                Qt.MsgBtn_No
+            )
+            
+            if reply == Qt.MsgBtn_Yes:
+                # Remove old key and retry
+                known_hosts_path = os.path.expanduser('~/.ssh/known_hosts')
+                if os.path.exists(known_hosts_path):
+                    try:
+                        ssh.load_host_keys(known_hosts_path)
+                        # Remove the old key
+                        ssh.get_host_keys().remove(e.hostname)
+                        ssh.save_host_keys(known_hosts_path)
+                    except Exception:
+                        pass
+                
+                # Retry connection
+                return self.test_connection()
+            else:
+                self.message_signal.emit("Connection aborted due to host key mismatch")
+                raise RuntimeError(f"Host key verification failed for {e.hostname}")
+        
         except Exception as e:
             self.message_signal.emit(f"SSH connection failed: {str(e)}")
             raise RuntimeError(f"Failed to connect: {str(e)}")
