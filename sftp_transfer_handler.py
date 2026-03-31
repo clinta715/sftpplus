@@ -385,13 +385,14 @@ class TraversalWorker(QRunnable):
         if discovery_ssh and discovery_sftp:
             # Use the discovery channel directly
             from sftp_session_executor import SFTPSessionAPI, SFTPSession, SFTPCredentials
-            self._discovery_session = SFTPSession(SFTPCredentials(
+            creds = SFTPCredentials(
                 hostname=hostname,
                 username=username,
                 password=password,
                 port=port,
                 key=key
-            ))
+            )
+            self._discovery_session = SFTPSession(create_random_integer(), creds)
             self._discovery_api = SFTPSessionAPI(self._discovery_session, 
                                                  ssh=discovery_ssh, 
                                                  sftp=discovery_sftp)
