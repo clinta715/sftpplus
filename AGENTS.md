@@ -32,6 +32,7 @@ The project now uses a clean session-based API for SFTP operations. This provide
 
 | File | Purpose |
 |------|---------|
+| `sftp_hostdataeditor.py` | Connection data storage with atomic API functions |
 | `sftp_session.py` | SessionManager and SFTPSession classes for isolated credential storage |
 | `sftp_commands.py` | Typed command classes (DownloadCommand, UploadCommand, etc.) |
 | `sftp_connection_pool.py` | Thread-safe SSH/SFTP connection pooling |
@@ -153,6 +154,57 @@ with SFTPOperations('example.com', 'user', 'password') as ops:
 | `exists(path)` | Check if path exists |
 | `is_directory(path)` | Check if path is directory |
 | `is_file(path)` | Check if path is file |
+
+### Connection Data API (sftp_hostdataeditor.py)
+
+The hostdataeditor module provides atomic API functions for managing connection data:
+
+```python
+from sftp_hostdataeditor import (
+    load_connection_data,   # Load all connection data
+    save_connection_data,   # Save all connection data (returns bool)
+    get_site_names,         # Get list of configured hostnames
+    get_site_data,          # Get dict with all fields for a site, or None
+    get_setting,            # Get global setting (e.g., 'show_manager_on_startup')
+    update_connection_data, # Atomic load-modify-save with callback
+    delete_site,            # Atomically delete a site by hostname
+    copy_site,              # Copy a site to a new hostname
+    rename_site,            # Rename a site's hostname
+)
+```
+
+**Atomic Updates:**
+
+```python
+# update_connection_data - thread-safe load-modify-save
+def my_callback(host_data):
+    host_data["hostnames"]["new_host"] = "new_host"
+    host_data["usernames"]["new_host"] = "myuser"
+    host_data["passwords"]["new_host"] = "mypass"
+    host_data["ports"]["new_host"] = 22
+    host_data["key"]["new_host"] = ""
+
+update_connection_data(my_callback)
+
+# Single-site operations
+delete_site("hostname")
+copy_site("source", "destination")
+rename_site("old_name", "new_name")
+```
+
+**Reading Data:**
+
+```python
+# Get all hostnames
+names = get_site_data("myserver.com")
+# Returns: {'hostname': 'myserver.com', 'username': 'user', 'password': 'pass', 
+#           'port': 22, 'key': '', 'connection_type': 'SFTP Browser', ...}
+
+names = get_site_names()  # ['server1.com', 'server2.com']
+
+# Get global setting
+show_on_startup = get_setting("show_manager_on_startup", True)
+```
 
 ### Legacy API Compatibility (DEPRECATED)
 
