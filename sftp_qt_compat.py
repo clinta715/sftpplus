@@ -191,6 +191,9 @@ class QtCompat:
     LeftButton = QtCore.Qt.MouseButton.LeftButton
     RightButton = QtCore.Qt.MouseButton.RightButton
     MiddleButton = QtCore.Qt.MouseButton.MiddleButton
+    
+    # WindowModality
+    WindowModal = QtCore.Qt.WindowModality.WindowModal
 
 # Add QApplication for convenience
 def get_qapplication():
