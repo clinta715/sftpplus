@@ -9,7 +9,11 @@ from PySide6.QtGui import QIntValidator
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 from PySide6.QtCore import Signal
 
-from sftp_hostdataeditor import save_connection_data, load_connection_data
+from sftp_hostdataeditor import (
+    save_connection_data, load_connection_data,
+    get_site_data, get_site_names, get_setting,
+    delete_site, copy_site, rename_site
+)
 from sftp_theme import CONNECT_BUTTON_STYLE, BUTTON_STYLE_DARK
 
 
@@ -223,9 +227,6 @@ class ConnectionsWidget(QWidget):
         """Load connection data"""
         try:
             self.host_data = load_connection_data()
-            for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks", "ssh_commands", "follow_symlinks"]:
-                if key not in self.host_data:
-                    self.host_data[key] = {}
             self._update_table()
         except (OSError, IOError, RuntimeError) as e:
             QMessageBox.critical(self, "Error", f"Failed to load data: {str(e)}")
@@ -263,6 +264,12 @@ class ConnectionsWidget(QWidget):
         if hostname_item:
             hostname = hostname_item.text()
             
+            site = get_site_data(hostname)
+            if not site:
+                self._clear_details()
+                self._set_details_enabled(False)
+                return
+            
             # Block signals temporarily
             for widget in [self.detail_hostname, self.detail_username, self.detail_password,
                           self.detail_port, self.detail_key, self.detail_remote_dir, 
@@ -271,18 +278,18 @@ class ConnectionsWidget(QWidget):
             self.detail_connection_type.blockSignals(True)
             self.detail_follow_symlinks.blockSignals(True)
             
-            self.detail_hostname.setText(hostname)
-            self.detail_username.setText(self.host_data["usernames"].get(hostname, ""))
-            self.detail_password.setText(self.host_data["passwords"].get(hostname, ""))
-            self.detail_port.setText(str(self.host_data["ports"].get(hostname, 22)))
-            self.detail_key.setText(self.host_data["key"].get(hostname, ""))
-            self.detail_remote_dir.setText(self.host_data["initial_remote_dir"].get(hostname, ""))
-            self.detail_local_dir.setText(self.host_data["initial_local_dir"].get(hostname, ""))
-            self.detail_ssh_commands.setText(self.host_data["ssh_commands"].get(hostname, ""))
+            self.detail_hostname.setText(site.get("hostname", ""))
+            self.detail_username.setText(site.get("username", ""))
+            self.detail_password.setText(site.get("password", ""))
+            self.detail_port.setText(str(site.get("port", 22)))
+            self.detail_key.setText(site.get("key", ""))
+            self.detail_remote_dir.setText(site.get("initial_remote_dir", ""))
+            self.detail_local_dir.setText(site.get("initial_local_dir", ""))
+            self.detail_ssh_commands.setText(site.get("ssh_commands", ""))
             
-            self.detail_follow_symlinks.setChecked(self.host_data.get("follow_symlinks", {}).get(hostname, False))
+            self.detail_follow_symlinks.setChecked(site.get("follow_symlinks", False))
             
-            connection_type = self.host_data["connection_type"].get(hostname, "SFTP Browser")
+            connection_type = site.get("connection_type", "SFTP Browser")
             if connection_type == "SSH Terminal":
                 self.detail_connection_type.setCurrentIndex(1)
             else:
@@ -314,85 +321,71 @@ class ConnectionsWidget(QWidget):
             widget.setEnabled(enabled)
     
     def _update_selected_row(self):
-        """Update table when form fields change"""
+        """Update table display when form fields change (does not save)"""
         selected_row = self.table.currentRow()
         if selected_row < 0:
             return
-        
-        for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "ssh_commands", "follow_symlinks"]:
-            if key not in self.host_data:
-                self.host_data[key] = {}
         
         hostname = self.detail_hostname.text()
         username = self.detail_username.text()
         port = self.detail_port.text() or "22"
         
-        self.table.item(selected_row, 0).setText(hostname)
-        self.table.item(selected_row, 1).setText(username)
-        self.table.item(selected_row, 2).setText(port)
-        self.table.item(selected_row, 3).setText(self.detail_connection_type.currentText())
-        
-        old_hostnames = list(self.host_data["hostnames"].keys())
-        old_hostname = old_hostnames[selected_row] if selected_row < len(old_hostnames) else None
-        
-        if old_hostname and old_hostname != hostname:
-            self._migrate_host_data(old_hostname, hostname)
-        
-        self.host_data["hostnames"][hostname] = hostname
-        self.host_data["usernames"][hostname] = username
-        self.host_data["passwords"][hostname] = self.detail_password.text()
-        self.host_data["ports"][hostname] = int(port)
-        self.host_data["key"][hostname] = self.detail_key.text()
-        self.host_data["connection_type"][hostname] = self.detail_connection_type.currentText()
-        self.host_data["initial_remote_dir"][hostname] = self.detail_remote_dir.text()
-        self.host_data["initial_local_dir"][hostname] = self.detail_local_dir.text()
-        self.host_data["ssh_commands"][hostname] = self.detail_ssh_commands.text()
-        self.host_data["follow_symlinks"][hostname] = self.detail_follow_symlinks.isChecked()
-    
-    def _migrate_host_data(self, old_hostname, new_hostname):
-        """Migrate data when hostname changes"""
-        for key in ["hostnames", "usernames", "passwords", "ports", "key", "connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks", "ssh_commands", "follow_symlinks"]:
-            if key in self.host_data and old_hostname in self.host_data[key]:
-                self.host_data[key][new_hostname] = self.host_data[key].pop(old_hostname)
+        # Update table display only - actual data is saved when Save button is clicked
+        if self.table.item(selected_row, 0):
+            self.table.item(selected_row, 0).setText(hostname)
+        if self.table.item(selected_row, 1):
+            self.table.item(selected_row, 1).setText(username)
+        if self.table.item(selected_row, 2):
+            self.table.item(selected_row, 2).setText(port)
+        if self.table.item(selected_row, 3):
+            self.table.item(selected_row, 3).setText(self.detail_connection_type.currentText())
     
     def _update_table(self):
         """Update table with current host data"""
-        self.table.setRowCount(len(self.host_data["hostnames"]))
-        for i, hostname in enumerate(self.host_data["hostnames"]):
-            self.table.setItem(i, 0, QTableWidgetItem(hostname))
-            self.table.setItem(i, 1, QTableWidgetItem(self.host_data["usernames"].get(hostname, "")))
-            self.table.setItem(i, 2, QTableWidgetItem(str(self.host_data["ports"].get(hostname, 22))))
-            connection_type = self.host_data["connection_type"].get(hostname, "SFTP Browser")
-            self.table.setItem(i, 3, QTableWidgetItem(connection_type))
+        hostnames = get_site_names()
+        self.table.setRowCount(len(hostnames))
+        for i, hostname in enumerate(hostnames):
+            site = get_site_data(hostname)
+            if site:
+                self.table.setItem(i, 0, QTableWidgetItem(hostname))
+                self.table.setItem(i, 1, QTableWidgetItem(site.get("username", "")))
+                self.table.setItem(i, 2, QTableWidgetItem(str(site.get("port", 22))))
+                self.table.setItem(i, 3, QTableWidgetItem(site.get("connection_type", "SFTP Browser")))
         
-        count = len(self.host_data["hostnames"])
+        count = len(hostnames)
         self.status_label.setText(f"{count} site{'s' if count != 1 else ''} configured")
         
-        show_on_startup = self.host_data.get("show_manager_on_startup", True)
+        show_on_startup = get_setting("show_manager_on_startup", True)
         self.show_on_startup_checkbox.setChecked(show_on_startup)
     
     def add_row(self):
         """Add a new empty row"""
-        for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "ssh_commands", "follow_symlinks"]:
-            if key not in self.host_data:
-                self.host_data[key] = {}
+        hostnames = get_site_names()
         
         new_hostname = ""
         counter = 1
-        while new_hostname in self.host_data["hostnames"] or new_hostname == "":
+        while new_hostname in hostnames or new_hostname == "":
             new_hostname = f"new_site_{counter}"
             counter += 1
         
-        self.host_data["hostnames"][new_hostname] = new_hostname
-        self.host_data["usernames"][new_hostname] = ""
-        self.host_data["passwords"][new_hostname] = ""
-        self.host_data["ports"][new_hostname] = 22
-        self.host_data["key"][new_hostname] = ""
-        self.host_data["connection_type"][new_hostname] = "SFTP Browser"
-        self.host_data["initial_remote_dir"][new_hostname] = ""
-        self.host_data["initial_local_dir"][new_hostname] = ""
-        self.host_data["ssh_commands"][new_hostname] = ""
-        self.host_data["follow_symlinks"][new_hostname] = False
+        # Add the new site atomically
+        def add_site(host_data):
+            for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "ssh_commands", "follow_symlinks"]:
+                if key not in host_data:
+                    host_data[key] = {}
+            host_data["hostnames"][new_hostname] = new_hostname
+            host_data["usernames"][new_hostname] = ""
+            host_data["passwords"][new_hostname] = ""
+            host_data["ports"][new_hostname] = 22
+            host_data["key"][new_hostname] = ""
+            host_data["connection_type"][new_hostname] = "SFTP Browser"
+            host_data["initial_remote_dir"][new_hostname] = ""
+            host_data["initial_local_dir"][new_hostname] = ""
+            host_data["ssh_commands"][new_hostname] = ""
+            host_data["follow_symlinks"][new_hostname] = False
+        
+        from sftp_hostdataeditor import update_connection_data
+        update_connection_data(add_site)
         
         self._update_table()
         
@@ -419,15 +412,12 @@ class ConnectionsWidget(QWidget):
                     Qt.MsgBtn_No
                 )
                 if reply == Qt.MsgBtn_Yes:
-                    for key in ["hostnames", "usernames", "passwords", "ports", "key", 
-                               "connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks",
-                               "ssh_commands", "follow_symlinks"]:
-                        if key in self.host_data:
-                            self.host_data[key].pop(hostname, None)
-                    self.table.removeRow(selected_row)
-                    self._clear_details()
-                    self._set_details_enabled(False)
-                    self._update_table()
+                    if delete_site(hostname):
+                        self._update_table()
+                        self._clear_details()
+                        self._set_details_enabled(False)
+                    else:
+                        QMessageBox.critical(self, "Error", "Failed to delete site")
         else:
             QMessageBox.warning(self, "No selection", "Please select a site to delete.")
     
@@ -444,26 +434,24 @@ class ConnectionsWidget(QWidget):
         
         original_hostname = hostname_item.text()
         
+        # Find a unique new hostname
+        hostnames = get_site_names()
         new_hostname = original_hostname
         counter = 1
-        while new_hostname in self.host_data["hostnames"]:
+        while new_hostname in hostnames:
             new_hostname = f"{original_hostname} (copy{counter})"
             counter += 1
         
-        for key in ["usernames", "passwords", "ports", "key", "connection_type", 
-                   "initial_remote_dir", "initial_local_dir", "ssh_commands", "follow_symlinks"]:
-            if key not in self.host_data:
-                self.host_data[key] = {}
-            if original_hostname in self.host_data[key]:
-                self.host_data[key][new_hostname] = self.host_data[key][original_hostname]
-        
-        self.host_data["hostnames"][new_hostname] = new_hostname
-        self._update_table()
-        
-        for i in range(self.table.rowCount()):
-            if self.table.item(i, 0) and self.table.item(i, 0).text() == new_hostname:
-                self.table.setCurrentCell(i, 0)
-                break
+        # Use the API to copy the site
+        if copy_site(original_hostname, new_hostname):
+            self._update_table()
+            
+            for i in range(self.table.rowCount()):
+                if self.table.item(i, 0) and self.table.item(i, 0).text() == new_hostname:
+                    self.table.setCurrentCell(i, 0)
+                    break
+        else:
+            QMessageBox.critical(self, "Error", "Failed to copy site")
         
         self._set_details_enabled(True)
         self.detail_hostname.setFocus()
@@ -472,47 +460,125 @@ class ConnectionsWidget(QWidget):
     def save_data(self):
         """Save all site data"""
         try:
-            for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "ssh_commands", "follow_symlinks"]:
-                if key not in self.host_data:
-                    self.host_data[key] = {}
+            # Load fresh data from disk to avoid stale overwrites
+            host_data = load_connection_data()
             
+            # Ensure all required keys exist
+            for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks", "ssh_commands", "follow_symlinks"]:
+                if key not in host_data:
+                    host_data[key] = {}
+            
+            # If a row is selected, update that site with current form values
             selected_row = self.table.currentRow()
             if selected_row >= 0:
-                self._update_selected_row()
+                hostname_item = self.table.item(selected_row, 0)
+                if hostname_item:
+                    hostname = hostname_item.text()
+                    port = self.detail_port.text() or "22"
+                    
+                    host_data["hostnames"][hostname] = hostname
+                    host_data["usernames"][hostname] = self.detail_username.text()
+                    host_data["passwords"][hostname] = self.detail_password.text()
+                    host_data["ports"][hostname] = int(port)
+                    host_data["key"][hostname] = self.detail_key.text()
+                    host_data["connection_type"][hostname] = self.detail_connection_type.currentText()
+                    host_data["initial_remote_dir"][hostname] = self.detail_remote_dir.text()
+                    host_data["initial_local_dir"][hostname] = self.detail_local_dir.text()
+                    host_data["ssh_commands"][hostname] = self.detail_ssh_commands.text()
+                    host_data["follow_symlinks"][hostname] = self.detail_follow_symlinks.isChecked()
             
+            # Remove orphaned entries (empty hostnames or hostnames that were deleted from table)
+            # Don't remove "new_site_*" entries - they are pending new sites user is creating
             orphaned = []
-            for hostname in list(self.host_data["hostnames"].keys()):
-                if not hostname or hostname not in self.host_data.get("usernames", {}):
+            for hostname in list(host_data["hostnames"].keys()):
+                if not hostname:
                     orphaned.append(hostname)
+                elif hostname.startswith("new_site_"):
+                    # Check if this is actually in the table - if not, remove it
+                    in_table = False
+                    for row in range(self.table.rowCount()):
+                        item = self.table.item(row, 0)
+                        if item and item.text() == hostname:
+                            in_table = True
+                            break
+                    if not in_table:
+                        orphaned.append(hostname)
             
             for hostname in orphaned:
                 for key in ["hostnames", "usernames", "passwords", "ports", "key", 
                            "connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks",
                            "ssh_commands", "follow_symlinks"]:
-                    if key in self.host_data:
-                        self.host_data[key].pop(hostname, None)
+                    if key in host_data:
+                        host_data[key].pop(hostname, None)
             
-            for hostname in self.host_data["hostnames"]:
+            # Check for duplicate hostnames - warn and merge instead of silently corrupting
+            seen_hostnames = {}
+            duplicate_warnings = []
+            for hostname in list(host_data["hostnames"].keys()):
+                if hostname.startswith("new_site_"):
+                    continue
+                if hostname in seen_hostnames:
+                    duplicate_warnings.append(hostname)
+                else:
+                    seen_hostnames[hostname] = True
+            
+            if duplicate_warnings:
+                reply = QMessageBox.question(
+                    self, "Duplicate Hostnames",
+                    f"These hostnames have duplicate entries which would overwrite each other:\n\n" +
+                    "\n".join(f"  - {h}" for h in duplicate_warnings) +
+                    "\n\nDo you want to keep ONLY the currently selected entry and delete the others?",
+                    Qt.MsgBtn_Yes | Qt.MsgBtn_No,
+                    Qt.MsgBtn_Yes
+                )
+                if reply == Qt.MsgBtn_Yes:
+                    # Get the currently selected hostname
+                    selected_row = self.table.currentRow()
+                    keep_hostname = None
+                    if selected_row >= 0:
+                        item = self.table.item(selected_row, 0)
+                        if item:
+                            keep_hostname = item.text()
+                    
+                    # Remove all duplicates except the one we're keeping
+                    for hostname in duplicate_warnings:
+                        if hostname != keep_hostname:
+                            for key in ["hostnames", "usernames", "passwords", "ports", "key",
+                                       "connection_type", "initial_remote_dir", "initial_local_dir",
+                                       "bookmarks", "ssh_commands", "follow_symlinks"]:
+                                if key in host_data:
+                                    host_data[key].pop(hostname, None)
+                else:
+                    # User chose not to fix - reject the save
+                    raise ValueError(f"Duplicate hostname(s) detected: {', '.join(duplicate_warnings)}. Please rename or delete duplicates before saving.")
+            
+            # Validate remaining sites (but skip new_site_* entries that are still being filled in)
+            for hostname in host_data["hostnames"]:
                 if not hostname:
                     raise ValueError("Hostname cannot be empty")
-                username = self.host_data.get("usernames", {}).get(hostname, "")
+                # Skip validation for newly created empty sites
+                if hostname.startswith("new_site_"):
+                    continue
+                username = host_data.get("usernames", {}).get(hostname, "")
                 if not username:
                     raise ValueError(f"Username required for '{hostname}'")
-                password = self.host_data.get("passwords", {}).get(hostname, "")
-                key = self.host_data.get("key", {}).get(hostname, "")
+                password = host_data.get("passwords", {}).get(hostname, "")
+                key = host_data.get("key", {}).get(hostname, "")
                 if not password and not key:
                     raise ValueError(f"Password or SSH key required for '{hostname}'")
             
-            self.host_data["show_manager_on_startup"] = self.show_on_startup_checkbox.isChecked()
+            host_data["show_manager_on_startup"] = self.show_on_startup_checkbox.isChecked()
             
-            if save_connection_data(self.host_data):
+            if save_connection_data(host_data):
                 QMessageBox.information(self, "Success", "Sites saved successfully!")
                 self._update_table()
+                # Update internal cache to match what was saved
+                self.host_data = host_data
             else:
                 QMessageBox.critical(self, "Error", "Failed to save site data")
         except ValueError as e:
             QMessageBox.critical(self, "Validation Error", str(e))
-        except (OSError, IOError, RuntimeError) as e:
+        except (OSError, RuntimeError) as e:
             QMessageBox.critical(self, "Unknown Error", f"An error occurred: {str(e)}")
     
     def connect_to_selected(self):
@@ -528,15 +594,22 @@ class ConnectionsWidget(QWidget):
             return
         
         hostname = hostname_item.text()
-        username = self.host_data["usernames"].get(hostname, "")
-        password = self.host_data["passwords"].get(hostname, "")
-        port = self.host_data["ports"].get(hostname, 22)
-        key = self.host_data["key"].get(hostname, "None") or "None"
-        initial_remote_dir = self.host_data["initial_remote_dir"].get(hostname, "")
-        initial_local_dir = self.host_data["initial_local_dir"].get(hostname, "")
-        connection_type = self.host_data["connection_type"].get(hostname, "SFTP Browser")
-        ssh_commands = self.host_data["ssh_commands"].get(hostname, "")
-        follow_symlinks = self.host_data.get("follow_symlinks", {}).get(hostname, False)
+        
+        # Read directly from form fields - this ensures we use exactly what the user sees
+        # This is important because duplicate hostnames could exist in the data
+        username = self.detail_username.text()
+        password = self.detail_password.text()
+        port_str = self.detail_port.text() or "22"
+        try:
+            port = int(port_str)
+        except ValueError:
+            port = 22
+        key = self.detail_key.text() or "None"
+        initial_remote_dir = self.detail_remote_dir.text()
+        initial_local_dir = self.detail_local_dir.text()
+        connection_type = self.detail_connection_type.currentText()
+        ssh_commands = self.detail_ssh_commands.text()
+        follow_symlinks = self.detail_follow_symlinks.isChecked()
         
         if not username:
             QMessageBox.critical(self, "Error", f"Username required for {hostname}")
@@ -572,6 +645,5 @@ class ConnectionsWidget(QWidget):
     clear_details = _clear_details
     set_details_enabled = _set_details_enabled
     update_selected_row = _update_selected_row
-    migrate_host_data = _migrate_host_data
     load_data = _load_data
     update_table = _update_table

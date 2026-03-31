@@ -289,3 +289,58 @@ def get_setting(key, default=None):
     """
     host_data = load_connection_data()
     return host_data.get(key, default)
+
+
+def delete_site(hostname):
+    """Atomically delete a site by hostname.
+
+    Removes the hostname from all connection data dictionaries.
+
+    Args:
+        hostname: The site hostname to delete.
+
+    Returns:
+        bool: True if successful, False otherwise.
+    """
+    def remover(host_data):
+        for key in host_data:
+            if isinstance(host_data[key], dict):
+                host_data[key].pop(hostname, None)
+    return update_connection_data(remover)
+
+
+def copy_site(original_hostname, new_hostname):
+    """Atomically copy a site to a new hostname.
+
+    Args:
+        original_hostname: The source hostname to copy from.
+        new_hostname: The destination hostname for the copy.
+
+    Returns:
+        bool: True if successful, False otherwise.
+    """
+    def copier(host_data):
+        for key in host_data:
+            if isinstance(host_data[key], dict):
+                if original_hostname in host_data[key]:
+                    host_data[key][new_hostname] = host_data[key][original_hostname]
+        host_data["hostnames"][new_hostname] = new_hostname
+    return update_connection_data(copier)
+
+
+def rename_site(old_hostname, new_hostname):
+    """Atomically rename a site (change its hostname).
+
+    Args:
+        old_hostname: The current hostname to rename.
+        new_hostname: The new hostname.
+
+    Returns:
+        bool: True if successful, False otherwise.
+    """
+    def migrator(host_data):
+        for key in host_data:
+            if isinstance(host_data[key], dict):
+                if old_hostname in host_data[key]:
+                    host_data[key][new_hostname] = host_data[key].pop(old_hostname)
+    return update_connection_data(migrator)
