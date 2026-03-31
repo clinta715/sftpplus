@@ -126,6 +126,10 @@ class ConnectionsWidget(QWidget):
         self.detail_hostname.setPlaceholderText("example.com")
         self.detail_hostname.textChanged.connect(self.update_selected_row)
         
+        self.detail_nickname = QLineEdit()
+        self.detail_nickname.setPlaceholderText("(optional)")
+        self.detail_nickname.textChanged.connect(self.update_selected_row)
+        
         self.detail_username = QLineEdit()
         self.detail_username.setPlaceholderText("username")
         self.detail_username.textChanged.connect(self.update_selected_row)
@@ -170,6 +174,7 @@ class ConnectionsWidget(QWidget):
         )
         self.detail_follow_symlinks.stateChanged.connect(self.update_selected_row)
         
+        details_layout.addRow("Nickname:", self.detail_nickname)
         details_layout.addRow("Hostname:", self.detail_hostname)
         details_layout.addRow("Username:", self.detail_username)
         details_layout.addRow("Password:", self.detail_password)
@@ -271,13 +276,14 @@ class ConnectionsWidget(QWidget):
                 return
             
             # Block signals temporarily
-            for widget in [self.detail_hostname, self.detail_username, self.detail_password,
+            for widget in [self.detail_nickname, self.detail_hostname, self.detail_username, self.detail_password,
                           self.detail_port, self.detail_key, self.detail_remote_dir, 
                           self.detail_local_dir, self.detail_ssh_commands]:
                 widget.blockSignals(True)
             self.detail_connection_type.blockSignals(True)
             self.detail_follow_symlinks.blockSignals(True)
             
+            self.detail_nickname.setText(site.get("nickname", ""))
             self.detail_hostname.setText(site.get("hostname", ""))
             self.detail_username.setText(site.get("username", ""))
             self.detail_password.setText(site.get("password", ""))
@@ -304,7 +310,7 @@ class ConnectionsWidget(QWidget):
     
     def _clear_details(self):
         """Clear all detail fields"""
-        for widget in [self.detail_hostname, self.detail_username, self.detail_password,
+        for widget in [self.detail_nickname, self.detail_hostname, self.detail_username, self.detail_password,
                       self.detail_port, self.detail_key, self.detail_remote_dir, 
                       self.detail_local_dir, self.detail_ssh_commands]:
             widget.clear()
@@ -313,7 +319,7 @@ class ConnectionsWidget(QWidget):
     
     def _set_details_enabled(self, enabled):
         """Enable/disable detail panel"""
-        for widget in [self.detail_hostname, self.detail_username, self.detail_password,
+        for widget in [self.detail_nickname, self.detail_hostname, self.detail_username, self.detail_password,
                       self.detail_port, self.detail_key, self.detail_remote_dir, 
                       self.detail_local_dir, self.detail_ssh_commands,
                       self.connect_button, self.detail_connection_type,
@@ -347,7 +353,9 @@ class ConnectionsWidget(QWidget):
         for i, hostname in enumerate(hostnames):
             site = get_site_data(hostname)
             if site:
-                self.table.setItem(i, 0, QTableWidgetItem(hostname))
+                # Use nickname if available, otherwise hostname
+                display_name = site.get("nickname") or hostname
+                self.table.setItem(i, 0, QTableWidgetItem(display_name))
                 self.table.setItem(i, 1, QTableWidgetItem(site.get("username", "")))
                 self.table.setItem(i, 2, QTableWidgetItem(str(site.get("port", 22))))
                 self.table.setItem(i, 3, QTableWidgetItem(site.get("connection_type", "SFTP Browser")))
@@ -486,6 +494,10 @@ class ConnectionsWidget(QWidget):
                     host_data["initial_local_dir"][hostname] = self.detail_local_dir.text()
                     host_data["ssh_commands"][hostname] = self.detail_ssh_commands.text()
                     host_data["follow_symlinks"][hostname] = self.detail_follow_symlinks.isChecked()
+                    
+                    nickname = self.detail_nickname.text().strip()
+                    if nickname:
+                        host_data["nicknames"][hostname] = nickname
             
             # Remove orphaned entries (empty hostnames or hostnames that were deleted from table)
             # Don't remove "new_site_*" entries - they are pending new sites user is creating
@@ -507,7 +519,7 @@ class ConnectionsWidget(QWidget):
             for hostname in orphaned:
                 for key in ["hostnames", "usernames", "passwords", "ports", "key", 
                            "connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks",
-                           "ssh_commands", "follow_symlinks"]:
+                           "ssh_commands", "follow_symlinks", "nicknames"]:
                     if key in host_data:
                         host_data[key].pop(hostname, None)
             
