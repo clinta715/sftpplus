@@ -35,7 +35,8 @@ class SFTPOperations:
     def __init__(self, hostname: str, username: str,
                  password: Optional[str] = None,
                  port: int = 22,
-                 key: Optional[str] = None):
+                 key: Optional[str] = None,
+                 ssh=None, sftp=None):
         """
         Initialize SFTP operations.
         
@@ -45,6 +46,8 @@ class SFTPOperations:
             password: SSH password (or None if using key)
             port: SSH port (default 22)
             key: Path to SSH private key (or None if using password)
+            ssh: Optional pre-established SSH client for connection reuse
+            sftp: Optional pre-established SFTP client for connection reuse
         """
         creds = SFTPCredentials(
             hostname=hostname,
@@ -55,7 +58,7 @@ class SFTPOperations:
         )
         
         self._session = get_session_manager().create_session(creds)
-        self._api = SFTPSessionAPI(self._session)
+        self._api = SFTPSessionAPI(self._session, ssh=ssh, sftp=sftp)
     
     @property
     def session_id(self) -> str:
