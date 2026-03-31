@@ -6,7 +6,10 @@ import time
 import logging
 from sftp_downloadworkerclass import transferSignals, add_sftp_job, clear_sftp_queue
 from sftp_transfer_queue_widget import TransferQueueWidget
-from sftp_hostdataeditor import save_connection_data, load_connection_data
+from sftp_hostdataeditor import (
+    save_connection_data, load_connection_data,
+    update_connection_data, get_site_names, get_site_data, get_setting
+)
 from sftp_theme import BUTTON_STYLE_DARK
 from sftp_connections_widget import ConnectionsWidget
 from sftp_file_browser_panel import FileBrowserPanel
@@ -50,29 +53,15 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.transfers_message = transferSignals()
         self.message_signal.connect(self.update_console)
 
-        # Custom data structure to store hostname, username, and password together
-        self.host_data = {
-            "hostnames" : {},
-            "usernames" : {},
-            "passwords" : {},
-            "ports" : {},
-            "key" : {} }
-
-        # Previous text to check for changes
         QCoreApplication.instance().aboutToQuit.connect(self.cleanup)
         self.hostnames = []
         self.sessions = []
         self.observers = []
-        self._notifying = False  # Flag to track notification status
+        self._notifying = False
 
-        # Create and connect to the error signal from WorkerSignals
         self.worker_signals = WorkerSignals()
         self.worker_signals.error.connect(self._display_error)
 
-        # Load saved connection data and encryption key
-        self.host_data = load_connection_data()
-
-        # Initialize UI after loading connection data
         self.init_ui()
 
         # Setup keyboard shortcuts
@@ -624,15 +613,10 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.hostname_combo.editingFinished.connect(self.hostname_changed)        
 
     def populate_hostname_combo(self):
-        # Clear existing items
         self.hostname_combo.clear()
-        
-        # Add hostnames from the host_data
-        for hostname in self.host_data['hostnames'].keys():
+        self.hostnames = get_site_names()
+        for hostname in self.hostnames:
             self.hostname_combo.addItem(hostname)
-        
-        # Update the hostnames list for the completer
-        self.hostnames = list(self.host_data['hostnames'].keys())
 
     def browse_ssh_key(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -800,16 +784,15 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.password.clear()
         self.port_selector.clear()
         self.key_combo.clear()
-        self.key_combo.addItem('<none>', None)          # default "no key" entry
+        self.key_combo.addItem('<none>', None)
 
-        if self.current_hostname in self.host_data['hostnames']:
-            username = self.host_data['usernames'].get(self.current_hostname, '')
-            password = self.host_data['passwords'].get(self.current_hostname, '')
-            port     = self.host_data['ports'].get(self.current_hostname, 22)
-            
-            # Handle key data - it might be a single string or a list
-            key_data = self.host_data['key'].get(self.current_hostname,'')
-            
+        site = get_site_data(self.current_hostname)
+        if site:
+            username = site.get("username", "")
+            password = site.get("password", "")
+            port = site.get("port", 22)
+            key_data = site.get("key", "")
+
             self.username.setText(username)
             self.password.setText(password)
             self.port_selector.setText(str(port))
@@ -851,10 +834,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         """)
 
     def update_completer(self):
-        # Update the list of hostnames
-        self.hostnames = list(self.host_data['hostnames'].keys())  # Adjusted to fetch keys from the 'hostnames' dict within host_data
-
-        # Clear and repopulate the hostname combo box
+        self.hostnames = get_site_names()
         self.hostname_combo.clear()
         self.hostname_combo.addItems(self.hostnames)
 
@@ -1074,20 +1054,16 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         ssh_commands = connection_data.get("ssh_commands", "")
         follow_symlinks = connection_data.get("follow_symlinks", False)
         
-        # Apply per-host symlink preference to global preferences
         from sftp_preferences import get_preferences
         get_preferences().set_bool("follow_symlinks", bool(follow_symlinks))
-        
-        # Store initial directories in host_data so navigate_to_initial_directories can find them
-        if initial_remote_dir:
-            if "initial_remote_dir" not in self.host_data:
-                self.host_data["initial_remote_dir"] = {}
-            self.host_data["initial_remote_dir"][hostname] = initial_remote_dir
-        
-        if initial_local_dir:
-            if "initial_local_dir" not in self.host_data:
-                self.host_data["initial_local_dir"] = {}
-            self.host_data["initial_local_dir"][hostname] = initial_local_dir
+
+        def store_initial_dirs(host_data):
+            if initial_remote_dir:
+                host_data.setdefault("initial_remote_dir", {})[hostname] = initial_remote_dir
+            if initial_local_dir:
+                host_data.setdefault("initial_local_dir", {})[hostname] = initial_local_dir
+
+        update_connection_data(store_initial_dirs)
         
         # Update UI fields
         self.hostname_combo.setCurrentText(hostname)
@@ -1152,11 +1128,12 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
                 return
 
             self.message_signal.emit(f"Opening terminal session to {hostname}...")
-            
+
             ssh_commands = ""
-            if hostname in self.host_data.get("ssh_commands", {}):
-                ssh_commands = self.host_data["ssh_commands"].get(hostname, "")
-            
+            site = get_site_data(hostname)
+            if site:
+                ssh_commands = site.get("ssh_commands", "")
+
             self.prepare_terminal_widget(hostname, username, password, port, key, ssh_commands)
 
         except (ConnectionError, OSError, ValueError) as e:
@@ -1452,19 +1429,17 @@ Do you want to trust this host and add it to known_hosts?"""
 
     def save_connection_data_async(self):
         try:
-            host_data = load_connection_data()
+            def updater(host_data):
+                host_data["hostnames"][self.temp_hostname] = self.temp_hostname
+                host_data["usernames"][self.temp_hostname] = self.temp_username
+                host_data["passwords"][self.temp_hostname] = self.temp_password
+                host_data["ports"][self.temp_hostname] = int(self.temp_port)
+                host_data["key"][self.temp_hostname] = self.temp_key
 
-            host_data["hostnames"][self.temp_hostname] = self.temp_hostname
-            host_data["usernames"][self.temp_hostname] = self.temp_username
-            host_data["passwords"][self.temp_hostname] = self.temp_password
-            host_data["ports"][self.temp_hostname] = int(self.temp_port)
-            host_data["key"][self.temp_hostname] = self.temp_key
-
-            if not save_connection_data(host_data):
+            if not update_connection_data(updater):
                 self.message_signal.emit("Failed to save connection data")
             else:
                 self.message_signal.emit("Connection data saved successfully")
-                self.host_data = host_data
 
             self.update_completer()
         except (OSError, RuntimeError) as e:
@@ -1473,9 +1448,11 @@ Do you want to trust this host and add it to known_hosts?"""
     def navigate_to_initial_directories(self):
         """Navigate to initial directories if configured for the current hostname"""
         try:
-            # Get initial directories from host_data
-            initial_remote = self.host_data.get("initial_remote_dir", {}).get(self.temp_hostname, "")
-            initial_local = self.host_data.get("initial_local_dir", {}).get(self.temp_hostname, "")
+            site = get_site_data(self.temp_hostname)
+            if not site:
+                return
+            initial_remote = site.get("initial_remote_dir", "")
+            initial_local = site.get("initial_local_dir", "")
             
             if initial_remote:
                 self.message_signal.emit(f"Navigating to initial remote directory: {initial_remote}")
@@ -1502,20 +1479,14 @@ Do you want to trust this host and add it to known_hosts?"""
         try:
             if hasattr(self, 'transfer_queue_widget'):
                 self.transfer_queue_widget.cleanup()
-            
+
             self.stop_background_thread()
 
             from sftp_downloadworkerclass import clear_sftp_queue
             clear_sftp_queue()
 
             self.close_sftp_connections()
-
-            try:
-                fresh_data = load_connection_data()
-                save_connection_data(fresh_data)
-            except (OSError, IOError, RuntimeError) as e:
-                pass
-        except (OSError, IOError, RuntimeError) as e:
+        except (OSError, RuntimeError) as e:
             pass
 
     # Remove the perform_next_cleanup_task method as it's no longer needed
@@ -1643,18 +1614,12 @@ def main():
 
     app = QApplication(sys.argv)
 
-    # Load connection data to check settings before creating main window
-    host_data = load_connection_data()
-    show_manager_on_startup = host_data.get("show_manager_on_startup", True)
-    
-    # List to store connection data from startup site manager (mutable)
+    show_manager_on_startup = get_setting("show_manager_on_startup", True)
+
     startup_connection = [None]
-    
-    # Show site manager on startup if enabled and no command line hostname provided
-    # We'll show the Connections tab in the main window instead of a separate dialog
-    # The Connections tab is already integrated in MainWindow
+
     if show_manager_on_startup and not args.hostname:
-        pass  # MainWindow will show Connections tab by default when created
+        pass
     
     # create the main window of the application
     main_window = MainWindow()

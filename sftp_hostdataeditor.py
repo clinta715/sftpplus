@@ -8,6 +8,7 @@ import logging
 import os
 import stat
 import json
+import threading
 from cryptography.fernet import Fernet, InvalidToken
 
 from sftp_platform import (
@@ -22,6 +23,18 @@ DATA_FILE_PATH = get_connection_data_path()
 
 encryption_key = None
 cipher_suite = None
+_data_lock = threading.Lock()
+
+
+def _ensure_keys(host_data):
+    """Ensure all expected keys exist in host_data dict."""
+    for key in ("hostnames", "usernames", "passwords", "ports", "key",
+                "connection_type", "initial_remote_dir", "initial_local_dir",
+                "bookmarks", "ssh_commands", "follow_symlinks"):
+        if key not in host_data:
+            host_data[key] = {}
+    if "show_manager_on_startup" not in host_data:
+        host_data["show_manager_on_startup"] = True
 
 
 def _load_encryption_key():
@@ -205,3 +218,74 @@ def load_connection_data():
         _save_encryption_key(encryption_key)
         cipher_suite = Fernet(encryption_key)
         return host_data
+
+
+def update_connection_data(callback):
+    """Atomically load, modify via callback, and save connection data.
+
+    The callback receives the host_data dict and should modify it in-place.
+    Thread-safe: acquires a lock for the entire load-modify-save cycle.
+
+    Args:
+        callback: Callable that takes host_data dict and modifies it in-place.
+
+    Returns:
+        bool: True if saved successfully, False otherwise.
+    """
+    with _data_lock:
+        host_data = load_connection_data()
+        callback(host_data)
+        return save_connection_data(host_data)
+
+
+def get_site_names():
+    """Return list of configured site hostnames.
+
+    Returns:
+        list[str]: Hostname strings.
+    """
+    host_data = load_connection_data()
+    return list(host_data.get("hostnames", {}).keys())
+
+
+def get_site_data(hostname):
+    """Return all configured data for a specific site.
+
+    Args:
+        hostname: The site hostname to look up.
+
+    Returns:
+        dict: Site data with keys: hostname, username, password, port, key,
+              connection_type, initial_remote_dir, initial_local_dir,
+              ssh_commands, follow_symlinks.
+              Returns None if hostname not found.
+    """
+    host_data = load_connection_data()
+    if hostname not in host_data.get("hostnames", {}):
+        return None
+    return {
+        "hostname": host_data["hostnames"].get(hostname, hostname),
+        "username": host_data["usernames"].get(hostname, ""),
+        "password": host_data["passwords"].get(hostname, ""),
+        "port": host_data["ports"].get(hostname, 22),
+        "key": host_data["key"].get(hostname, ""),
+        "connection_type": host_data.get("connection_type", {}).get(hostname, "SFTP Browser"),
+        "initial_remote_dir": host_data.get("initial_remote_dir", {}).get(hostname, ""),
+        "initial_local_dir": host_data.get("initial_local_dir", {}).get(hostname, ""),
+        "ssh_commands": host_data.get("ssh_commands", {}).get(hostname, ""),
+        "follow_symlinks": host_data.get("follow_symlinks", {}).get(hostname, False),
+    }
+
+
+def get_setting(key, default=None):
+    """Return a global setting value from connection data.
+
+    Args:
+        key: Setting key (e.g. 'show_manager_on_startup').
+        default: Default value if key not found.
+
+    Returns:
+        The setting value, or default.
+    """
+    host_data = load_connection_data()
+    return host_data.get(key, default)
