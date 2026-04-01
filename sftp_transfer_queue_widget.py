@@ -10,6 +10,7 @@ import json
 import queue
 import time
 import logging
+import sys
 
 from sftp_downloadworkerclass import Transfer, DownloadWorker, SFTPJob, sftp_queue, clear_sftp_queue, response_queues, response_queues_lock
 from sftp_theme import (BUTTON_STYLE_DARK, LIST_WIDGET_STYLE_DARK, PROGRESS_BAR_STYLE_DARK,
@@ -116,6 +117,7 @@ class TransferQueueWidget(QWidget):
     - Hostname indicator for each transfer
     - Full-width progress bars
     """
+    print("DEBUG: TransferQueueWidget class defined", file=sys.stderr)
     
     # Signals for transfer events
     signal_transfer_started = Signal(int, str)  # (count, message)
@@ -124,11 +126,19 @@ class TransferQueueWidget(QWidget):
     signal_transfer_progress = Signal(int, int, float, float, int, int)  # (transfer_id, percent, speed_bps, eta_sec, bytes_done, bytes_total)
     signal_discovery_progress = Signal(int, int)  # (files_found, dirs_scanned)
     
+    # Signal for adding transfer display from background threads (single tuple param)
+    signal_add_transfer_display = Signal(object)
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.queue_items = []
         self.active_transfers = 0
         self.transfers = []
+        
+        # New display-only transfer tracking (for DirectTransferWorker)
+        self._transfer_displays = {}  # transfer_id -> {widget, progress_bar, status_label, speed_label, eta_label, source, dest}
+        self._active_workers = {}  # transfer_id -> worker (for cancellation)
+        
         self._observees = []
         self._observees_lock = QMutex()  # THREAD SAFETY: Lock for observee list
         self.total_queue_items = 0
@@ -168,10 +178,18 @@ class TransferQueueWidget(QWidget):
         self._panel_collapsed = False
         self._console_collapsed = False
         
+        # Connect signal for thread-safe transfer display addition
+        self.signal_add_transfer_display.connect(
+            self._add_transfer_display_slot,
+            type=Qt.QueuedConnection
+        )
+        
         self.init_ui()
 
     def init_ui(self):
         """Initialize the UI layout"""
+        print("DEBUG: init_ui() called", file=sys.stderr)
+        
         # Main layout
         self.main_layout = QVBoxLayout()
         self.main_layout.setSpacing(0)
@@ -237,6 +255,11 @@ class TransferQueueWidget(QWidget):
         self.transfer_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.transfer_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.transfer_list.setMinimumHeight(100)
+        
+        # Debug label to show item count
+        self._debug_count_label = QLabel("List: 0 | Dict: 0")
+        self._debug_count_label.setStyleSheet("color: #666; font-size: 10px;")
+        content_layout.addWidget(self._debug_count_label)
         
         # Set the list as the scroll area widget
         content_layout.addWidget(self.transfer_list, stretch=1)
@@ -353,6 +376,8 @@ class TransferQueueWidget(QWidget):
         # Set the main layout
         self.setLayout(self.main_layout)
         
+        print(f"DEBUG: init_ui completed, main_layout count: {self.main_layout.count()}", file=sys.stderr)
+        
         # Set initial panel collapse state from preferences
         panel_collapsed = prefs.get_bool("transfer_panel_collapsed", False)
         self._panel_collapsed = panel_collapsed
@@ -369,6 +394,24 @@ class TransferQueueWidget(QWidget):
         # Setup timers
         self._setup_timers()
         
+    def _add_transfer_display_slot(self, args_tuple):
+        """Slot for thread-safe transfer display addition (called via signal from background threads)"""
+        transfer_id, source_path, dest_path, is_source_remote, is_destination_remote, hostname, port, username, password, command, key = args_tuple
+        print(f"DEBUG: _add_transfer_display_slot called for {transfer_id}", file=sys.stderr)
+        self.add_transfer_display(
+            transfer_id=transfer_id,
+            source_path=source_path,
+            dest_path=dest_path,
+            is_source_remote=is_source_remote,
+            is_destination_remote=is_destination_remote,
+            hostname=hostname,
+            port=port,
+            username=username,
+            password=password,
+            command=command,
+            key=key
+        )
+
     def toggle_panel(self):
         """Toggle the entire panel visibility (collapse/expand)"""
         self._panel_collapsed = not self._panel_collapsed
@@ -578,6 +621,21 @@ class TransferQueueWidget(QWidget):
             pass
         except (AttributeError, RuntimeError) as e:
             pass
+    def get_active_transfer_count(self):
+        """Get total number of active transfers (both legacy and display-only)"""
+        count = 0
+        
+        # Count legacy transfers
+        with QMutexLocker(self._transfer_lock):
+            count += len([t for t in self.transfers if t.active])
+        
+        # Count display-only transfers
+        for tid, display in self._transfer_displays.items():
+            if display.get('is_active', False):
+                count += 1
+                
+        return count
+
     def update_overall_progress(self):
         """Update the overall progress bar based on all active transfers"""
         try:
@@ -722,13 +780,6 @@ class TransferQueueWidget(QWidget):
                 if self.active_transfers != actual_active:
                     self.active_transfers = actual_active
             
-            # Check if we've reached max transfers
-            prefs = get_preferences()
-            max_concurrent = prefs.get("max_concurrent_transfers", 8)
-            with QMutexLocker(self._active_transfers_lock):
-                if self.active_transfers >= max_concurrent:
-                    return
-            
             # Check if queue has items
             queue_size = sftp_queue.qsize()
             if queue_size == 0:
@@ -780,11 +831,21 @@ class TransferQueueWidget(QWidget):
                        is_source_remote, is_destination_remote, hostname, 
                        port, username, password, command, key):
         """Start a new transfer"""
+        import logging
+        logger = logging.getLogger('sftp.queue')
+        
+        logger.debug(f"start_transfer called: {transfer_id}, {job_source}")
+        
         try:
             if not transfer_id:
+                logger.debug("start_transfer: empty transfer_id, returning")
                 return
-                
+            
             # Check if transfer already exists
+            if not hasattr(self, 'transfers'):
+                logger.debug("start_transfer: self.transfers doesn't exist!")
+                self.transfers = []
+            
             existing = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
             if existing:
                 return
@@ -969,6 +1030,322 @@ class TransferQueueWidget(QWidget):
             
         except (OSError, IOError, RuntimeError) as e:
             self.text_console.append(f"Failed to start transfer: {e}")
+    
+    # ===== Display-only methods for DirectTransferWorker =====
+    
+    def add_transfer_display(self, transfer_id, source_path, dest_path, 
+                             is_source_remote, is_destination_remote, hostname,
+                             port, username, password, command, key):
+        """
+        Add a transfer display entry without creating a worker.
+        Used with DirectTransferWorker for unified transfer handling.
+        """
+        import logging
+        logger = logging.getLogger('sftp')
+        import sys
+        
+        try:
+            print(f"DEBUG: add_transfer_display called: {transfer_id}", file=sys.stderr)
+            logger.debug(f"add_transfer_display called: {transfer_id} {source_path} -> {dest_path}")
+            
+            if not transfer_id:
+                logger.debug("add_transfer_display: no transfer_id, returning")
+                return
+            
+            # Check if already exists
+            if transfer_id in self._transfer_displays:
+                logger.debug(f"add_transfer_display: {transfer_id} already exists")
+                return
+            
+            is_upload = is_source_remote and not is_destination_remote
+            
+            # Create list item
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, transfer_id)
+            
+            # Create widget
+            widget = QWidget()
+            widget.setFixedHeight(60)
+            layout = QVBoxLayout()
+            layout.setContentsMargins(8, 4, 8, 4)
+            layout.setSpacing(2)
+            
+            # Top row: filename and status
+            top_row = QHBoxLayout()
+            top_row.setSpacing(8)
+            
+            file_name = os.path.basename(source_path)
+            direction = "⬆️" if is_upload else "⬇️"
+            file_label = QLabel(f"{direction} {file_name}")
+            file_label.setStyleSheet(f"font-weight: 600; font-size: 12px; color: {DARK_THEME['text_primary']};")
+            file_label.setSizePolicy(Qt.SizePolicy_Expanding, Qt.SizePolicy_Fixed)
+            file_label.setToolTip(f"Source: {source_path}\nDestination: {dest_path}")
+            top_row.addWidget(file_label, stretch=3)
+            
+            status_label = QLabel("Starting...")
+            status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['text_secondary']}; font-weight: 500;")
+            status_label.setAlignment(Qt.AlignRight)
+            top_row.addWidget(status_label)
+            
+            # Cancel button
+            cancel_btn = QPushButton("✕")
+            cancel_btn.setFixedWidth(24)
+            cancel_btn.setFixedHeight(24)
+            cancel_btn.setStyleSheet("""
+                QPushButton {
+                    border: none;
+                    border-radius: 4px;
+                    background-color: transparent;
+                    color: #aaaaaa;
+                    font-size: 12px;
+                }
+                QPushButton:hover {
+                    background-color: #ff4444;
+                    color: white;
+                }
+            """)
+            cancel_btn.clicked.connect(lambda: self._cancel_display_transfer(transfer_id))
+            top_row.addWidget(cancel_btn)
+            
+            layout.addLayout(top_row)
+            
+            # Middle row: paths
+            path_row = QHBoxLayout()
+            path_label = QLabel(f"<span style='color: {DARK_THEME['text_secondary']}; font-size: 9px;'>{source_path[:40]}... → {dest_path[:40]}...</span>")
+            path_label.setSizePolicy(Qt.SizePolicy_Expanding, Qt.SizePolicy_Fixed)
+            path_row.addWidget(path_label)
+            layout.addLayout(path_row)
+            
+            # Bottom row: progress bar + speed/eta
+            bottom_row = QHBoxLayout()
+            bottom_row.setSpacing(8)
+            
+            progress_bar = QProgressBar()
+            progress_bar.setStyleSheet(f"""
+                QProgressBar {{
+                    border: none;
+                    border-radius: 3px;
+                    background-color: {DARK_THEME['bg_secondary']};
+                    text-align: center;
+                    color: white;
+                    font-size: 10px;
+                }}
+                QProgressBar::chunk {{
+                    background-color: {DARK_THEME['accent_green']};
+                    border-radius: 3px;
+                }}
+            """)
+            progress_bar.setFixedHeight(16)
+            bottom_row.addWidget(progress_bar, stretch=3)
+            
+            speed_label = QLabel("-")
+            speed_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['text_primary']}; font-weight: 500;")
+            speed_label.setAlignment(Qt.AlignRight)
+            speed_label.setFixedWidth(80)
+            bottom_row.addWidget(speed_label)
+            
+            eta_label = QLabel("-")
+            eta_label.setStyleSheet(f"font-size: 9px; color: {DARK_THEME['text_secondary']};")
+            eta_label.setAlignment(Qt.AlignRight)
+            eta_label.setFixedWidth(50)
+            bottom_row.addWidget(eta_label)
+            
+            layout.addLayout(bottom_row)
+            
+            widget.setLayout(layout)
+            item.setSizeHint(widget.sizeHint())
+            
+            # Add to list
+            self.transfer_list.addItem(item)
+            self.transfer_list.setItemWidget(item, widget)
+            
+            print(f"DEBUG: Added item to transfer_list, count now: {self.transfer_list.count()}", file=sys.stderr)
+            logger.debug(f"Added transfer display: transfer_list count = {self.transfer_list.count()}")
+            
+            # Update debug label
+            if hasattr(self, '_debug_count_label'):
+                self._debug_count_label.setText(f"List: {self.transfer_list.count()} | Dict: {len(self._transfer_displays)}")
+            
+            # Store reference
+            self._transfer_displays[transfer_id] = {
+                'widget': widget,
+                'item': item,
+                'progress_bar': progress_bar,
+                'status_label': status_label,
+                'speed_label': speed_label,
+                'eta_label': eta_label,
+                'source': source_path,
+                'dest': dest_path,
+                'is_active': True,
+                'hostname': hostname,
+                'group_id': self._current_group_id
+            }
+            
+            # Update counts
+            with QMutexLocker(self._active_transfers_lock):
+                self.active_transfers += 1
+            self.update_overall_progress()
+            
+            self.signal_transfer_started.emit(1, f"Transfer started: {source_path}")
+            
+            self.text_console.append(f"Transfer started: {file_name}")
+            
+        except Exception as e:
+            import traceback
+            print(f"DEBUG: Error in add_transfer_display: {e}", file=sys.stderr)
+            print(traceback.format_exc(), file=sys.stderr)
+            self.text_console.append(f"Error adding transfer display: {e}")
+    
+    def _cancel_display_transfer(self, transfer_id):
+        """Cancel a display-based transfer"""
+        if transfer_id in self._transfer_displays:
+            display = self._transfer_displays[transfer_id]
+            display['is_active'] = False
+            display['status_label'].setText("Cancelled")
+            display['progress_bar'].setValue(0)
+            
+            # Cancel the worker if running
+            if transfer_id in self._active_workers:
+                worker = self._active_workers[transfer_id]
+                if hasattr(worker, 'cancel'):
+                    worker.cancel()
+    
+    def humanize_bytes(self, b):
+        """Convert bytes to human readable format"""
+        if b >= 1024**3:
+            return f"{b / 1024**3:.1f} GB"
+        elif b >= 1024**2:
+            return f"{b / 1024**2:.1f} MB"
+        elif b >= 1024:
+            return f"{b / 1024:.1f} KB"
+        else:
+            return f"{b} B"
+
+    def update_transfer_progress(self, transfer_id, bytes_done, bytes_total, speed_bps=0):
+        """Update progress for a display transfer"""
+        if transfer_id not in self._transfer_displays:
+            return
+        
+        display = self._transfer_displays[transfer_id]
+        if not display.get('is_active', False):
+            return
+        
+        # Calculate percentage
+        if bytes_total > 0:
+            value = int((bytes_done / bytes_total) * 100)
+        else:
+            value = 0
+        
+        # Update progress bar
+        display['progress_bar'].setValue(value)
+        
+        # Format progress text: "45% • 2.3 MB / 5.1 MB • 1.2 MB/s"
+        done_str = self.humanize_bytes(bytes_done)
+        total_str = self.humanize_bytes(bytes_total)
+        speed_str = self.humanize_bytes(int(speed_bps)) + "/s" if speed_bps > 0 else "-"
+        
+        progress_text = f"{value}% • {done_str} / {total_str} • {speed_str}"
+        display['progress_bar'].setFormat(progress_text)
+        
+        # Update status
+        display['status_label'].setText("Transferring")
+        
+        # Update speed label
+        display['speed_label'].setText(speed_str)
+        
+        # Update ETA
+        if speed_bps > 0 and bytes_total > bytes_done:
+            eta_seconds = (bytes_total - bytes_done) / speed_bps
+            if eta_seconds < 60:
+                eta_str = f"{int(eta_seconds)}s"
+            elif eta_seconds < 3600:
+                eta_str = f"{int(eta_seconds/60)}m"
+            else:
+                eta_str = f"{int(eta_seconds/3600)}h"
+            display['eta_label'].setText(eta_str)
+    
+    def mark_transfer_complete(self, transfer_id):
+        """Mark a display transfer as complete"""
+        if transfer_id not in self._transfer_displays:
+            return
+
+        display = self._transfer_displays[transfer_id]
+        display['is_active'] = False
+        display['status_label'].setText("Done")
+        display['progress_bar'].setValue(100)
+        display['progress_bar'].setFormat("100% • Complete")
+        display['eta_label'].setText("-")
+
+        file_name = os.path.basename(display['source'])
+        self.text_console.append(f"Transfer complete: {file_name}")
+
+        self.signal_transfer_completed.emit(1, f"Transfer complete: {file_name}")
+
+        with QMutexLocker(self._active_transfers_lock):
+            self.active_transfers = max(0, self.active_transfers - 1)
+        self.update_overall_progress()
+
+        # Auto-clear if preference is enabled
+        from sftp_preferences import get_preferences
+        prefs = get_preferences()
+        if prefs.get_bool("clear_completed_on_complete", False):
+            QTimer.singleShot(500, self.clear_completed)
+
+    def mark_transfer_failed(self, transfer_id, error_message):
+        """Mark a display transfer as failed"""
+        if transfer_id not in self._transfer_displays:
+            return
+
+        display = self._transfer_displays[transfer_id]
+        display['is_active'] = False
+        display['status_label'].setText("Failed")
+        display['status_label'].setStyleSheet(f"font-size: 10px; color: {DARK_THEME['error']}; font-weight: 500;")
+
+        file_name = os.path.basename(display['source'])
+        self.text_console.append(f"Transfer failed: {file_name} - {error_message}")
+
+        self.signal_transfer_error.emit(transfer_id, error_message)
+
+        with QMutexLocker(self._active_transfers_lock):
+            self.active_transfers = max(0, self.active_transfers - 1)
+        self.update_overall_progress()
+
+        # Auto-clear if preference is enabled
+        from sftp_preferences import get_preferences
+        prefs = get_preferences()
+        if prefs.get_bool("clear_completed_on_complete", False):
+            QTimer.singleShot(500, self.clear_completed)
+    def remove_transfer_display(self, transfer_id):
+        """Remove a transfer display"""
+        if transfer_id in self._transfer_displays:
+            display = self._transfer_displays[transfer_id]
+            item = display['item']
+            row = self.transfer_list.row(item)
+            if row >= 0:
+                self.transfer_list.takeItem(row)
+            del self._transfer_displays[transfer_id]
+            
+            if transfer_id in self._active_workers:
+                del self._active_workers[transfer_id]
+    
+    def register_worker(self, transfer_id, worker):
+        """Register a worker for a display transfer (for cancellation)"""
+        self._active_workers[transfer_id] = worker
+    
+    def stop_all_display_transfers(self):
+        """Stop all display-based transfers"""
+        for transfer_id, display in self._transfer_displays.items():
+            if display.get('is_active', False):
+                display['is_active'] = False
+                display['status_label'].setText("Stopped")
+                
+                # Cancel worker if running
+                if transfer_id in self._active_workers:
+                    worker = self._active_workers[transfer_id]
+                    if hasattr(worker, 'cancel'):
+                        worker.cancel()
+        
+        self.text_console.append("All transfers stopped")
 
     def cancel_transfer(self, transfer_id):
         """Cancel a transfer"""
@@ -1281,24 +1658,40 @@ class TransferQueueWidget(QWidget):
 
     def _handle_conflict(self, transfer_id, dest_path, dest_type):
         """Handle file conflict - queue prompt so only one dialog shows at a time"""
+        # Find the worker and group_id
+        worker = None
+        group_id = None
+        
+        # Check transfers list (legacy)
         transfer = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
-        if not transfer or not transfer.download_worker:
+        if transfer:
+            worker = transfer.download_worker
+            if hasattr(transfer, 'group_id'):
+                group_id = transfer.group_id
+        
+        # Check active workers (DirectTransferWorker)
+        if not worker and transfer_id in self._active_workers:
+            worker = self._active_workers[transfer_id]
+            # Try to find group_id from display
+            if transfer_id in self._transfer_displays:
+                group_id = self._transfer_displays[transfer_id].get('group_id')
+        
+        if not worker:
             return
         
         # Check per-group flags first (no dialog needed)
-        if hasattr(transfer, 'group_id') and transfer.group_id:
-            gid = transfer.group_id
-            if gid in self._group_cancel_all:
-                transfer.download_worker.set_conflict_result("cancel")
+        if group_id:
+            if group_id in self._group_cancel_all:
+                worker.set_conflict_result("cancel")
                 return
-            if gid in self._group_overwrite_all:
-                transfer.download_worker.set_conflict_result("overwrite_all")
+            if group_id in self._group_overwrite_all:
+                worker.set_conflict_result("overwrite_all")
                 return
-            elif gid in self._group_skip_all:
-                transfer.download_worker.set_conflict_result("skip_all")
+            elif group_id in self._group_skip_all:
+                worker.set_conflict_result("skip_all")
                 return
-            elif gid in self._group_resume_all:
-                transfer.download_worker.set_conflict_result("resume_all")
+            elif group_id in self._group_resume_all:
+                worker.set_conflict_result("resume_all")
                 return
         
         # Queue the conflict and process serially
@@ -1316,28 +1709,44 @@ class TransferQueueWidget(QWidget):
         transfer_id, dest_path, dest_type = self._conflict_queue.pop(0)
         
         try:
+            # Find the worker and group_id
+            worker = None
+            group_id = None
+            
+            # Check transfers list (legacy)
             transfer = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
-            if not transfer or not transfer.download_worker:
+            if transfer:
+                worker = transfer.download_worker
+                if hasattr(transfer, 'group_id'):
+                    group_id = transfer.group_id
+            
+            # Check active workers (DirectTransferWorker)
+            if not worker and transfer_id in self._active_workers:
+                worker = self._active_workers[transfer_id]
+                # Try to find group_id from display
+                if transfer_id in self._transfer_displays:
+                    group_id = self._transfer_displays[transfer_id].get('group_id')
+            
+            if not worker:
                 self._process_next_conflict()
                 return
             
             # Re-check group flags (may have been set by a previous dialog)
-            if hasattr(transfer, 'group_id') and transfer.group_id:
-                gid = transfer.group_id
-                if gid in self._group_cancel_all:
-                    transfer.download_worker.set_conflict_result("cancel")
+            if group_id:
+                if group_id in self._group_cancel_all:
+                    worker.set_conflict_result("cancel")
                     self._process_next_conflict()
                     return
-                if gid in self._group_overwrite_all:
-                    transfer.download_worker.set_conflict_result("overwrite_all")
+                if group_id in self._group_overwrite_all:
+                    worker.set_conflict_result("overwrite_all")
                     self._process_next_conflict()
                     return
-                elif gid in self._group_skip_all:
-                    transfer.download_worker.set_conflict_result("skip_all")
+                elif group_id in self._group_skip_all:
+                    worker.set_conflict_result("skip_all")
                     self._process_next_conflict()
                     return
-                elif gid in self._group_resume_all:
-                    transfer.download_worker.set_conflict_result("resume_all")
+                elif group_id in self._group_resume_all:
+                    worker.set_conflict_result("resume_all")
                     self._process_next_conflict()
                     return
             
@@ -1350,12 +1759,13 @@ class TransferQueueWidget(QWidget):
             msg_box.setInformativeText("What would you like to do?")
             msg_box.setWindowTitle("File Exists")
             
-            overwrite_all_btn = msg_box.addButton("Overwrite All", Qt.MsgRole_YesRole)
-            overwrite_btn = msg_box.addButton("Overwrite", Qt.MsgRole_YesRole)
+            # Standardized button order for consistent UI
+            cancel_btn = msg_box.addButton("Cancel All", Qt.MsgRole_RejectRole)
             skip_all_btn = msg_box.addButton("Skip All", Qt.MsgRole_NoRole)
             skip_btn = msg_box.addButton("Skip", Qt.MsgRole_NoRole)
+            overwrite_all_btn = msg_box.addButton("Overwrite All", Qt.MsgRole_YesRole)
+            overwrite_btn = msg_box.addButton("Overwrite", Qt.MsgRole_YesRole)
             resume_all_btn = msg_box.addButton("Resume All", Qt.MsgRole_AcceptRole)
-            cancel_btn = msg_box.addButton("Cancel All", Qt.MsgRole_RejectRole)
             
             msg_box.exec()
             
@@ -1374,18 +1784,17 @@ class TransferQueueWidget(QWidget):
                 action = "cancel"
             
             # Store per-group flags
-            if hasattr(transfer, 'group_id') and transfer.group_id:
-                gid = transfer.group_id
+            if group_id:
                 if action == "overwrite_all":
-                    self._group_overwrite_all.add(gid)
+                    self._group_overwrite_all.add(group_id)
                 elif action == "skip_all":
-                    self._group_skip_all.add(gid)
+                    self._group_skip_all.add(group_id)
                 elif action == "resume_all":
-                    self._group_resume_all.add(gid)
+                    self._group_resume_all.add(group_id)
                 elif action == "cancel":
-                    self._group_cancel_all.add(gid)
+                    self._group_cancel_all.add(group_id)
             
-            transfer.download_worker.set_conflict_result(action)
+            worker.set_conflict_result(action)
             
         except (RuntimeError, AttributeError):
             pass
@@ -1395,6 +1804,10 @@ class TransferQueueWidget(QWidget):
 
     def update_progress(self, transfer_id, value, speed_bps=None, eta_sec=None, bytes_done=0, bytes_total=0):
         """Update transfer progress with bytes tracking"""
+        import logging
+        logger = logging.getLogger('sftp.queue')
+        logger.debug(f"update_progress called: {transfer_id}, {value}%, {bytes_done}/{bytes_total}")
+        
         try:
             if not transfer_id:
                 return
@@ -1540,7 +1953,10 @@ class TransferQueueWidget(QWidget):
             # Clear the transfer queue to stop new transfers from starting
             clear_sftp_queue()
             
-            # Stop all active download/upload workers
+            # Stop all active display-based transfers (DirectTransferWorker)
+            self.stop_all_display_transfers()
+            
+            # Stop legacy download workers
             for transfer in self.transfers:
                 if transfer.active:
                     if hasattr(transfer.download_worker, '_stop_flag'):
@@ -1557,7 +1973,11 @@ class TransferQueueWidget(QWidget):
                     if hasattr(observee, '_deletion_worker') and observee._deletion_worker:
                         observee._deletion_worker.cancel()
             
-            self.text_console.append("Cancelling all transfers and clearing queue...")
+            # Clear pending group assignments
+            if hasattr(self, '_pending_group_assignments'):
+                self._pending_group_assignments.clear()
+            
+            self.text_console.append("All transfers stopped")
             
         except (OSError, IOError, RuntimeError) as e:
             self.text_console.append(f"Error stopping transfers: {e}")
@@ -1567,15 +1987,29 @@ class TransferQueueWidget(QWidget):
         try:
             transfers_to_remove = []
             
+            # Check legacy transfers
             for transfer in self.transfers[:]:
                 status_text = transfer.status_label.text() if transfer.status_label else ""
                 if (not transfer.active or 
-                    status_text in ["✓ Done", "✗ Cancelled", "✗ Error", "✗ Failed"] or
+                    status_text in ["✓ Done", "Done", "✗ Cancelled", "✗ Error", "✗ Failed", "Failed"] or
                     "Error:" in status_text):
                     transfers_to_remove.append(transfer.transfer_id)
             
+            # Check display-only transfers
+            for tid, display in list(self._transfer_displays.items()):
+                if not display.get('is_active', False):
+                    status_text = display['status_label'].text() if 'status_label' in display else ""
+                    if status_text in ["Done", "Failed", "Stopped", "Cancelled"]:
+                        transfers_to_remove.append(tid)
+            
+            # Unique IDs
+            transfers_to_remove = list(set(transfers_to_remove))
+            
             for transfer_id in transfers_to_remove:
-                self.cleanup_transfer(transfer_id)
+                if transfer_id in self._transfer_displays:
+                    self.remove_transfer_display(transfer_id)
+                else:
+                    self.cleanup_transfer(transfer_id)
                 
         except (OSError, IOError, RuntimeError) as e:
             self.text_console.append(f"Error clearing completed transfers: {e}")

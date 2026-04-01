@@ -78,7 +78,7 @@ def show_about(parent=None):
     
     llm_label = QLabel(
         "ChatGPT • Claude • Gemini • DeepMind • "
-        "Kimi • MiniMax • GLM • Grok"
+        "Kimi • MiniMax • GLM • Grok • Qwen"
     )
     llm_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
     llm_label.setStyleSheet(f"""

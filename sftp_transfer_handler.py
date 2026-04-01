@@ -6,8 +6,12 @@ from sftp_downloadworkerclass import add_sftp_job
 from sftp_preferences import get_preferences
 from sftp_connection_pool import get_connection_pool
 from sftp_session import get_session_manager
+from sftp_logging import get_logger
 import os
 import stat
+import time
+
+logger = get_logger(__name__)
 
 
 def _safe_emit(signal, *args):
@@ -378,20 +382,26 @@ class TraversalWorker(QRunnable):
         # Collect files for batch transfer (instead of streaming)
         self._collected_files = []  # List of (source_path, dest_path, command)
         
-        # SFTPOperations for listing (simple approach that works)
-        from sftp_operations import SFTPOperations
-        self.ops = SFTPOperations(
-            hostname=self.creds.get('hostname', ''),
-            username=self.creds.get('username', ''),
-            password=self.creds.get('password', ''),
-            port=self.creds.get('port', 22),
-            key=self.creds.get('key')
-        )
+        # SFTPOperations for listing - created lazily when needed (for remote directories)
+        self.ops = None
         
         self._discovery_channel = False
         self._cancelled = False
         self._files_found = 0
         self._dirs_scanned = 0
+    
+    def _get_ops(self):
+        """Lazy initialization of SFTPOperations - only needed for remote directories"""
+        if self.ops is None:
+            from sftp_operations import SFTPOperations
+            self.ops = SFTPOperations(
+                hostname=self.creds.get('hostname', ''),
+                username=self.creds.get('username', ''),
+                password=self.creds.get('password', ''),
+                port=self.creds.get('port', 22),
+                key=self.creds.get('key')
+            )
+        return self.ops
 
     def cancel(self):
         """Cancel the traversal"""
@@ -448,7 +458,7 @@ class TraversalWorker(QRunnable):
         
         _safe_emit(self.signals.status, f"Fast scanning: {source_dir}")
         
-        exit_code, output, error = self.ops.exec_command(find_cmd, timeout=300)
+        exit_code, output, error = self._get_ops().exec_command(find_cmd, timeout=300)
         
         if exit_code != 0:
             return False
@@ -513,7 +523,7 @@ class TraversalWorker(QRunnable):
         
         if self.is_source_remote:
             try:
-                raw_files = self.ops.list_attr(source_dir)
+                raw_files = self._get_ops().list_attr(source_dir)
                 # Filter out '.' and '..' which can cause infinite recursion
                 # Items are now dicts, not SFTPAttribute objects
                 files = [f for f in raw_files if f['filename'] not in ['.', '..']]
@@ -583,12 +593,14 @@ class DirectTransferWorker(QRunnable):
         progress: (bytes_transferred, total_bytes, speed, eta)
         finished: (success_count, failure_count)
         error: (error_message)
+        conflict: (transfer_id, dest_path, dest_type)
     """
     
     class Signals(QObject):
         progress = Signal(int, int, float, float)  # (bytes, total, speed, eta)
         finished = Signal(int, int)
         error = Signal(str)
+        conflict = Signal(str, str, str)  # (transfer_id, dest_path, dest_type)
     
     def __init__(self, session_id, source_path, dest_path, 
                  is_source_remote, is_dest_remote, command):
@@ -602,66 +614,249 @@ class DirectTransferWorker(QRunnable):
         self.command = command  # "upload" or "download"
         self.signals = self.Signals()
         self._cancel_requested = False
+        self.transfer_id = None  # Set by caller
+        
+        # Conflict resolution
+        self._conflict_mutex = QMutex()
+        self._conflict_cond = QWaitCondition()
+        self._conflict_result = None
     
     def cancel(self):
         self._cancel_requested = True
+        # Also wake up if waiting for conflict resolution
+        self.set_conflict_result("cancel")
     
+    def set_conflict_result(self, result):
+        """Called by UI thread to provide result of conflict prompt"""
+        self._conflict_mutex.lock()
+        self._conflict_result = result
+        self._conflict_cond.wakeAll()
+        self._conflict_mutex.unlock()
+
+    def _wait_for_conflict_result(self):
+        """Wait for UI thread to resolve conflict. Returns action string."""
+        self._conflict_mutex.lock()
+        # Wait up to 30 seconds for user response
+        self._conflict_cond.wait(self._conflict_mutex, 30000)
+        result = self._conflict_result
+        self._conflict_result = None
+        self._conflict_mutex.unlock()
+        return result or "skip"
+
+    def _check_destination_exists(self, sftp):
+        """Check if destination file exists and resolve conflict if needed.
+        Returns: "proceed", "skip", "resume", or "cancel"
+        """
+        dest_exists = False
+        if self.is_dest_remote:
+            try:
+                sftp.stat(self.dest_path)
+                dest_exists = True
+            except (IOError, OSError):
+                pass
+        else:
+            dest_exists = os.path.exists(self.dest_path)
+        
+        if not dest_exists:
+            return "proceed"
+        
+        # Check global overwrite preference
+        from sftp_preferences import get_preferences
+        prefs = get_preferences()
+        if prefs.get_bool("overwrite_on_transfer", False):
+            return "proceed"
+        
+        # Signal conflict to UI and wait for resolution
+        dest_type = "remote" if self.is_dest_remote else "local"
+        _safe_emit(self.signals.conflict, self.transfer_id, self.dest_path, dest_type)
+        action = self._wait_for_conflict_result()
+        
+        if action == "overwrite" or action == "overwrite_all":
+            return "proceed"
+        elif action == "resume" or action == "resume_all":
+            return "resume"
+        elif action in ("skip", "skip_all"):
+            return "skip"
+        elif action == "cancel":
+            return "cancel"
+        
+        return "skip"
+
     def run(self):
+        logger.debug(f"DirectTransferWorker.run() called for {self.source_path} -> {self.dest_path}")
+        
         if self._cancel_requested:
+            logger.debug("Worker cancelled before starting")
             return
         
         from sftp_creds import get_credentials
-        from sftp_session import SFTPSession, SFTPCredentials
-        from sftp_session_executor import SFTPSessionAPI
-        from sftp_commands import DownloadCommand, UploadCommand
+        from sftp_connection_pool import get_connection_pool
+        
+        logger.debug(f"Starting transfer: source={self.source_path}, dest={self.dest_path}, cmd={self.command}")
+        
+        ssh = None
+        sftp = None
+        start_time = time.time()
+        last_update_time = start_time
+        bytes_transferred = 0
+        
+        def progress_callback(bytes_sent, total_bytes):
+            """Callback for upload/download progress"""
+            nonlocal bytes_transferred, last_update_time
+            bytes_transferred = bytes_sent
+            current_time = time.time()
+            
+            # Update progress every 0.2 seconds to avoid excessive signal emissions
+            if current_time - last_update_time >= 0.2:
+                elapsed = current_time - start_time
+                speed = bytes_transferred / elapsed if elapsed > 0 else 0
+                eta = (total_bytes - bytes_transferred) / speed if speed > 0 else 0
+                logger.debug(f"Progress callback: {bytes_sent}/{total_bytes}, speed={speed:.0f}")
+                _safe_emit(self.signals.progress, bytes_transferred, total_bytes, speed, eta)
+                last_update_time = current_time
+        
+        pool = get_connection_pool()
+        creds = get_credentials(self.session_id)
         
         try:
-            creds = get_credentials(self.session_id)
-            
-            sftp_creds = SFTPCredentials(
+            # Get connection from pool
+            ssh, sftp = pool.get_connection(
                 hostname=creds.get('hostname', ''),
+                port=creds.get('port', 22),
                 username=creds.get('username', ''),
                 password=creds.get('password', ''),
-                port=creds.get('port', 22),
                 key=creds.get('key')
             )
             
-            session = SFTPSession(create_random_integer(), sftp_creds)
-            api = SFTPSessionAPI(session)
+            # Set longer timeout for file transfers
+            sftp.get_channel().settimeout(300)
             
-            job_id = create_random_integer()
+            # Check for existing destination file
+            resume = False
+            action = self._check_destination_exists(sftp)
+            if action == "skip":
+                logger.debug(f"Skipping transfer as requested: {self.dest_path}")
+                _safe_emit(self.signals.finished, 1, 0)
+                return
+            elif action == "resume":
+                resume = True
+            elif action == "cancel":
+                logger.debug("Transfer cancelled during conflict resolution")
+                return
             
             if self.command == "upload":
-                cmd = UploadCommand(
-                    job_id=job_id,
-                    local_path=self.source_path,
-                    remote_path=self.dest_path,
-                    resume=False
-                )
+                # Verify local file exists
+                if not os.path.exists(self.source_path):
+                    raise FileNotFoundError(f"Local file not found: {self.source_path}")
+                
+                # Create remote parent directories if needed
+                self._ensure_remote_dir(sftp, os.path.dirname(self.dest_path))
+                
+                logger.debug(f"Uploading {self.source_path} to {self.dest_path}")
+                file_size = os.path.getsize(self.source_path)
+                
+                if resume:
+                    # Implement resume upload
+                    existing_size = sftp.stat(self.dest_path).st_size if sftp.stat(self.dest_path) else 0
+                    if existing_size >= file_size:
+                        _safe_emit(self.signals.progress, file_size, file_size, 0, 0)
+                        _safe_emit(self.signals.finished, 1, 0)
+                        return
+                    
+                    with open(self.source_path, 'rb') as local_file:
+                        local_file.seek(existing_size)
+                        with sftp.open(self.dest_path, 'ab') as remote_file:
+                            chunk_size = 32768
+                            bytes_uploaded = existing_size
+                            while bytes_uploaded < file_size:
+                                if self._cancel_requested:
+                                    logger.debug("Upload cancelled by flag")
+                                    return
+                                chunk = local_file.read(chunk_size)
+                                if not chunk: break
+                                remote_file.write(chunk)
+                                bytes_uploaded += len(chunk)
+                                progress_callback(bytes_uploaded, file_size)
+                else:
+                    # Normal upload
+                    sftp.put(self.source_path, self.dest_path, progress_callback)
+                
             elif self.command == "download":
-                cmd = DownloadCommand(
-                    job_id=job_id,
-                    remote_path=self.source_path,
-                    local_path=self.dest_path,
-                    resume=False
-                )
+                # Create local parent directories if needed
+                local_parent = os.path.dirname(self.dest_path)
+                if local_parent and not os.path.exists(local_parent):
+                    os.makedirs(local_parent, exist_ok=True)
+                
+                logger.debug(f"Downloading {self.source_path} to {self.dest_path}")
+                file_size = sftp.stat(self.source_path).st_size
+                
+                if resume:
+                    # Implement resume download
+                    existing_size = os.path.getsize(self.dest_path) if os.path.exists(self.dest_path) else 0
+                    if existing_size >= file_size:
+                        _safe_emit(self.signals.progress, file_size, file_size, 0, 0)
+                        _safe_emit(self.signals.finished, 1, 0)
+                        return
+                    
+                    with open(self.dest_path, 'ab') as local_file:
+                        with sftp.open(self.source_path, 'rb') as remote_file:
+                            remote_file.seek(existing_size)
+                            chunk_size = 32768
+                            bytes_downloaded = existing_size
+                            while bytes_downloaded < file_size:
+                                if self._cancel_requested:
+                                    logger.debug("Download cancelled by flag")
+                                    return
+                                chunk = remote_file.read(chunk_size)
+                                if not chunk: break
+                                local_file.write(chunk)
+                                bytes_downloaded += len(chunk)
+                                progress_callback(bytes_downloaded, file_size)
+                else:
+                    # Normal download
+                    sftp.get(self.source_path, self.dest_path, progress_callback)
             else:
                 _safe_emit(self.signals.error, f"Unknown command: {self.command}")
                 _safe_emit(self.signals.finished, 0, 1)
                 return
             
-            result = api.execute(cmd)
-            
-            if result.success:
-                _safe_emit(self.signals.finished, 1, 0)
-            else:
-                error_msg = result.error or "Transfer failed"
-                _safe_emit(self.signals.error, error_msg)
-                _safe_emit(self.signals.finished, 0, 1)
-            
-            get_session_manager().remove_session(session.session_id)
+            if self._cancel_requested:
+                logger.debug("Transfer cancelled during execution")
+                return
+
+            logger.debug("Transfer completed successfully")
+            # Emit final progress (100%)
+            elapsed = time.time() - start_time
+            speed = file_size / elapsed if elapsed > 0 else 0
+            _safe_emit(self.signals.progress, file_size, file_size, speed, 0)
+            _safe_emit(self.signals.finished, 1, 0)
             
         except Exception as e:
+            logger.exception(f"Transfer exception: {e}")
             error_msg = sanitize_error_message(str(e))
             _safe_emit(self.signals.error, error_msg)
             _safe_emit(self.signals.finished, 0, 1)
+        finally:
+            if sftp:
+                pool.release_connection(
+                    creds.get('hostname', ''),
+                    creds.get('port', 22),
+                    creds.get('username', ''),
+                    sftp
+                )
+
+    def _ensure_remote_dir(self, sftp, remote_dir):
+        if not remote_dir or remote_dir == '/':
+            return
+        parts = remote_dir.strip('/').split('/')
+        current = ''
+        for part in parts:
+            current += '/' + part
+            try:
+                sftp.stat(current)
+            except (OSError, IOError):
+                try:
+                    sftp.mkdir(current)
+                except (OSError, IOError):
+                    pass
+

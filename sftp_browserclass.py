@@ -1212,6 +1212,8 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         menu.exec(current_browser.mapToGlobal(point))
 
     def upload_download(self):
+        logger.debug("upload_download() CALLED in Browser")
+        print(f"DEBUG: upload_download() CALLED in Browser", file=sys.stderr)
         creds = get_credentials(self.session_id)
         # current_browser = self.focusWidget()
         current_browser = self.table
@@ -1351,21 +1353,70 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                                 overwrite = (action_result == "overwrite")
                                 command = "resume" if resume else ("download" if overwrite else "upload")
                                 
+                                # Generate transfer_id
+                                transfer_id = f"single_upload_{int(time.time() * 1000)}"
+                                
+                                # Add display entry
+                                logger.debug("About to call add_transfer_display for single upload")
+                                creds = get_credentials(self.session_id)
+                                hostname = creds.get('hostname', '')
+                                port = creds.get('port', 22)
+                                username = creds.get('username', '')
+                                password = creds.get('password', '')
+                                key = creds.get('key', '')
+                                
+                                self.transfer_queue_widget.add_transfer_display(
+                                    transfer_id=transfer_id,
+                                    source_path=selected_path,
+                                    dest_path=remote_entry_path,
+                                    is_source_remote=False,
+                                    is_destination_remote=True,
+                                    hostname=hostname,
+                                    port=port,
+                                    username=username,
+                                    password=password,
+                                    command=command,
+                                    key=key
+                                )
+                                logger.debug(f"After add_transfer_display: _transfer_displays has {len(self.transfer_queue_widget._transfer_displays)} entries")
+                                
                                 try:
-                                    creds = get_credentials(self.session_id)
-                                    add_sftp_job(
-                                        selected_path, False,  # source is local
-                                        remote_entry_path, True,  # dest is remote
-                                        creds.get('hostname', ''),
-                                        creds.get('username', ''),
-                                        creds.get('password', ''),
-                                        creds.get('port', 22),
-                                        command,
-                                        job_id,
-                                        creds.get('key')
+                                    # Use DirectTransferWorker instead of add_sftp_job
+                                    from sftp_transfer_handler import DirectTransferWorker
+                                    transfer_worker = DirectTransferWorker(
+                                        self.session_id,
+                                        selected_path,
+                                        remote_entry_path,
+                                        False,  # source is local
+                                        True,   # dest is remote
+                                        command
                                     )
+                                    transfer_worker.transfer_id = transfer_id
+                                    
+                                    # Register and connect signals
+                                    self.transfer_queue_widget.register_worker(transfer_id, transfer_worker)
+                                    transfer_worker.signals.progress.connect(
+                                        lambda bd, bt, sp, et, tid=transfer_id:
+                                            self.transfer_queue_widget.update_transfer_progress(tid, bd, bt, sp),
+                                        type=Qt.QueuedConnection
+                                    )
+                                    transfer_worker.signals.finished.connect(
+                                        lambda s, f, tid=transfer_id: self.transfer_queue_widget.mark_transfer_complete(tid),
+                                        type=Qt.QueuedConnection
+                                    )
+                                    transfer_worker.signals.error.connect(
+                                        lambda err, tid=transfer_id: self.transfer_queue_widget.mark_transfer_failed(tid, err),
+                                        type=Qt.QueuedConnection
+                                    )
+                                    transfer_worker.signals.conflict.connect(
+                                        lambda tid, dest, dtype: self.transfer_queue_widget._handle_conflict(tid, dest, dtype),
+                                        type=Qt.QueuedConnection
+                                    )
+                                    QThreadPool.globalInstance().start(transfer_worker)
+
                                     self.transfer_started.emit(str(job_id))
                                 except Exception as e:
+                                    self.transfer_queue_widget.mark_transfer_failed(transfer_id, str(e))
                                     self.message_signal.emit(f"Upload failed: {e}")
                         has_valid_item = True
             
@@ -1569,20 +1620,63 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                     
                     job_id = create_random_integer()
                     
-                    try:
-                        creds = get_credentials(self.session_id)
-                        command = "resume" if resume else ("download" if is_source_remote else "upload")
-                        add_sftp_job(
-                            source_path, is_source_remote,
-                            dest_path, not is_source_remote,
-                            creds.get('hostname', ''),
-                            creds.get('username', ''),
-                            creds.get('password', ''),
-                            creds.get('port', 22),
-                            command,
-                            job_id,
-                            creds.get('key')
+                    creds = get_credentials(self.session_id)
+                    command = "resume" if resume else ("download" if is_source_remote else "upload")
+                    # Use DirectTransferWorker instead of add_sftp_job
+                    from sftp_transfer_handler import DirectTransferWorker
+                    
+                    # Generate transfer_id for UI
+                    transfer_id = f"recursive_{int(time.time() * 1000)}_{job_id}"
+                    
+                    # Add to UI queue
+                    if hasattr(self, 'transfer_queue_widget') and self.transfer_queue_widget:
+                        self.transfer_queue_widget.add_transfer_display(
+                            transfer_id=transfer_id,
+                            source_path=source_path,
+                            dest_path=dest_path,
+                            is_source_remote=is_source_remote,
+                            is_destination_remote=not is_source_remote,
+                            hostname=creds.get('hostname', ''),
+                            port=creds.get('port', 22),
+                            username=creds.get('username', ''),
+                            password=creds.get('password', ''),
+                            command=command,
+                            key=creds.get('key', '')
                         )
+                    
+                    try:
+                        transfer_worker = DirectTransferWorker(
+                            self.session_id,
+                            source_path,
+                            dest_path,
+                            is_source_remote,
+                            not is_source_remote,
+                            command
+                        )
+                        transfer_worker.transfer_id = transfer_id
+                        
+                        if hasattr(self, 'transfer_queue_widget') and self.transfer_queue_widget:
+                            self.transfer_queue_widget.register_worker(transfer_id, transfer_worker)
+                            # Connect signals
+                            transfer_worker.signals.progress.connect(
+                                lambda bd, bt, sp, et, tid=transfer_id:
+                                    self.transfer_queue_widget.update_transfer_progress(tid, bd, bt, sp),
+                                type=Qt.QueuedConnection
+                            )
+                            transfer_worker.signals.finished.connect(
+                                lambda s, f, tid=transfer_id: self.transfer_queue_widget.mark_transfer_complete(tid),
+                                type=Qt.QueuedConnection
+                            )
+                            transfer_worker.signals.error.connect(
+                                lambda err, tid=transfer_id: self.transfer_queue_widget.mark_transfer_failed(tid, err),
+                                type=Qt.QueuedConnection
+                            )
+                            transfer_worker.signals.conflict.connect(
+                                lambda tid, dest, dtype: self.transfer_queue_widget._handle_conflict(tid, dest, dtype),
+                                type=Qt.QueuedConnection
+                            )
+                        
+                        QThreadPool.globalInstance().start(transfer_worker)
                         self.transfer_started.emit(str(job_id))
                     except Exception as e:
                         self.message_signal.emit(f"Transfer failed: {e}")
@@ -1622,7 +1716,6 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             if hasattr(self, 'transfer_queue_widget') and self.transfer_queue_widget else None,
             type=Qt.QueuedConnection
         )
-        # Handle files discovered - add them to queue
         worker.signals.finished_with_files.connect(
             lambda file_list: self._add_files_to_queue(file_list, worker),
             type=Qt.QueuedConnection
@@ -1648,13 +1741,23 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         
         QThreadPool.globalInstance().start(worker)
         self.message_signal.emit(f"Started upload of {source_directory}")
+        
         return skip_all, overwrite_all, resume_all
 
     def _add_files_to_queue(self, file_list, worker):
-        if not hasattr(self, 'transfer_queue_widget') or not self.transfer_queue_widget:
+        has_tqw = hasattr(self, 'transfer_queue_widget')
+        logger.debug(f"_add_files_to_queue called, has transfer_queue_widget: {has_tqw}")
+        if has_tqw:
+            logger.debug(f"transfer_queue_widget value: {self.transfer_queue_widget}")
+        
+        if not has_tqw or not self.transfer_queue_widget:
+            logger.debug("_add_files_to_queue: No transfer_queue_widget, returning")
             return
         if not file_list:
+            logger.debug("_add_files_to_queue: Empty file_list, returning")
             return
+        
+        logger.debug(f"_add_files_to_queue: Processing {len(file_list)} files")
         
         import time
         from PySide6.QtCore import QThreadPool
@@ -1671,25 +1774,80 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         if worker.resume_all:
             self.transfer_queue_widget.set_group_conflict_action(group_id, "resume_all")
         
-        for source_path, dest_path, command in file_list:
-            # Use DirectTransferWorker instead of add_sftp_job for direct session-based API
-            transfer_worker = DirectTransferWorker(
-                worker.session_id,
+        # Start transfers with small delay between each to avoid overwhelming the server
+        import threading
+        
+        # Get credentials once
+        creds = get_credentials(worker.session_id)
+        hostname = creds.get('hostname', '')
+        username = creds.get('username', '')
+        port = creds.get('port', 22)
+        password = creds.get('password', '')
+        key = creds.get('key', '')
+        
+        for idx, (source_path, dest_path, command) in enumerate(file_list):
+            # Generate transfer_id
+            transfer_id = f"upload_{idx}_{int(time.time() * 1000)}"
+            
+            # Add display entry using signal for thread safety
+            self.transfer_queue_widget.signal_add_transfer_display.emit((
+                transfer_id,
                 source_path,
                 dest_path,
                 worker.is_source_remote,
                 worker.is_dest_remote,
-                command
-            )
-            transfer_worker.signals.error.connect(
-                lambda err, sp=source_path: self.message_signal.emit(f"Transfer error: {err}")
-            )
+                hostname,
+                port,
+                username,
+                password,
+                command,
+                key
+            ))
             
-            QThreadPool.globalInstance().start(transfer_worker)
-            
-            if self.transfer_started:
-                job_id = create_random_integer()
-                self.transfer_started.emit(str(job_id))
+            try:
+                # Create worker
+                transfer_worker = DirectTransferWorker(
+                    worker.session_id,
+                    source_path,
+                    dest_path,
+                    worker.is_source_remote,
+                    worker.is_dest_remote,
+                    command
+                )
+                transfer_worker.transfer_id = transfer_id
+                
+                # Register worker for cancellation
+                self.transfer_queue_widget.register_worker(transfer_id, transfer_worker)
+                
+                # Connect signals for progress tracking
+                transfer_worker.signals.progress.connect(
+                    lambda bd, bt, sp, et, tid=transfer_id:
+                        self.transfer_queue_widget.update_transfer_progress(tid, bd, bt, sp),
+                    type=Qt.QueuedConnection
+                )
+                
+                transfer_worker.signals.finished.connect(
+                    lambda s, f, tid=transfer_id: self.transfer_queue_widget.mark_transfer_complete(tid),
+                    type=Qt.QueuedConnection
+                )
+                
+                transfer_worker.signals.error.connect(
+                    lambda err, tid=transfer_id: self.transfer_queue_widget.mark_transfer_failed(tid, err),
+                    type=Qt.QueuedConnection
+                )
+
+                # Connect conflict signal for overwrite prompting
+                transfer_worker.signals.conflict.connect(
+                    lambda tid, dest, dtype: self.transfer_queue_widget._handle_conflict(tid, dest, dtype),
+                    type=Qt.QueuedConnection
+                )
+                
+                QThreadPool.globalInstance().start(transfer_worker)
+            except Exception as e:
+                import traceback
+                logger.error(f"Error creating/starting worker {transfer_id}: {e}")
+                logger.error(traceback.format_exc())
+                self.transfer_queue_widget.mark_transfer_failed(transfer_id, str(e))
         
         self.transfer_queue_widget.on_discovery_finished()
         
@@ -1712,6 +1870,28 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             self.message_signal.emit("Cancelling transfer...")
             self._current_traversal_worker = None
 
+    def _handle_direct_transfer_progress(self, transfer_id, bytes_done, bytes_total, speed, eta):
+        """Handle progress updates from DirectTransferWorker"""
+        if not hasattr(self, 'transfer_queue_widget') or not self.transfer_queue_widget:
+            return
+        
+        logger.debug(f"_handle_direct_transfer_progress: {transfer_id}, {bytes_done}/{bytes_total}, speed={speed}")
+        
+        # Calculate percentage
+        if bytes_total > 0:
+            value = int((bytes_done / bytes_total) * 100)
+        else:
+            value = 0
+        
+        self.transfer_queue_widget.update_progress(transfer_id, value, speed, eta, bytes_done, bytes_total)
+    
+    def _handle_direct_transfer_finished(self, transfer_id):
+        """Handle transfer finished from DirectTransferWorker"""
+        if not hasattr(self, 'transfer_queue_widget') or not self.transfer_queue_widget:
+            return
+        
+        self.transfer_queue_widget.transfer_finished(transfer_id)
+    
     def prompt_overwrite(self, item_path, include_symlink_option=False):
         """Prompt user for overwrite action"""
         msg_box = QMessageBox()
@@ -1720,13 +1900,14 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         msg_box.setInformativeText("What would you like to do?")
         msg_box.setWindowTitle("Overwrite Confirmation")
 
+        # Standardized button order
         cancel_btn = msg_box.addButton("Cancel All", Qt.MsgRole_RejectRole)
-        skip_btn = msg_box.addButton("Skip", Qt.MsgRole_NoRole)
         skip_all_btn = msg_box.addButton("Skip All", Qt.MsgRole_NoRole)
-        overwrite_btn = msg_box.addButton("Overwrite", Qt.MsgRole_YesRole)
+        skip_btn = msg_box.addButton("Skip", Qt.MsgRole_NoRole)
         overwrite_all_btn = msg_box.addButton("Overwrite All", Qt.MsgRole_YesRole)
-        resume_btn = msg_box.addButton("Resume", Qt.MsgRole_AcceptRole)
+        overwrite_btn = msg_box.addButton("Overwrite", Qt.MsgRole_YesRole)
         resume_all_btn = msg_box.addButton("Resume All", Qt.MsgRole_AcceptRole)
+        resume_btn = msg_box.addButton("Resume", Qt.MsgRole_AcceptRole)
         
         follow_symlinks_checkbox = None
         if include_symlink_option:

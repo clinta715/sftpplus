@@ -495,6 +495,10 @@ class SFTPSessionAPI(QObject):
         self.executor.message.connect(self.message)
         self.executor.finished.connect(self.finished)
     
+    def execute(self, command: SFTPCommand, timeout: float = 60.0) -> Any:
+        """Execute a command and return the result."""
+        return self.executor.execute(command, timeout=timeout)
+    
     def download(self, remote_path: str, local_path: str, 
                  job_id: Optional[str] = None, resume: bool = False) -> Any:
         """Download a file from remote to local"""

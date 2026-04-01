@@ -4,7 +4,7 @@ SFTP Connection Pool
 Provides thread-safe SSH/SFTP connection pooling for reuse across operations.
 Works with both the legacy add_sftp_job API and the new session-based API.
 """
-from threading import Lock
+from threading import Lock, Condition
 import time
 import os
 import paramiko
@@ -55,6 +55,10 @@ class ConnectionPool:
                     cls._instance._last_cleanup = 0
                     cls._instance._discovery_channels_used = 0  # Track discovery channel usage
                     cls._instance._max_discovery_channels = 2  # Reserve up to 2 channels for discovery
+                    # Per-host SSH connection limits
+                    cls._instance._max_connections_per_host: Dict[Tuple, int] = {}
+                    cls._instance._pending_connections: Dict[Tuple, int] = {}
+                    cls._instance._connection_condition = Condition(cls._instance._pool_lock)
         return cls._instance
     
     def get_connection_key(self, hostname: str, port: int, username: str) -> Tuple:
@@ -79,64 +83,113 @@ class ConnectionPool:
         """
         Get or create an SSH connection and an SFTP channel.
         
+        Blocks if the per-host connection limit is reached until a connection
+        becomes available.
+        
         Returns:
             Tuple of (ssh_client, sftp_client)
         """
         conn_key = self.get_connection_key(hostname, port, username)
         
-        with self._pool_lock:
-            if conn_key not in self._pool:
-                self._pool[conn_key] = []
+        while True:
+            action = None
+            conn_to_use = None
+            request_placeholder = None
             
-            conn_list = self._pool[conn_key]
+            with self._connection_condition:
+                # Clean up stale connections
+                if conn_key in self._pool:
+                    conn_list = self._pool[conn_key]
+                    current_time = time.time()
+                    valid_connections = []
+                    for conn_info in conn_list:
+                        age = current_time - conn_info.created_at
+                        is_active = (age < self._max_age and 
+                                   conn_info.ssh.get_transport() and 
+                                   conn_info.ssh.get_transport().is_active())
+                        
+                        if not is_active:
+                            self._close_conn_info(conn_info)
+                            continue
+                        
+                        valid_connections.append(conn_info)
+                    
+                    self._pool[conn_key] = valid_connections
+                    conn_list = valid_connections
+                else:
+                    conn_list = []
+                    self._pool[conn_key] = []
+                
+                # Try to find an existing connection with room
+                for conn_info in conn_list:
+                    total_channels = len(conn_info.busy_sftp_channels) + len(conn_info.idle_sftp_channels)
+                    
+                    if conn_to_use is None and total_channels < self.get_effective_max_channels(for_discovery=False):
+                        conn_to_use = conn_info
+                        request_placeholder = object()
+                        conn_info.busy_sftp_channels.append(request_placeholder)
+                
+                if conn_to_use:
+                    action = 'use_existing'
+                else:
+                    max_conns = self._max_connections_per_host.get(conn_key, 8)
+                    pending = self._pending_connections.get(conn_key, 0)
+                    total_ssh = len(conn_list) + pending
+                    
+                    if total_ssh < max_conns:
+                        action = 'create_new'
+                        self._pending_connections[conn_key] = pending + 1
+                    else:
+                        action = 'wait'
             
-            # 1. Try to find an existing connection with room for a new channel
-            valid_connections = []
-            for conn_info in conn_list:
-                age = time.time() - conn_info.created_at
-                total_channels = len(conn_info.busy_sftp_channels) + len(conn_info.idle_sftp_channels)
-                
-                if not (age < self._max_age and 
-                        conn_info.ssh.get_transport() and 
-                        conn_info.ssh.get_transport().is_active()):
-                    self._close_conn_info(conn_info)
-                    continue
-                
-                if total_channels >= self.get_effective_max_channels(for_discovery=False):
-                    valid_connections.append(conn_info)
-                    continue
-                
+            if action == 'use_existing':
                 try:
-                    sftp = conn_info.ssh.open_sftp()
-                    conn_info.busy_sftp_channels.append(sftp)
-                    conn_info.last_used_at = time.time()
-                    valid_connections.append(conn_info)
-                    return conn_info.ssh, sftp
-                except Exception as e:
-                    valid_connections.append(conn_info)
-                    continue
+                    sftp = conn_to_use.ssh.open_sftp()
+                    with self._pool_lock:
+                        if request_placeholder in conn_to_use.busy_sftp_channels:
+                            idx = conn_to_use.busy_sftp_channels.index(request_placeholder)
+                            conn_to_use.busy_sftp_channels[idx] = sftp
+                        else:
+                            conn_to_use.busy_sftp_channels.append(sftp)
+                    conn_to_use.last_used_at = time.time()
+                    return conn_to_use.ssh, sftp
+                except Exception:
+                    with self._pool_lock:
+                        if request_placeholder in conn_to_use.busy_sftp_channels:
+                            conn_to_use.busy_sftp_channels.remove(request_placeholder)
+                    # Loop back to try again (maybe create new connection)
             
-            self._pool[conn_key] = valid_connections
+            elif action == 'create_new':
+                try:
+                    ssh = self._create_ssh_connection(hostname, port, username, password, key)
+                    sftp = ssh.open_sftp()
+                    
+                    conn_info = ConnectionInfo(
+                        ssh=ssh,
+                        created_at=time.time(),
+                        last_used_at=time.time(),
+                        hostname=hostname,
+                        port=port,
+                        username=username,
+                        busy_sftp_channels=[sftp]
+                    )
+                    
+                    with self._connection_condition:
+                        if conn_key not in self._pool:
+                            self._pool[conn_key] = []
+                        self._pool[conn_key].append(conn_info)
+                        self._pending_connections[conn_key] = max(0, self._pending_connections.get(conn_key, 0) - 1)
+                    
+                    return ssh, sftp
+                except Exception:
+                    with self._connection_condition:
+                        self._pending_connections[conn_key] = max(0, self._pending_connections.get(conn_key, 0) - 1)
+                        self._connection_condition.notify_all()
+                    raise
             
-            # 2. Create new SSH connection
-            try:
-                ssh = self._create_ssh_connection(hostname, port, username, password, key)
-                sftp = ssh.open_sftp()
-                
-                conn_info = ConnectionInfo(
-                    ssh=ssh,
-                    created_at=time.time(),
-                    last_used_at=time.time(),
-                    hostname=hostname,
-                    port=port,
-                    username=username,
-                    busy_sftp_channels=[sftp]
-                )
-                
-                self._pool[conn_key].append(conn_info)
-                return ssh, sftp
-            except Exception as e:
-                raise
+            else:
+                with self._connection_condition:
+                    self._connection_condition.wait(timeout=5.0)
 
     def acquire_discovery_channel(self, hostname: str, port: int, username: str,
                                    password: Optional[str] = None,
@@ -259,25 +312,24 @@ class ConnectionPool:
         """
         conn_key = self.get_connection_key(hostname, port, username)
         
-        with self._pool_lock:
+        with self._connection_condition:
             if conn_key in self._pool:
                 for conn_info in self._pool[conn_key]:
                     if sftp in conn_info.busy_sftp_channels:
                         conn_info.busy_sftp_channels.remove(sftp)
-                        # Always close the SFTP channel - don't reuse stale channels
-                        # to avoid corruption issues
                         try:
                             sftp.close()
                         except (OSError, IOError):
                             pass
                         conn_info.last_used_at = time.time()
+                        self._connection_condition.notify_all()
                         return
             
-            # If not found in any active ConnectionInfo, just close it
             try:
                 sftp.close()
             except (OSError, IOError):
                 pass
+            self._connection_condition.notify_all()
     
     def close_connection(self, hostname: str, port: int, username: str):
         """Close and remove all connections for this host from the pool"""
@@ -342,6 +394,25 @@ class ConnectionPool:
         """Get the total number of pooled SSH connections"""
         with self._pool_lock:
             return sum(len(conns) for conns in self._pool.values())
+    
+    def set_max_connections(self, hostname: str, port: int, username: str, max_conns: int):
+        """Set the maximum number of SSH connections for a given host.
+        
+        Args:
+            max_conns: Max concurrent SSH connections. 0 means unlimited.
+        """
+        conn_key = self.get_connection_key(hostname, port, username)
+        with self._connection_condition:
+            if max_conns <= 0:
+                self._max_connections_per_host.pop(conn_key, None)
+            else:
+                self._max_connections_per_host[conn_key] = max_conns
+            self._connection_condition.notify_all()
+    
+    def get_max_connections(self, hostname: str, port: int, username: str) -> int:
+        """Get the max SSH connections for a host. Returns default (8) if not set."""
+        conn_key = self.get_connection_key(hostname, port, username)
+        return self._max_connections_per_host.get(conn_key, 8)
 
 
 # Global connection pool instance

@@ -293,13 +293,13 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.hostname_combo.setEditable(True)
         self.populate_hostname_combo()  # New method to populate the combo box
 
-        # Initialize spin box
-        self.spinBox = QSpinBox()
-        self.spinBox.setMinimum(1)
-        self.spinBox.setMaximum(20)
-        self.spinBox.setValue(prefs.get("max_concurrent_transfers", 8))
-        self.spinBox.setToolTip("Maximum number of concurrent file transfers")
-        self.spinBox.valueChanged.connect(self.on_value_changed)  # Ensure this slot is implemented
+        # Initialize max SSH connections spin box
+        self.ssh_conn_spinbox = QSpinBox()
+        self.ssh_conn_spinbox.setMinimum(1)
+        self.ssh_conn_spinbox.setMaximum(20)
+        self.ssh_conn_spinbox.setValue(prefs.get("max_ssh_connections_per_host", 8))
+        self.ssh_conn_spinbox.setToolTip("Maximum concurrent SSH connections per host (servers often limit this)")
+        self.ssh_conn_spinbox.valueChanged.connect(self.on_ssh_conn_value_changed)
 
         # Initialize layouts
         self.init_top_bar_layout()
@@ -382,6 +382,13 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.transfer_queue_widget = TransferQueueWidget()
         self.tab_widget.addTab(self.transfer_queue_widget, "📋 Transfers")
         
+        import logging
+        logger = logging.getLogger('sftp')
+        logger.debug(f"Transfers tab added, index: 0, count: {self.tab_widget.count()}")
+        logger.debug(f"TransferQueueWidget created: {self.transfer_queue_widget}")
+        logger.debug(f"transfer_list exists: {hasattr(self.transfer_queue_widget, 'transfer_list')}")
+        logger.debug(f"text_console exists: {hasattr(self.transfer_queue_widget, 'text_console')}")
+        
         # Connect transfer signals for status bar updates and focus
         self.transfer_queue_widget.signal_transfer_started.connect(self._on_transfer_started)
         self.transfer_queue_widget.signal_transfer_completed.connect(self._on_transfer_completed)
@@ -422,8 +429,8 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         # ------------------------------------------------------------------
 
         self.top_bar_layout.addWidget(self.port_selector, 1)
-        self.top_bar_layout.addWidget(QLabel("Concurrent:"), 0)
-        self.top_bar_layout.addWidget(self.spinBox)
+        self.top_bar_layout.addWidget(QLabel("SSH Conn:"), 0)
+        self.top_bar_layout.addWidget(self.ssh_conn_spinbox)
 
         # keep the existing return-pressed shortcuts
         self.username.returnPressed.connect(self.connect_button_pressed)
@@ -808,10 +815,10 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             # if key_paths and self.key_combo.count() > 1:  # More than just '<none>'
             #    self.key_combo.setCurrentIndex(1)  # Select first actual key, not '<none>'
 
-    def on_value_changed(self, value):
+    def on_ssh_conn_value_changed(self, value):
         prefs = get_preferences()
-        prefs.set("max_concurrent_transfers", value)
-        self.update_console(f"Max concurrent transfers set to {value}")
+        prefs.set("max_ssh_connections_per_host", value)
+        self.update_console(f"Max SSH connections per host set to {value}")
         
     def update_console(self, message):
         # Update status bar with latest message
@@ -1247,6 +1254,14 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             self.message_signal.emit("Setting credentials...")
             self.set_credentials_async()
 
+            # Configure connection pool limits
+            from sftp_connection_pool import get_connection_pool
+            from sftp_preferences import get_preferences
+            pool = get_connection_pool()
+            prefs = get_preferences()
+            max_conns = prefs.get("max_ssh_connections_per_host", 8)
+            pool.set_max_connections(self.temp_hostname, self.temp_port, self.temp_username, max_conns)
+
             # Test the connection with actual SFTP operation
             self.message_signal.emit("Testing SFTP connection...")
             try:
@@ -1593,8 +1608,7 @@ Do you want to update the host key and continue connecting?"""
             queued_count = 0
             if hasattr(self, 'transfer_queue_widget'):
                 tw = self.transfer_queue_widget
-                with QMutexLocker(tw._transfer_lock):
-                    active_count = len([t for t in tw.transfers if t.active])
+                active_count = tw.get_active_transfer_count()
                 tw.active_transfers = active_count
                 from sftp_downloadworkerclass import sftp_queue
                 queued_count = sftp_queue.qsize()
@@ -1644,11 +1658,12 @@ def main():
     parser.add_argument("-P", "--port", type=int, default=22, help="Port for the connection (default: 22)")
     parser.add_argument("-K", "--key", help="SSH key")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("--log-file", help="Log file path (default: ~/Library/Logs/sftp_client/sftp.log on macOS)")
     args = parser.parse_args()
 
     # Set up logging
     log_level = logging.DEBUG if args.debug else logging.INFO
-    logger = setup_logging(log_level=log_level)
+    logger = setup_logging(log_level=log_level, log_file=args.log_file)
     logger.info("SFTP Client starting up")
 
     app = QApplication(sys.argv)

@@ -813,27 +813,75 @@ class RemoteFileBrowser(FileBrowser):
                             resume = (not overwrite_all and action_result == "resume")
                             overwrite = (not overwrite_all and action_result == "overwrite")
                             
+                            # Generate transfer_id
+                            transfer_id = f"single_download_{int(time.time() * 1000)}"
+                            
+                            # Add display entry
+                            if resume:
+                                command = "resume"
+                            elif overwrite:
+                                command = "download"
+                            else:
+                                command = "download"
+                            
+                            creds = get_credentials(self.session_id)
+                            hostname = creds.get('hostname', '')
+                            port = creds.get('port', 22)
+                            username = creds.get('username', '')
+                            password = creds.get('password', '')
+                            key = creds.get('key', '')
+                            
+                            self.transfer_queue_widget.add_transfer_display(
+                                transfer_id=transfer_id,
+                                source_path=remote_entry_path,
+                                dest_path=local_entry_path,
+                                is_source_remote=True,
+                                is_destination_remote=False,
+                                hostname=hostname,
+                                port=port,
+                                username=username,
+                                password=password,
+                                command=command,
+                                key=key
+                            )
+                            
                             try:
-                                creds = get_credentials(self.session_id)
-                                if resume:
-                                    command = "resume"
-                                elif overwrite:
-                                    command = "download"  # Overwrite means re-download
-                                else:
-                                    command = "download"
-                                add_sftp_job(
-                                    remote_entry_path, True,  # source is remote
-                                    local_entry_path, False,  # dest is local
-                                    creds.get('hostname', ''),
-                                    creds.get('username', ''),
-                                    creds.get('password', ''),
-                                    creds.get('port', 22),
-                                    command,
-                                    job_id,
-                                    creds.get('key')
+                                # Use DirectTransferWorker instead of add_sftp_job
+                                from sftp_transfer_handler import DirectTransferWorker
+                                transfer_worker = DirectTransferWorker(
+                                    self.session_id,
+                                    remote_entry_path,
+                                    local_entry_path,
+                                    True,   # source is remote
+                                    False,  # dest is local
+                                    command
                                 )
+                                transfer_worker.transfer_id = transfer_id
+                                
+                                # Register and connect signals
+                                self.transfer_queue_widget.register_worker(transfer_id, transfer_worker)
+                                transfer_worker.signals.progress.connect(
+                                    lambda bd, bt, sp, et, tid=transfer_id:
+                                        self.transfer_queue_widget.update_transfer_progress(tid, bd, bt, sp),
+                                    type=Qt.QueuedConnection
+                                )
+                                transfer_worker.signals.finished.connect(
+                                    lambda s, f, tid=transfer_id: self.transfer_queue_widget.mark_transfer_complete(tid),
+                                    type=Qt.QueuedConnection
+                                )
+                                transfer_worker.signals.error.connect(
+                                    lambda err, tid=transfer_id: self.transfer_queue_widget.mark_transfer_failed(tid, err),
+                                    type=Qt.QueuedConnection
+                                )
+                                transfer_worker.signals.conflict.connect(
+                                    lambda tid, dest, dtype: self.transfer_queue_widget._handle_conflict(tid, dest, dtype),
+                                    type=Qt.QueuedConnection
+                                )
+                                
+                                QThreadPool.globalInstance().start(transfer_worker)
                                 self.transfer_started.emit(str(job_id))
                             except Exception as e:
+                                self.transfer_queue_widget.mark_transfer_failed(transfer_id, str(e))
                                 self.message_signal.emit(f"Download failed: {e}")
                             
                             self.message_signal.emit(f"Starting transfer: {remote_entry_path}")
@@ -918,6 +966,10 @@ class RemoteFileBrowser(FileBrowser):
             return
         
         import time
+        from PySide6.QtCore import QThreadPool, QTimer
+        from sftp_transfer_handler import DirectTransferWorker
+        from sftp_creds import get_credentials
+        
         group_id = f"download_{int(time.time() * 1000)}"
         
         self.transfer_queue_widget.start_transfer_group(group_id, len(file_list))
@@ -929,24 +981,75 @@ class RemoteFileBrowser(FileBrowser):
         if worker.resume_all:
             self.transfer_queue_widget.set_group_conflict_action(group_id, "resume_all")
         
-        for source_path, dest_path, command in file_list:
-            job_id = create_random_integer()
-            add_sftp_job(
-                source_path, worker.is_source_remote, dest_path, worker.is_dest_remote,
-                worker.creds.get('hostname', ''),
-                worker.creds.get('username', ''),
-                worker.creds.get('password', ''),
-                worker.creds.get('port', 22),
-                command, job_id, worker.creds.get('key')
-            )
-            self.transfer_queue_widget.add_to_group(job_id, group_id)
+        # Get credentials
+        creds = get_credentials(worker.session_id)
+        hostname = creds.get('hostname', '')
+        port = creds.get('port', 22)
+        username = creds.get('username', '')
+        password = creds.get('password', '')
+        key = creds.get('key', '')
+        
+        for idx, (source_path, dest_path, command) in enumerate(file_list):
+            # Generate transfer_id
+            transfer_id = f"download_{idx}_{int(time.time() * 1000)}"
             
-            if self.transfer_started:
-                self.transfer_started.emit(str(job_id))
+            # Add display entry using signal for thread safety
+            self.transfer_queue_widget.signal_add_transfer_display.emit((
+                transfer_id,
+                source_path,
+                dest_path,
+                worker.is_source_remote,
+                worker.is_dest_remote,
+                hostname,
+                port,
+                username,
+                password,
+                command,
+                key
+            ))
+            
+            # Create and start worker
+            transfer_worker = DirectTransferWorker(
+                worker.session_id,
+                source_path,
+                dest_path,
+                worker.is_source_remote,
+                worker.is_dest_remote,
+                command
+            )
+            transfer_worker.transfer_id = transfer_id
+            
+            # Register for cancellation
+            self.transfer_queue_widget.register_worker(transfer_id, transfer_worker)
+            
+            # Connect signals
+            transfer_worker.signals.progress.connect(
+                lambda bd, bt, sp, et, tid=transfer_id:
+                    self.transfer_queue_widget.update_transfer_progress(tid, bd, bt, sp),
+                type=Qt.QueuedConnection
+            )
+            
+            transfer_worker.signals.finished.connect(
+                lambda s, f, tid=transfer_id: self.transfer_queue_widget.mark_transfer_complete(tid),
+                type=Qt.QueuedConnection
+            )
+            
+            transfer_worker.signals.error.connect(
+                lambda err, tid=transfer_id: self.transfer_queue_widget.mark_transfer_failed(tid, err),
+                type=Qt.QueuedConnection
+            )
+
+            # Connect conflict signal for overwrite prompting
+            transfer_worker.signals.conflict.connect(
+                lambda tid, dest, dtype: self.transfer_queue_widget._handle_conflict(tid, dest, dtype),
+                type=Qt.QueuedConnection
+            )
+            
+            QThreadPool.globalInstance().start(transfer_worker)
         
         self.transfer_queue_widget.on_discovery_finished()
         
-        # Show feedback that items were added to queue
+        # Show feedback
         self.message_signal.emit(f"Added {len(file_list)} item(s) to transfer queue")
 
     def _prompt_batch_overwrite(self, filename, remaining):
@@ -957,12 +1060,13 @@ class RemoteFileBrowser(FileBrowser):
         msg_box.setInformativeText(f"{remaining} files remaining. What would you like to do?")
         msg_box.setWindowTitle("File Exists")
         
-        overwrite_all_btn = msg_box.addButton("Overwrite All", Qt.MsgRole_YesRole)
-        overwrite_btn = msg_box.addButton("Overwrite", Qt.MsgRole_YesRole)
+        # Standardized button order
+        cancel_btn = msg_box.addButton("Cancel All", Qt.MsgRole_RejectRole)
         skip_all_btn = msg_box.addButton("Skip All", Qt.MsgRole_NoRole)
         skip_btn = msg_box.addButton("Skip", Qt.MsgRole_NoRole)
+        overwrite_all_btn = msg_box.addButton("Overwrite All", Qt.MsgRole_YesRole)
+        overwrite_btn = msg_box.addButton("Overwrite", Qt.MsgRole_YesRole)
         resume_all_btn = msg_box.addButton("Resume All", Qt.MsgRole_AcceptRole)
-        cancel_btn = msg_box.addButton("Cancel All", Qt.MsgRole_RejectRole)
         
         msg_box.exec()
         

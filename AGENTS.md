@@ -718,6 +718,46 @@ Local browser tree view buttons now show "Upload" / "Upload All" instead of "Dow
 - `sftp_qt_compat.py` — Added `TextAlignmentRole`, `AlignLeft`, `ScrollBarAlwaysOff`
 - `sftp.py` — Status bar size policy
 
+### Transfer Directory Creation & Concurrent Connection Limits (2026-04-01)
+
+**1. Missing directory creation during transfers:**
+
+`DirectTransferWorker` in `sftp_transfer_handler.py` was missing parent directory creation logic that the legacy `DownloadWorker` had. This caused transfers to fail when the destination path contained directories that didn't exist yet.
+
+**Fix:**
+- Downloads: Added `os.makedirs(local_parent, exist_ok=True)` before downloading (`sftp_transfer_handler.py:785-788`)
+- Uploads: Added `_ensure_remote_dir()` call before uploading (`sftp_transfer_handler.py:753`)
+- New method `_ensure_remote_dir()` walks path components and creates each missing remote directory (`sftp_transfer_handler.py:848-861`)
+
+**2. Per-host SSH connection limits with blocking:**
+
+The connection pool previously created unlimited SSH connections, which could overwhelm servers that limit concurrent connections per user.
+
+**Fix:**
+- Added `_max_connections_per_host` dict to track per-host limits (default 8)
+- Added `_pending_connections` dict to prevent race conditions during SSH creation
+- Added `_connection_condition` (threading.Condition) for blocking/waiting
+- `get_connection()` now loops: reuse existing → create new if under limit → block waiting for release
+- `release_connection()` now calls `notify_all()` to wake waiting threads
+- `set_max_connections()` / `get_max_connections()` API for configuring limits
+
+**3. Removed dead `max_concurrent_transfers` spinner:**
+
+The old "Concurrent:" spinner controlled `max_concurrent_transfers` which only gated the legacy `sftp_queue` path. Since `check_and_start_transfers()` no longer enforces this limit (transfers now start immediately via `DirectTransferWorker`), the spinner was dead UI.
+
+**Fix:**
+- Removed `self.spinBox` and `on_value_changed()` from `sftp.py`
+- Replaced with single "SSH Conn:" spinner (`self.ssh_conn_spinbox`) backed by `max_ssh_connections_per_host` preference
+- `on_ssh_conn_value_changed()` persists the setting
+- `connect()` reads the preference and calls `pool.set_max_connections()` on each connection
+
+**Files Modified:**
+- `sftp_transfer_handler.py` — Directory creation for uploads/downloads
+- `sftp_connection_pool.py` — Per-host connection limits with blocking
+- `sftp_preferences.py` — Added `max_ssh_connections_per_host` default
+- `sftp.py` — Replaced dead spinner with SSH Conn spinner; applied limits on connect
+- `sftp_transfer_queue_widget.py` — Removed `max_concurrent_transfers` check
+
 ### Remote Directory Tracking (CRITICAL)
 
 This has been a recurring source of bugs. Follow these rules:
