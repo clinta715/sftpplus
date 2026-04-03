@@ -267,7 +267,10 @@ class ConnectionsWidget(QWidget):
         """Load details from table row"""
         hostname_item = self.table.item(row, 0)
         if hostname_item:
-            hostname = hostname_item.text()
+            # Get actual hostname from UserRole (not the display name/nickname)
+            hostname = hostname_item.data(Qt.UserRole)
+            if not hostname:
+                hostname = hostname_item.text()
             
             site = get_site_data(hostname)
             if not site:
@@ -355,7 +358,9 @@ class ConnectionsWidget(QWidget):
             if site:
                 # Use nickname if available, otherwise hostname
                 display_name = site.get("nickname") or hostname
-                self.table.setItem(i, 0, QTableWidgetItem(display_name))
+                item = QTableWidgetItem(display_name)
+                item.setData(Qt.UserRole, hostname)  # Store actual hostname
+                self.table.setItem(i, 0, item)
                 self.table.setItem(i, 1, QTableWidgetItem(site.get("username", "")))
                 self.table.setItem(i, 2, QTableWidgetItem(str(site.get("port", 22))))
                 self.table.setItem(i, 3, QTableWidgetItem(site.get("connection_type", "SFTP Browser")))
@@ -412,7 +417,10 @@ class ConnectionsWidget(QWidget):
         if selected_row >= 0:
             hostname_item = self.table.item(selected_row, 0)
             if hostname_item:
-                hostname = hostname_item.text()
+                # Get actual hostname from UserRole (not display name/nickname)
+                hostname = hostname_item.data(Qt.UserRole)
+                if not hostname:
+                    hostname = hostname_item.text()
                 reply = QMessageBox.question(
                     self, "Confirm Delete",
                     f"Delete site '{hostname}'?",
@@ -440,7 +448,10 @@ class ConnectionsWidget(QWidget):
         if not hostname_item:
             return
         
-        original_hostname = hostname_item.text()
+        # Get actual hostname from UserRole (not display name/nickname)
+        original_hostname = hostname_item.data(Qt.UserRole)
+        if not original_hostname:
+            original_hostname = hostname_item.text()
         
         # Find a unique new hostname
         hostnames = get_site_names()
@@ -481,7 +492,10 @@ class ConnectionsWidget(QWidget):
             if selected_row >= 0:
                 hostname_item = self.table.item(selected_row, 0)
                 if hostname_item:
-                    hostname = hostname_item.text()
+                    # Get actual hostname from UserRole (not display name/nickname)
+                    hostname = hostname_item.data(Qt.UserRole)
+                    if not hostname:
+                        hostname = hostname_item.text()
                     port = self.detail_port.text() or "22"
                     
                     host_data["hostnames"][hostname] = hostname
@@ -510,9 +524,12 @@ class ConnectionsWidget(QWidget):
                     in_table = False
                     for row in range(self.table.rowCount()):
                         item = self.table.item(row, 0)
-                        if item and item.text() == hostname:
-                            in_table = True
-                            break
+                        if item:
+                            # Compare actual hostname (UserRole), not display name
+                            actual_hostname = item.data(Qt.UserRole) or item.text()
+                            if actual_hostname == hostname:
+                                in_table = True
+                                break
                     if not in_table:
                         orphaned.append(hostname)
             
@@ -544,13 +561,15 @@ class ConnectionsWidget(QWidget):
                     Qt.MsgBtn_Yes
                 )
                 if reply == Qt.MsgBtn_Yes:
-                    # Get the currently selected hostname
+                    # Get the currently selected hostname (use actual hostname, not display name)
                     selected_row = self.table.currentRow()
                     keep_hostname = None
                     if selected_row >= 0:
                         item = self.table.item(selected_row, 0)
                         if item:
-                            keep_hostname = item.text()
+                            keep_hostname = item.data(Qt.UserRole)
+                            if not keep_hostname:
+                                keep_hostname = item.text()
                     
                     # Remove all duplicates except the one we're keeping
                     for hostname in duplicate_warnings:
@@ -605,7 +624,10 @@ class ConnectionsWidget(QWidget):
             QMessageBox.critical(self, "Error", "Selected site is missing hostname.")
             return
         
-        hostname = hostname_item.text()
+        # Get actual hostname from UserRole (not display name/nickname)
+        hostname = hostname_item.data(Qt.UserRole)
+        if not hostname:
+            hostname = hostname_item.text()
         
         # Read directly from form fields - this ensures we use exactly what the user sees
         # This is important because duplicate hostnames could exist in the data

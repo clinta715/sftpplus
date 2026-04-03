@@ -758,6 +758,23 @@ The old "Concurrent:" spinner controlled `max_concurrent_transfers` which only g
 - `sftp.py` — Replaced dead spinner with SSH Conn spinner; applied limits on connect
 - `sftp_transfer_queue_widget.py` — Removed `max_concurrent_transfers` check
 
+### Nickname Lookup Bug (2026-04-03)
+
+**Bug:** When a site has a nickname configured, selecting it in the Connections widget showed empty fields instead of the saved data.
+
+**Root Cause:**
+- The table displayed nicknames (e.g., "My Server") but stored them as the lookup key
+- The connection data was keyed by actual hostname (e.g., "server.com"), not the nickname
+- Lookup failed because "My Server" didn't exist in the `hostnames` dict
+
+**Fix:**
+- Store actual hostname in `Qt.UserRole` data when populating the table
+- All lookups now read from `UserRole` instead of table display text
+- Falls back to table text if `UserRole` is missing (backward compatibility)
+
+**Files Modified:**
+- `sftp_connections_widget.py` — `_update_table()` stores hostname in UserRole; all lookup methods use UserRole
+
 ### Remote Directory Tracking (CRITICAL)
 
 This has been a recurring source of bugs. Follow these rules:
