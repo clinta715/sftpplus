@@ -11,7 +11,9 @@ from pathlib import Path
 import logging
 
 import paramiko
+import os
 import threading
+DEBUG = os.environ.get('SFTP_DEBUG', '').lower() in ('1', 'true', 'yes')
 
 from sftp_creds import get_credentials, create_random_integer, set_credentials
 from sftp_downloadworkerclass import (create_response_queue, delete_response_queue,
@@ -1213,7 +1215,8 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
 
     def upload_download(self):
         logger.debug("upload_download() CALLED in Browser")
-        print(f"DEBUG: upload_download() CALLED in Browser", file=sys.stderr)
+        if DEBUG:
+            print(f"DEBUG: upload_download() CALLED in Browser", file=sys.stderr)
         creds = get_credentials(self.session_id)
         # current_browser = self.focusWidget()
         current_browser = self.table

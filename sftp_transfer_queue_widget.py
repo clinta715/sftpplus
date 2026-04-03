@@ -7,6 +7,7 @@ from PySide6.QtCore import QThreadPool, QTimer, QMutex, QMutexLocker, Signal, Sl
 import inspect
 import os
 import json
+DEBUG = os.environ.get('SFTP_DEBUG', '').lower() in ('1', 'true', 'yes')
 import queue
 import time
 import logging
@@ -126,7 +127,8 @@ class TransferQueueWidget(QWidget):
     - Hostname indicator for each transfer
     - Full-width progress bars
     """
-    print("DEBUG: TransferQueueWidget class defined", file=sys.stderr)
+    if DEBUG:
+        print("DEBUG: TransferQueueWidget class defined", file=sys.stderr)
     
     # Signals for transfer events
     signal_transfer_started = Signal(int, str)  # (count, message)
@@ -485,7 +487,8 @@ class TransferQueueWidget(QWidget):
 
     def init_ui(self):
         """Initialize the UI layout"""
-        print("DEBUG: init_ui() called", file=sys.stderr)
+        if DEBUG:
+            print("DEBUG: init_ui() called", file=sys.stderr)
         
         # Main layout
         self.main_layout = QVBoxLayout()
@@ -687,7 +690,8 @@ class TransferQueueWidget(QWidget):
         # Set the main layout
         self.setLayout(self.main_layout)
         
-        print(f"DEBUG: init_ui completed, main_layout count: {self.main_layout.count()}", file=sys.stderr)
+        if DEBUG:
+            print(f"DEBUG: init_ui completed, main_layout count: {self.main_layout.count()}", file=sys.stderr)
         
         # Set initial panel collapse state from preferences
         panel_collapsed = prefs.get_bool("transfer_panel_collapsed", False)
@@ -708,7 +712,8 @@ class TransferQueueWidget(QWidget):
     def _add_transfer_display_slot(self, args_tuple):
         """Slot for thread-safe transfer display addition (called via signal from background threads)"""
         transfer_id, source_path, dest_path, is_source_remote, is_destination_remote, hostname, port, username, password, command, key, session_id, group_id = args_tuple
-        print(f"DEBUG: _add_transfer_display_slot called for {transfer_id}", file=sys.stderr)
+        if DEBUG:
+            print(f"DEBUG: _add_transfer_display_slot called for {transfer_id}", file=sys.stderr)
         self.add_transfer_display(
             transfer_id=transfer_id,
             source_path=source_path,
@@ -1365,7 +1370,8 @@ class TransferQueueWidget(QWidget):
         logger = logging.getLogger('sftp')
         
         try:
-            print(f"DEBUG: add_transfer_display called: {transfer_id}", file=sys.stderr)
+            if DEBUG:
+                print(f"DEBUG: add_transfer_display called: {transfer_id}", file=sys.stderr)
             logger.debug(f"add_transfer_display called: {transfer_id} {source_path} -> {dest_path}")
             
             if not transfer_id:
@@ -1419,8 +1425,9 @@ class TransferQueueWidget(QWidget):
             
         except Exception as e:
             import traceback
-            print(f"DEBUG: Error in add_transfer_display: {e}", file=sys.stderr)
-            print(traceback.format_exc(), file=sys.stderr)
+            if DEBUG:
+                print(f"DEBUG: Error in add_transfer_display: {e}", file=sys.stderr)
+                print(traceback.format_exc(), file=sys.stderr)
             self.text_console.append(f"Error adding transfer display: {e}")
     
     def _create_transfer_display(self, transfer_info, status):
