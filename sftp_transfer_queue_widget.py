@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                             QListWidget, QTextEdit, QProgressBar, QSizePolicy,
                             QLabel, QListWidgetItem, QScrollArea, QFrame, QCheckBox,
-                            QMessageBox)
+                            QMessageBox, QMenu, QSpinBox)
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
 from PySide6.QtCore import QThreadPool, QTimer, QMutex, QMutexLocker, Signal, Slot
 import inspect
@@ -67,6 +67,11 @@ class TransferPanelHeader(QWidget):
         self.title_label.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {DARK_THEME['text_primary']};")
         layout.addWidget(self.title_label)
         
+        # Status label
+        self.status_label = QLabel("Idle")
+        self.status_label.setStyleSheet(f"font-size: 11px; color: {DARK_THEME['text_secondary']};")
+        layout.addWidget(self.status_label)
+        
         # Spacing
         layout.addStretch()
         
@@ -95,6 +100,10 @@ class TransferPanelHeader(QWidget):
         self._active_count = count
         self._update_title()
         
+    def set_status_text(self, text: str):
+        """Set the status text (e.g., '3 queued, 2 active')"""
+        self.status_label.setText(text)
+    
     def _update_title(self):
         if self._active_count > 0:
             self.title_label.setText(f"Transfers ({self._active_count} active)")
@@ -178,13 +187,301 @@ class TransferQueueWidget(QWidget):
         self._panel_collapsed = False
         self._console_collapsed = False
         
+        # Concurrent queue system
+        self._pending_display_transfers = []  # List of transfer_info dicts waiting to start
+        self._max_concurrent_transfers = 8   # From preferences
+        self._paused = False                  # Pause state
+        self._paused_by_user = False         # User-initiated pause (vs system)
+        self._session_waiters = {}            # transfer_id -> hostname waiting for session
+        self._queue_save_timer = None         # Debounce timer for saves
+        
+        # Status colors for UI
+        self._status_colors = {
+            'waiting_session': '#FFA500',     # Orange
+            'queued': '#888888',              # Gray
+            'transferring': '#4CAF50',        # Green
+            'complete': '#2196F3',            # Blue
+            'failed': '#F44336',              # Red
+            'paused': '#666666',              # Dark gray
+        }
+        
         # Connect signal for thread-safe transfer display addition
         self.signal_add_transfer_display.connect(
             self._add_transfer_display_slot,
             type=Qt.QueuedConnection
         )
         
+        # Load persisted queue
+        self._load_pending_queue()
+        
         self.init_ui()
+
+    def _insert_pending_by_priority(self, transfer_info):
+        """Insert transfer into queue based on priority (higher = sooner)"""
+        priority = transfer_info['priority']
+        added_time = transfer_info['added_time']
+        
+        insert_pos = len(self._pending_display_transfers)
+        for i, existing in enumerate(self._pending_display_transfers):
+            if existing['priority'] < priority:
+                insert_pos = i
+                break
+            elif existing['priority'] == priority and existing['added_time'] > added_time:
+                insert_pos = i
+                break
+        
+        self._pending_display_transfers.insert(insert_pos, transfer_info)
+    
+    def _check_and_start_queued(self):
+        """Start transfers if under limit and not paused"""
+        if self._paused:
+            return
+        
+        active = len([t for t in self._transfer_displays.values() 
+                      if t.get('status') == 'transferring'])
+        
+        started = 0
+        while (self._pending_display_transfers and 
+               active < self._max_concurrent_transfers):
+            
+            transfer_info = None
+            for t in self._pending_display_transfers:
+                if t['status'] in ('queued',):
+                    transfer_info = t
+                    break
+            
+            if not transfer_info:
+                break
+            
+            self._pending_display_transfers.remove(transfer_info)
+            self._start_queued_transfer(transfer_info)
+            active += 1
+            started += 1
+        
+        if started > 0:
+            self._schedule_queue_save()
+        
+        self._update_queue_status_label()
+    
+    def _start_queued_transfer(self, transfer_info):
+        """Create worker from stored transfer info and start it"""
+        transfer_id = transfer_info['transfer_id']
+        
+        self._update_transfer_display_status(transfer_id, 'transferring')
+        
+        try:
+            from sftp_transfer_handler import DirectTransferWorker
+            worker = DirectTransferWorker(
+                transfer_info['session_id'],
+                transfer_info['source_path'],
+                transfer_info['dest_path'],
+                transfer_info['is_source_remote'],
+                transfer_info['is_destination_remote'],
+                transfer_info['command']
+            )
+            worker.transfer_id = transfer_id
+            
+            self.register_worker(transfer_id, worker)
+            
+            worker.signals.progress.connect(
+                lambda bd, bt, sp, et, tid=transfer_id:
+                    self.update_transfer_progress(tid, bd, bt, sp),
+                type=Qt.QueuedConnection
+            )
+            worker.signals.finished.connect(
+                lambda s, f, tid=transfer_id: self.mark_transfer_complete(tid),
+                type=Qt.QueuedConnection
+            )
+            worker.signals.error.connect(
+                lambda err, tid=transfer_id: self.mark_transfer_failed(tid, err),
+                type=Qt.QueuedConnection
+            )
+            worker.signals.conflict.connect(
+                lambda tid, dest, dtype: self._handle_conflict(tid, dest, dtype),
+                type=Qt.QueuedConnection
+            )
+            
+            QThreadPool.globalInstance().start(worker)
+            
+        except Exception as e:
+            logger.error(f"Error starting queued transfer {transfer_id}: {e}")
+            self.mark_transfer_failed(transfer_id, str(e))
+    
+    def _update_transfer_display_status(self, transfer_id, status):
+        """Update the status display for a transfer"""
+        if transfer_id not in self._transfer_displays:
+            return
+        
+        display = self._transfer_displays[transfer_id]
+        display['status'] = status
+        display['is_active'] = (status == 'transferring')
+        
+        color = self._status_colors.get(status, DARK_THEME['text_primary'])
+        display['status_label'].setText(status.replace('_', ' ').title())
+        display['status_label'].setStyleSheet(f"font-size: 10px; color: {color}; font-weight: 500;")
+        
+        chunk_color = self._status_colors.get(status, '#666666')
+        display['progress_bar'].setStyleSheet(f"""
+            QProgressBar {{
+                border: none;
+                border-radius: 3px;
+                background-color: {DARK_THEME['bg_secondary']};
+                text-align: center;
+                color: white;
+                font-size: 10px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {chunk_color};
+                border-radius: 3px;
+            }}
+        """)
+        
+        if status == 'transferring':
+            display['progress_bar'].setFormat("Transferring...")
+        elif status == 'queued':
+            display['progress_bar'].setFormat("Queued")
+        elif status == 'waiting_session':
+            display['progress_bar'].setFormat("Waiting...")
+        elif status == 'complete':
+            display['progress_bar'].setFormat("100% - Complete")
+        elif status == 'failed':
+            display['progress_bar'].setFormat("Failed")
+    
+    def _update_queue_status_label(self):
+        """Update the queue status label in header"""
+        queued = len([t for t in self._pending_display_transfers 
+                      if t['status'] == 'queued'])
+        waiting = len([t for t in self._pending_display_transfers 
+                       if t['status'] == 'waiting_session'])
+        active = len([t for t in self._transfer_displays.values() 
+                      if t.get('status') == 'transferring'])
+        
+        parts = []
+        if queued > 0:
+            parts.append(f"{queued} queued")
+        if waiting > 0:
+            parts.append(f"{waiting} waiting")
+        if active > 0:
+            parts.append(f"{active} active")
+        
+        text = ", ".join(parts) if parts else "Idle"
+        if hasattr(self, 'header'):
+            self.header.set_status_text(text)
+    
+    def _encrypt_for_queue(self, password):
+        """Encrypt password for queue storage using existing cipher"""
+        if not password:
+            return ''
+        if sftp_hostdataeditor.cipher_suite:
+            try:
+                return sftp_hostdataeditor.cipher_suite.encrypt(password.encode()).decode()
+            except Exception:
+                pass
+        return password
+    
+    def _decrypt_for_queue(self, encrypted_password):
+        """Decrypt password from queue storage"""
+        if not encrypted_password:
+            return ''
+        if sftp_hostdataeditor.cipher_suite:
+            try:
+                return sftp_hostdataeditor.cipher_suite.decrypt(encrypted_password.encode()).decode()
+            except Exception:
+                pass
+        return encrypted_password
+    
+    def _save_pending_queue(self):
+        """Save pending transfers to disk for restoration"""
+        if not self._pending_display_transfers:
+            if os.path.exists(QUEUE_FILE_PATH):
+                try:
+                    os.remove(QUEUE_FILE_PATH)
+                except Exception:
+                    pass
+            return
+        
+        data = []
+        for t in self._pending_display_transfers:
+            if t['status'] in ('queued', 'waiting_session'):
+                data.append({
+                    'transfer_id': t['transfer_id'],
+                    'hostname': t['hostname'],
+                    'port': t['port'],
+                    'username': t['username'],
+                    'password': self._encrypt_for_queue(t.get('password', '')),
+                    'key': self._encrypt_for_queue(t.get('key', '')),
+                    'source_path': t['source_path'],
+                    'dest_path': t['dest_path'],
+                    'is_source_remote': t['is_source_remote'],
+                    'is_destination_remote': t['is_destination_remote'],
+                    'command': t['command'],
+                    'group_id': t.get('group_id'),
+                    'priority': t['priority'],
+                    'status': t['status'],
+                    'added_time': t['added_time'],
+                })
+        
+        try:
+            json_str = json.dumps(data)
+            with open(QUEUE_FILE_PATH, 'w') as f:
+                f.write(json_str)
+            secure_file_permissions(QUEUE_FILE_PATH)
+        except Exception as e:
+            logger.error(f"Error saving queue: {e}")
+    
+    def _schedule_queue_save(self):
+        """Debounced save - wait 1 second after last change"""
+        if self._queue_save_timer:
+            self._queue_save_timer.stop()
+        self._queue_save_timer = QTimer()
+        self._queue_save_timer.setSingleShot(True)
+        self._queue_save_timer.timeout.connect(self._save_pending_queue)
+        self._queue_save_timer.start(1000)
+    
+    def _load_pending_queue(self):
+        """Load pending transfers on startup"""
+        if not os.path.exists(QUEUE_FILE_PATH):
+            return 0
+        
+        try:
+            with open(QUEUE_FILE_PATH, 'r') as f:
+                data = json.loads(f.read())
+            
+            restored = 0
+            for item in data:
+                item['password'] = self._decrypt_for_queue(item.get('password', ''))
+                item['key'] = self._decrypt_for_queue(item.get('key', ''))
+                item['status'] = 'waiting_session'  # Start in waiting state
+                item['added_time'] = item.get('added_time', time.time())
+                item['session_id'] = None
+                
+                self._pending_display_transfers.append(item)
+                
+                # Track waiters
+                self._session_waiters[item['transfer_id']] = item['hostname']
+                restored += 1
+            
+            if restored > 0:
+                self.text_console.append(f"Restored {restored} transfers to queue")
+            
+            return restored
+        except Exception as e:
+            logger.error(f"Error loading queue: {e}")
+            return 0
+    
+    def register_active_session(self, hostname, session_id):
+        """Called when user connects to a host - check for waiting transfers"""
+        if hostname in self._session_waiters.values():
+            waiting = [t for t in self._pending_display_transfers 
+                       if t.get('hostname') == hostname and t.get('status') == 'waiting_session']
+            
+            for t in waiting:
+                t['session_id'] = session_id
+                t['status'] = 'queued'
+                del self._session_waiters[t['transfer_id']]
+            
+            # Try to start
+            self._check_and_start_queued()
 
     def init_ui(self):
         """Initialize the UI layout"""
@@ -255,6 +552,8 @@ class TransferQueueWidget(QWidget):
         self.transfer_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.transfer_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.transfer_list.setMinimumHeight(100)
+        self.transfer_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.transfer_list.customContextMenuRequested.connect(self._show_transfer_context_menu)
         
         # Debug label to show item count
         self._debug_count_label = QLabel("List: 0 | Dict: 0")
@@ -283,6 +582,16 @@ class TransferQueueWidget(QWidget):
         self.clear_button = QPushButton("Clear Completed")
         self.clear_button.setStyleSheet(BUTTON_STYLE_DARK)
         self.clear_button.clicked.connect(self.clear_completed)
+        
+        # Concurrent transfers spinner
+        concurrent_label = QLabel("Concurrent:")
+        concurrent_label.setStyleSheet(f"color: {DARK_THEME['text_secondary']}; font-size: 11px;")
+        self.concurrent_spinner = QSpinBox()
+        self.concurrent_spinner.setRange(1, 20)
+        self.concurrent_spinner.setValue(self._max_concurrent_transfers)
+        self.concurrent_spinner.setToolTip("Maximum concurrent transfers")
+        self.concurrent_spinner.setFixedWidth(50)
+        self.concurrent_spinner.valueChanged.connect(self._on_concurrent_changed)
         
         # Preferences checkboxes
         prefs = get_preferences()
@@ -336,6 +645,8 @@ class TransferQueueWidget(QWidget):
         
         self.control_layout.addWidget(self.pause_button)
         self.control_layout.addWidget(self.stop_button)
+        self.control_layout.addWidget(concurrent_label)
+        self.control_layout.addWidget(self.concurrent_spinner)
         self.control_layout.addWidget(self.clear_on_complete_checkbox)
         self.control_layout.addWidget(self.overwrite_checkbox)
         self.control_layout.addWidget(self.follow_symlinks_checkbox)
@@ -396,7 +707,7 @@ class TransferQueueWidget(QWidget):
         
     def _add_transfer_display_slot(self, args_tuple):
         """Slot for thread-safe transfer display addition (called via signal from background threads)"""
-        transfer_id, source_path, dest_path, is_source_remote, is_destination_remote, hostname, port, username, password, command, key = args_tuple
+        transfer_id, source_path, dest_path, is_source_remote, is_destination_remote, hostname, port, username, password, command, key, session_id, group_id = args_tuple
         print(f"DEBUG: _add_transfer_display_slot called for {transfer_id}", file=sys.stderr)
         self.add_transfer_display(
             transfer_id=transfer_id,
@@ -409,7 +720,9 @@ class TransferQueueWidget(QWidget):
             username=username,
             password=password,
             command=command,
-            key=key
+            key=key,
+            session_id=session_id,
+            group_id=group_id
         )
 
     def toggle_panel(self):
@@ -421,6 +734,14 @@ class TransferQueueWidget(QWidget):
         # Save preference
         prefs = get_preferences()
         prefs.set_bool("transfer_panel_collapsed", self._panel_collapsed)
+        
+    def _on_concurrent_changed(self, value):
+        """Handle concurrent transfers spinner change"""
+        self._max_concurrent_transfers = value
+        prefs = get_preferences()
+        prefs.set_int("max_concurrent_transfers", value)
+        # Try to start more transfers if under limit
+        self._check_and_start_queued()
         
     def toggle_console(self):
         """Toggle the console visibility within the panel"""
@@ -1035,14 +1356,13 @@ class TransferQueueWidget(QWidget):
     
     def add_transfer_display(self, transfer_id, source_path, dest_path, 
                              is_source_remote, is_destination_remote, hostname,
-                             port, username, password, command, key):
+                             port, username, password, command, key,
+                             session_id=None, group_id=None, priority=0):
         """
-        Add a transfer display entry without creating a worker.
-        Used with DirectTransferWorker for unified transfer handling.
+        Add a transfer to the queue (not started immediately if at limit).
         """
         import logging
         logger = logging.getLogger('sftp')
-        import sys
         
         try:
             print(f"DEBUG: add_transfer_display called: {transfer_id}", file=sys.stderr)
@@ -1057,138 +1377,45 @@ class TransferQueueWidget(QWidget):
                 logger.debug(f"add_transfer_display: {transfer_id} already exists")
                 return
             
-            is_upload = is_source_remote and not is_destination_remote
+            # Determine status based on session availability
+            if session_id:
+                status = 'queued'
+            else:
+                status = 'waiting_session'
+                self._session_waiters[transfer_id] = hostname
             
-            # Create list item
-            item = QListWidgetItem()
-            item.setData(Qt.UserRole, transfer_id)
-            
-            # Create widget
-            widget = QWidget()
-            widget.setFixedHeight(60)
-            layout = QVBoxLayout()
-            layout.setContentsMargins(8, 4, 8, 4)
-            layout.setSpacing(2)
-            
-            # Top row: filename and status
-            top_row = QHBoxLayout()
-            top_row.setSpacing(8)
-            
-            file_name = os.path.basename(source_path)
-            direction = "⬆️" if is_upload else "⬇️"
-            file_label = QLabel(f"{direction} {file_name}")
-            file_label.setStyleSheet(f"font-weight: 600; font-size: 12px; color: {DARK_THEME['text_primary']};")
-            file_label.setSizePolicy(Qt.SizePolicy_Expanding, Qt.SizePolicy_Fixed)
-            file_label.setToolTip(f"Source: {source_path}\nDestination: {dest_path}")
-            top_row.addWidget(file_label, stretch=3)
-            
-            status_label = QLabel("Starting...")
-            status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['text_secondary']}; font-weight: 500;")
-            status_label.setAlignment(Qt.AlignRight)
-            top_row.addWidget(status_label)
-            
-            # Cancel button
-            cancel_btn = QPushButton("✕")
-            cancel_btn.setFixedWidth(24)
-            cancel_btn.setFixedHeight(24)
-            cancel_btn.setStyleSheet("""
-                QPushButton {
-                    border: none;
-                    border-radius: 4px;
-                    background-color: transparent;
-                    color: #aaaaaa;
-                    font-size: 12px;
-                }
-                QPushButton:hover {
-                    background-color: #ff4444;
-                    color: white;
-                }
-            """)
-            cancel_btn.clicked.connect(lambda: self._cancel_display_transfer(transfer_id))
-            top_row.addWidget(cancel_btn)
-            
-            layout.addLayout(top_row)
-            
-            # Middle row: paths
-            path_row = QHBoxLayout()
-            path_label = QLabel(f"<span style='color: {DARK_THEME['text_secondary']}; font-size: 9px;'>{source_path[:40]}... → {dest_path[:40]}...</span>")
-            path_label.setSizePolicy(Qt.SizePolicy_Expanding, Qt.SizePolicy_Fixed)
-            path_row.addWidget(path_label)
-            layout.addLayout(path_row)
-            
-            # Bottom row: progress bar + speed/eta
-            bottom_row = QHBoxLayout()
-            bottom_row.setSpacing(8)
-            
-            progress_bar = QProgressBar()
-            progress_bar.setStyleSheet(f"""
-                QProgressBar {{
-                    border: none;
-                    border-radius: 3px;
-                    background-color: {DARK_THEME['bg_secondary']};
-                    text-align: center;
-                    color: white;
-                    font-size: 10px;
-                }}
-                QProgressBar::chunk {{
-                    background-color: {DARK_THEME['accent_green']};
-                    border-radius: 3px;
-                }}
-            """)
-            progress_bar.setFixedHeight(16)
-            bottom_row.addWidget(progress_bar, stretch=3)
-            
-            speed_label = QLabel("-")
-            speed_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['text_primary']}; font-weight: 500;")
-            speed_label.setAlignment(Qt.AlignRight)
-            speed_label.setFixedWidth(80)
-            bottom_row.addWidget(speed_label)
-            
-            eta_label = QLabel("-")
-            eta_label.setStyleSheet(f"font-size: 9px; color: {DARK_THEME['text_secondary']};")
-            eta_label.setAlignment(Qt.AlignRight)
-            eta_label.setFixedWidth(50)
-            bottom_row.addWidget(eta_label)
-            
-            layout.addLayout(bottom_row)
-            
-            widget.setLayout(layout)
-            item.setSizeHint(widget.sizeHint())
-            
-            # Add to list
-            self.transfer_list.addItem(item)
-            self.transfer_list.setItemWidget(item, widget)
-            
-            print(f"DEBUG: Added item to transfer_list, count now: {self.transfer_list.count()}", file=sys.stderr)
-            logger.debug(f"Added transfer display: transfer_list count = {self.transfer_list.count()}")
-            
-            # Update debug label
-            if hasattr(self, '_debug_count_label'):
-                self._debug_count_label.setText(f"List: {self.transfer_list.count()} | Dict: {len(self._transfer_displays)}")
-            
-            # Store reference
-            self._transfer_displays[transfer_id] = {
-                'widget': widget,
-                'item': item,
-                'progress_bar': progress_bar,
-                'status_label': status_label,
-                'speed_label': speed_label,
-                'eta_label': eta_label,
-                'source': source_path,
-                'dest': dest_path,
-                'is_active': True,
+            # Create transfer info for queue
+            transfer_info = {
+                'transfer_id': transfer_id,
                 'hostname': hostname,
-                'group_id': self._current_group_id
+                'port': port,
+                'username': username,
+                'password': password,
+                'key': key,
+                'source_path': source_path,
+                'dest_path': dest_path,
+                'is_source_remote': is_source_remote,
+                'is_destination_remote': is_destination_remote,
+                'command': command,
+                'group_id': group_id or self._current_group_id,
+                'priority': priority,
+                'status': status,
+                'session_id': session_id,
+                'added_time': time.time(),
             }
             
-            # Update counts
-            with QMutexLocker(self._active_transfers_lock):
-                self.active_transfers += 1
-            self.update_overall_progress()
+            # Insert by priority
+            self._insert_pending_by_priority(transfer_info)
             
-            self.signal_transfer_started.emit(1, f"Transfer started: {source_path}")
+            # Create UI with appropriate status
+            self._create_transfer_display(transfer_info, status)
             
-            self.text_console.append(f"Transfer started: {file_name}")
+            # Save to disk
+            self._schedule_queue_save()
+            
+            # Try to start
+            if not self._paused:
+                self._check_and_start_queued()
             
         except Exception as e:
             import traceback
@@ -1196,11 +1423,169 @@ class TransferQueueWidget(QWidget):
             print(traceback.format_exc(), file=sys.stderr)
             self.text_console.append(f"Error adding transfer display: {e}")
     
+    def _create_transfer_display(self, transfer_info, status):
+        """Create transfer display UI"""
+        transfer_id = transfer_info['transfer_id']
+        source_path = transfer_info['source_path']
+        dest_path = transfer_info['dest_path']
+        hostname = transfer_info['hostname']
+        
+        is_upload = transfer_info['is_source_remote'] and not transfer_info['is_destination_remote']
+        
+        # Create list item
+        item = QListWidgetItem()
+        item.setData(Qt.UserRole, transfer_id)
+        
+        # Create widget
+        widget = QWidget()
+        widget.setFixedHeight(60)
+        layout = QVBoxLayout()
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(2)
+        
+        # Top row: filename and status
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+        
+        file_name = os.path.basename(source_path)
+        direction = "⬆️" if is_upload else "⬇️"
+        file_label = QLabel(f"{direction} {file_name}")
+        file_label.setStyleSheet(f"font-weight: 600; font-size: 12px; color: {DARK_THEME['text_primary']};")
+        file_label.setSizePolicy(Qt.SizePolicy_Expanding, Qt.SizePolicy_Fixed)
+        file_label.setToolTip(f"Source: {source_path}\nDestination: {dest_path}")
+        top_row.addWidget(file_label, stretch=3)
+        
+        # Status label based on status
+        status_text = status.replace('_', ' ').title()
+        status_color = self._status_colors.get(status, DARK_THEME['text_secondary'])
+        status_label = QLabel(status_text)
+        status_label.setStyleSheet(f"font-size: 10px; color: {status_color}; font-weight: 500;")
+        status_label.setAlignment(Qt.AlignRight)
+        top_row.addWidget(status_label)
+        
+        # Cancel button
+        cancel_btn = QPushButton("✕")
+        cancel_btn.setFixedWidth(24)
+        cancel_btn.setFixedHeight(24)
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                border: none;
+                border-radius: 4px;
+                background-color: transparent;
+                color: #aaaaaa;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #ff4444;
+                color: white;
+            }
+        """)
+        cancel_btn.clicked.connect(lambda: self._cancel_display_transfer(transfer_id))
+        top_row.addWidget(cancel_btn)
+        
+        layout.addLayout(top_row)
+        
+        # Middle row: paths
+        path_row = QHBoxLayout()
+        path_label = QLabel(f"<span style='color: {DARK_THEME['text_secondary']}; font-size: 9px;'>{source_path[:40]}... → {dest_path[:40]}...</span>")
+        path_label.setSizePolicy(Qt.SizePolicy_Expanding, Qt.SizePolicy_Fixed)
+        path_row.addWidget(path_label)
+        layout.addLayout(path_row)
+        
+        # Bottom row: progress bar + speed/eta
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(8)
+        
+        progress_bar = QProgressBar()
+        chunk_color = self._status_colors.get(status, '#666666')
+        progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                border: none;
+                border-radius: 3px;
+                background-color: {DARK_THEME['bg_secondary']};
+                text-align: center;
+                color: white;
+                font-size: 10px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {chunk_color};
+                border-radius: 3px;
+            }}
+        """)
+        progress_bar.setFixedHeight(16)
+        
+        # Set format based on status
+        if status == 'waiting_session':
+            progress_bar.setFormat(f"Waiting for {hostname}...")
+        elif status == 'queued':
+            progress_bar.setFormat("Queued")
+        else:
+            progress_bar.setFormat("Transferring...")
+        
+        bottom_row.addWidget(progress_bar, stretch=3)
+        
+        speed_label = QLabel("-")
+        speed_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['text_primary']}; font-weight: 500;")
+        speed_label.setAlignment(Qt.AlignRight)
+        speed_label.setFixedWidth(80)
+        bottom_row.addWidget(speed_label)
+        
+        eta_label = QLabel("-")
+        eta_label.setStyleSheet(f"font-size: 9px; color: {DARK_THEME['text_secondary']};")
+        eta_label.setAlignment(Qt.AlignRight)
+        eta_label.setFixedWidth(50)
+        bottom_row.addWidget(eta_label)
+        
+        layout.addLayout(bottom_row)
+        
+        widget.setLayout(layout)
+        item.setSizeHint(widget.sizeHint())
+        
+        # Add to list
+        self.transfer_list.addItem(item)
+        self.transfer_list.setItemWidget(item, widget)
+        
+        # Store reference
+        self._transfer_displays[transfer_id] = {
+            'widget': widget,
+            'item': item,
+            'progress_bar': progress_bar,
+            'status_label': status_label,
+            'speed_label': speed_label,
+            'eta_label': eta_label,
+            'source': source_path,
+            'dest': dest_path,
+            'is_active': (status == 'transferring'),
+            'status': status,
+            'hostname': hostname,
+            'group_id': transfer_info.get('group_id')
+        }
+    
     def _cancel_display_transfer(self, transfer_id):
         """Cancel a display-based transfer"""
+        # Check if in pending queue first
+        for i, t in enumerate(self._pending_display_transfers):
+            if t['transfer_id'] == transfer_id:
+                self._pending_display_transfers.pop(i)
+                # Remove from session waiters if present
+                if transfer_id in self._session_waiters:
+                    del self._session_waiters[transfer_id]
+                # Remove display
+                if transfer_id in self._transfer_displays:
+                    display = self._transfer_displays[transfer_id]
+                    display['is_active'] = False
+                    display['status'] = 'cancelled'
+                    display['status_label'].setText("Cancelled")
+                    display['progress_bar'].setValue(0)
+                self._schedule_queue_save()
+                self._update_queue_status_label()
+                return
+        
+        # Cancel if running
         if transfer_id in self._transfer_displays:
             display = self._transfer_displays[transfer_id]
             display['is_active'] = False
+            display['status'] = 'cancelled'
             display['status_label'].setText("Cancelled")
             display['progress_bar'].setValue(0)
             
@@ -1209,7 +1594,65 @@ class TransferQueueWidget(QWidget):
                 worker = self._active_workers[transfer_id]
                 if hasattr(worker, 'cancel'):
                     worker.cancel()
+        
+        # Check for more queued transfers
+        self._check_and_start_queued()
     
+    def _show_transfer_context_menu(self, pos):
+        """Show context menu for transfer at position"""
+        item = self.transfer_list.itemAt(pos)
+        if not item:
+            return
+        
+        transfer_id = item.data(Qt.UserRole)
+        if not transfer_id:
+            return
+        
+        menu = QMenu(self)
+        
+        # Priority submenu
+        priority_menu = menu.addMenu("Priority")
+        top_action = priority_menu.addAction("Move to Top")
+        up_action = priority_menu.addAction("Move Up")
+        down_action = priority_menu.addAction("Move Down")
+        bottom_action = priority_menu.addAction("Move to Bottom")
+        
+        # Connect
+        top_action.triggered.connect(lambda: self._move_transfer(transfer_id, 'top'))
+        up_action.triggered.connect(lambda: self._move_transfer(transfer_id, 'up'))
+        down_action.triggered.connect(lambda: self._move_transfer(transfer_id, 'down'))
+        bottom_action.triggered.connect(lambda: self._move_transfer(transfer_id, 'bottom'))
+        
+        # Cancel action
+        menu.addSeparator()
+        cancel_action = menu.addAction("Cancel")
+        cancel_action.triggered.connect(lambda: self._cancel_display_transfer(transfer_id))
+        
+        menu.exec(self.transfer_list.mapToGlobal(pos))
+    
+    def _move_transfer(self, transfer_id, direction):
+        """Move transfer in queue"""
+        idx = next((i for i, t in enumerate(self._pending_display_transfers) 
+                    if t['transfer_id'] == transfer_id), None)
+        if idx is None:
+            return
+        
+        item = self._pending_display_transfers.pop(idx)
+        
+        if direction == 'top':
+            new_idx = 0
+        elif direction == 'bottom':
+            new_idx = len(self._pending_display_transfers)
+        elif direction == 'up':
+            new_idx = max(0, idx - 1)
+        elif direction == 'down':
+            new_idx = min(len(self._pending_display_transfers), idx + 1)
+        
+        self._pending_display_transfers.insert(new_idx, item)
+        
+        self._schedule_queue_save()
+        self._check_and_start_queued()
+        
     def humanize_bytes(self, b):
         """Convert bytes to human readable format"""
         if b >= 1024**3:
@@ -1271,6 +1714,7 @@ class TransferQueueWidget(QWidget):
 
         display = self._transfer_displays[transfer_id]
         display['is_active'] = False
+        display['status'] = 'complete'
         display['status_label'].setText("Done")
         display['progress_bar'].setValue(100)
         display['progress_bar'].setFormat("100% • Complete")
@@ -1290,6 +1734,9 @@ class TransferQueueWidget(QWidget):
         prefs = get_preferences()
         if prefs.get_bool("clear_completed_on_complete", False):
             QTimer.singleShot(500, self.clear_completed)
+        
+        # Check for more queued transfers
+        self._check_and_start_queued()
 
     def mark_transfer_failed(self, transfer_id, error_message):
         """Mark a display transfer as failed"""
@@ -1298,6 +1745,7 @@ class TransferQueueWidget(QWidget):
 
         display = self._transfer_displays[transfer_id]
         display['is_active'] = False
+        display['status'] = 'failed'
         display['status_label'].setText("Failed")
         display['status_label'].setStyleSheet(f"font-size: 10px; color: {DARK_THEME['error']}; font-weight: 500;")
 
@@ -1315,6 +1763,9 @@ class TransferQueueWidget(QWidget):
         prefs = get_preferences()
         if prefs.get_bool("clear_completed_on_complete", False):
             QTimer.singleShot(500, self.clear_completed)
+        
+        # Check for more queued transfers
+        self._check_and_start_queued()
     def remove_transfer_display(self, transfer_id):
         """Remove a transfer display"""
         if transfer_id in self._transfer_displays:

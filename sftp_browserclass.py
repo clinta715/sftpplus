@@ -1376,48 +1376,10 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                                     username=username,
                                     password=password,
                                     command=command,
-                                    key=key
+                                    key=key,
+                                    session_id=self.session_id
                                 )
                                 logger.debug(f"After add_transfer_display: _transfer_displays has {len(self.transfer_queue_widget._transfer_displays)} entries")
-                                
-                                try:
-                                    # Use DirectTransferWorker instead of add_sftp_job
-                                    from sftp_transfer_handler import DirectTransferWorker
-                                    transfer_worker = DirectTransferWorker(
-                                        self.session_id,
-                                        selected_path,
-                                        remote_entry_path,
-                                        False,  # source is local
-                                        True,   # dest is remote
-                                        command
-                                    )
-                                    transfer_worker.transfer_id = transfer_id
-                                    
-                                    # Register and connect signals
-                                    self.transfer_queue_widget.register_worker(transfer_id, transfer_worker)
-                                    transfer_worker.signals.progress.connect(
-                                        lambda bd, bt, sp, et, tid=transfer_id:
-                                            self.transfer_queue_widget.update_transfer_progress(tid, bd, bt, sp),
-                                        type=Qt.QueuedConnection
-                                    )
-                                    transfer_worker.signals.finished.connect(
-                                        lambda s, f, tid=transfer_id: self.transfer_queue_widget.mark_transfer_complete(tid),
-                                        type=Qt.QueuedConnection
-                                    )
-                                    transfer_worker.signals.error.connect(
-                                        lambda err, tid=transfer_id: self.transfer_queue_widget.mark_transfer_failed(tid, err),
-                                        type=Qt.QueuedConnection
-                                    )
-                                    transfer_worker.signals.conflict.connect(
-                                        lambda tid, dest, dtype: self.transfer_queue_widget._handle_conflict(tid, dest, dtype),
-                                        type=Qt.QueuedConnection
-                                    )
-                                    QThreadPool.globalInstance().start(transfer_worker)
-
-                                    self.transfer_started.emit(str(job_id))
-                                except Exception as e:
-                                    self.transfer_queue_widget.mark_transfer_failed(transfer_id, str(e))
-                                    self.message_signal.emit(f"Upload failed: {e}")
                         has_valid_item = True
             
             except (OSError, IOError, RuntimeError) as e:
@@ -1801,55 +1763,12 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                 username,
                 password,
                 command,
-                key
+                key,
+                worker.session_id,
+                group_id
             ))
             
-            try:
-                # Create worker
-                transfer_worker = DirectTransferWorker(
-                    worker.session_id,
-                    source_path,
-                    dest_path,
-                    worker.is_source_remote,
-                    worker.is_dest_remote,
-                    command
-                )
-                transfer_worker.transfer_id = transfer_id
-                
-                # Register worker for cancellation
-                self.transfer_queue_widget.register_worker(transfer_id, transfer_worker)
-                
-                # Connect signals for progress tracking
-                transfer_worker.signals.progress.connect(
-                    lambda bd, bt, sp, et, tid=transfer_id:
-                        self.transfer_queue_widget.update_transfer_progress(tid, bd, bt, sp),
-                    type=Qt.QueuedConnection
-                )
-                
-                transfer_worker.signals.finished.connect(
-                    lambda s, f, tid=transfer_id: self.transfer_queue_widget.mark_transfer_complete(tid),
-                    type=Qt.QueuedConnection
-                )
-                
-                transfer_worker.signals.error.connect(
-                    lambda err, tid=transfer_id: self.transfer_queue_widget.mark_transfer_failed(tid, err),
-                    type=Qt.QueuedConnection
-                )
-
-                # Connect conflict signal for overwrite prompting
-                transfer_worker.signals.conflict.connect(
-                    lambda tid, dest, dtype: self.transfer_queue_widget._handle_conflict(tid, dest, dtype),
-                    type=Qt.QueuedConnection
-                )
-                
-                QThreadPool.globalInstance().start(transfer_worker)
-            except Exception as e:
-                import traceback
-                logger.error(f"Error creating/starting worker {transfer_id}: {e}")
-                logger.error(traceback.format_exc())
-                self.transfer_queue_widget.mark_transfer_failed(transfer_id, str(e))
-        
-        self.transfer_queue_widget.on_discovery_finished()
+            self.transfer_queue_widget.on_discovery_finished()
         
         # Show feedback that items were added to queue
         self.message_signal.emit(f"Added {len(file_list)} item(s) to transfer queue")

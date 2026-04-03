@@ -1292,6 +1292,10 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
 
             # NOW initialize the remote browser - connection is fully ready
             self.file_browser_panel.initialize()
+            
+            # Notify transfer queue of new session
+            if hasattr(self, 'transfer_queue_widget') and self.transfer_queue_widget:
+                self.transfer_queue_widget.register_active_session(self.temp_hostname, self.session_id)
 
             # Save connection data synchronously
             self.message_signal.emit("Saving connection data...")

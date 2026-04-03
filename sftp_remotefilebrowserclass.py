@@ -842,47 +842,9 @@ class RemoteFileBrowser(FileBrowser):
                                 username=username,
                                 password=password,
                                 command=command,
-                                key=key
+                                key=key,
+                                session_id=self.session_id
                             )
-                            
-                            try:
-                                # Use DirectTransferWorker instead of add_sftp_job
-                                from sftp_transfer_handler import DirectTransferWorker
-                                transfer_worker = DirectTransferWorker(
-                                    self.session_id,
-                                    remote_entry_path,
-                                    local_entry_path,
-                                    True,   # source is remote
-                                    False,  # dest is local
-                                    command
-                                )
-                                transfer_worker.transfer_id = transfer_id
-                                
-                                # Register and connect signals
-                                self.transfer_queue_widget.register_worker(transfer_id, transfer_worker)
-                                transfer_worker.signals.progress.connect(
-                                    lambda bd, bt, sp, et, tid=transfer_id:
-                                        self.transfer_queue_widget.update_transfer_progress(tid, bd, bt, sp),
-                                    type=Qt.QueuedConnection
-                                )
-                                transfer_worker.signals.finished.connect(
-                                    lambda s, f, tid=transfer_id: self.transfer_queue_widget.mark_transfer_complete(tid),
-                                    type=Qt.QueuedConnection
-                                )
-                                transfer_worker.signals.error.connect(
-                                    lambda err, tid=transfer_id: self.transfer_queue_widget.mark_transfer_failed(tid, err),
-                                    type=Qt.QueuedConnection
-                                )
-                                transfer_worker.signals.conflict.connect(
-                                    lambda tid, dest, dtype: self.transfer_queue_widget._handle_conflict(tid, dest, dtype),
-                                    type=Qt.QueuedConnection
-                                )
-                                
-                                QThreadPool.globalInstance().start(transfer_worker)
-                                self.transfer_started.emit(str(job_id))
-                            except Exception as e:
-                                self.transfer_queue_widget.mark_transfer_failed(transfer_id, str(e))
-                                self.message_signal.emit(f"Download failed: {e}")
                             
                             self.message_signal.emit(f"Starting transfer: {remote_entry_path}")
 
