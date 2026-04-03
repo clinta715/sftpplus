@@ -451,12 +451,8 @@ class RemoteFileBrowser(FileBrowser):
                 QMessageBox.information(self, "Delete Complete", summary_msg)
 
             self.model.get_files(force_refresh=True)
+            self.notify_observers()
         
-        worker.signals.progress.connect(on_progress)
-        worker.signals.finished.connect(on_finished)
-        
-        QThreadPool.globalInstance().start(worker)
-
         worker.signals.progress.connect(on_progress)
         worker.signals.finished.connect(on_finished)
 
@@ -859,9 +855,8 @@ class RemoteFileBrowser(FileBrowser):
         if not has_valid_item:
             self.message_signal.emit("No valid items selected.")
 
-        # Force refresh after operations
-        # Note: invalidate_cache is redundant since get_files with force_refresh=True bypasses cache
-        self.model.get_files(force_refresh=True)
+        # Note: Don't refresh here - transfers are async and will trigger refresh on completion
+        # via transfer_queue_widget.notify_observees() -> model.get_files(force_refresh=True)
 
     def download_directory(self,
                         source_directory: str,

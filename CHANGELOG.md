@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tree View Context Menu**: Added Rename and Delete options to tree view right-click menu
 
 ### Fixed
+- **Delete Dialog Duplicate**: Fixed bug where delete completion dialog showed multiple times. Root cause was duplicate worker start in `sftp_remotefilebrowserclass.py` (lines 458 and 463 both called `QThreadPool.globalInstance().start(worker)`).
+- **View Refresh After Operations**: Fixed views not updating correctly after uploads/renames/deletes. Root cause was `get_files(force_refresh=True)` called immediately after queueing async transfers - now transfers trigger refresh via `notify_observees()` on completion. Also added missing `notify_observers()` call in remote delete callback so local browser refreshes too.
 - **Local Terminal Redesign**: Complete rewrite from PTY-based to QProcess-based architecture. Fixes prompt-redraw bug caused by `TERM=dumb` with fish/bash shells. The new design uses `QProcess` with pipes, built-in line editing, command history, and file path tab completion. Cross-platform (Windows, macOS, Linux).
 - **Active Browser Detection**: Toolbar buttons now correctly detect which browser (local/remote) was last clicked
 - **Tree Download Path**: Tree view downloads now create subfolders instead of flattening directory structure
