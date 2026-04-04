@@ -496,26 +496,39 @@ class ConnectionsWidget(QWidget):
             if selected_row >= 0:
                 hostname_item = self.table.item(selected_row, 0)
                 if hostname_item:
-                    # Get actual hostname from UserRole (not display name/nickname)
-                    hostname = hostname_item.data(Qt.UserRole)
-                    if not hostname:
-                        hostname = hostname_item.text()
+                    old_hostname = hostname_item.data(Qt.UserRole)
+                    if not old_hostname:
+                        old_hostname = hostname_item.text()
+                    new_hostname = self.detail_hostname.text().strip()
+                    if not new_hostname:
+                        new_hostname = old_hostname
                     port = self.detail_port.text() or "22"
                     
-                    host_data["hostnames"][hostname] = hostname
-                    host_data["usernames"][hostname] = self.detail_username.text()
-                    host_data["passwords"][hostname] = self.detail_password.text()
-                    host_data["ports"][hostname] = int(port)
-                    host_data["key"][hostname] = self.detail_key.text()
-                    host_data["connection_type"][hostname] = self.detail_connection_type.currentText()
-                    host_data["initial_remote_dir"][hostname] = self.detail_remote_dir.text()
-                    host_data["initial_local_dir"][hostname] = self.detail_local_dir.text()
-                    host_data["ssh_commands"][hostname] = self.detail_ssh_commands.text()
-                    host_data["follow_symlinks"][hostname] = self.detail_follow_symlinks.isChecked()
+                    # If hostname changed, remove old entry and re-key under new hostname
+                    if new_hostname != old_hostname:
+                        for key in ["hostnames", "usernames", "passwords", "ports", "key",
+                                   "connection_type", "initial_remote_dir", "initial_local_dir",
+                                   "bookmarks", "ssh_commands", "follow_symlinks", "nicknames"]:
+                            if key in host_data and old_hostname in host_data[key]:
+                                host_data[key][new_hostname] = host_data[key].pop(old_hostname)
+                    
+                    host_data["hostnames"][new_hostname] = new_hostname
+                    host_data["usernames"][new_hostname] = self.detail_username.text()
+                    host_data["passwords"][new_hostname] = self.detail_password.text()
+                    host_data["ports"][new_hostname] = int(port)
+                    host_data["key"][new_hostname] = self.detail_key.text()
+                    host_data["connection_type"][new_hostname] = self.detail_connection_type.currentText()
+                    host_data["initial_remote_dir"][new_hostname] = self.detail_remote_dir.text()
+                    host_data["initial_local_dir"][new_hostname] = self.detail_local_dir.text()
+                    host_data["ssh_commands"][new_hostname] = self.detail_ssh_commands.text()
+                    host_data["follow_symlinks"][new_hostname] = self.detail_follow_symlinks.isChecked()
                     
                     nickname = self.detail_nickname.text().strip()
                     if nickname:
-                        host_data["nicknames"][hostname] = nickname
+                        host_data["nicknames"][new_hostname] = nickname
+                    
+                    # Update UserRole so subsequent operations use the new hostname
+                    hostname_item.setData(Qt.UserRole, new_hostname)
             
             # Remove orphaned entries (empty hostnames or hostnames that were deleted from table)
             # Don't remove "new_site_*" entries - they are pending new sites user is creating
@@ -629,12 +642,11 @@ class ConnectionsWidget(QWidget):
             return
         
         # Read from form field - this is what user entered (not UserRole which may be placeholder)
-        hostname = self.detail_hostname.text()
-        if not hostname:
-            # Fallback to UserRole/text if form is empty
-            hostname = hostname_item.data(Qt.UserRole)
-            if not hostname:
-                hostname = hostname_item.text()
+        hostname = self.detail_hostname.text().strip()
+        if not hostname or hostname.startswith("new_site_"):
+            QMessageBox.warning(self, "Invalid Hostname", "Please enter a valid hostname or IP address before connecting.")
+            self.detail_hostname.setFocus()
+            return
         
         # Read directly from form fields - this ensures we use exactly what the user sees
         # This is important because duplicate hostnames could exist in the data
