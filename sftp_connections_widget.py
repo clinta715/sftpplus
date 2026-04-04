@@ -429,7 +429,11 @@ class ConnectionsWidget(QWidget):
                 )
                 if reply == Qt.MsgBtn_Yes:
                     if delete_site(hostname):
+                        # Block signals to prevent stale selection events during rebuild
+                        self.table.blockSignals(True)
                         self._update_table()
+                        self.table.clearSelection()
+                        self.table.blockSignals(False)
                         self._clear_details()
                         self._set_details_enabled(False)
                     else:
