@@ -628,10 +628,13 @@ class ConnectionsWidget(QWidget):
             QMessageBox.critical(self, "Error", "Selected site is missing hostname.")
             return
         
-        # Get actual hostname from UserRole (not display name/nickname)
-        hostname = hostname_item.data(Qt.UserRole)
+        # Read from form field - this is what user entered (not UserRole which may be placeholder)
+        hostname = self.detail_hostname.text()
         if not hostname:
-            hostname = hostname_item.text()
+            # Fallback to UserRole/text if form is empty
+            hostname = hostname_item.data(Qt.UserRole)
+            if not hostname:
+                hostname = hostname_item.text()
         
         # Read directly from form fields - this ensures we use exactly what the user sees
         # This is important because duplicate hostnames could exist in the data
