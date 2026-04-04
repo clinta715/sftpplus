@@ -775,6 +775,77 @@ The old "Concurrent:" spinner controlled `max_concurrent_transfers` which only g
 **Files Modified:**
 - `sftp_connections_widget.py` — `_update_table()` stores hostname in UserRole; all lookup methods use UserRole
 
+### Connection Data Storage & Delete Bug (2026-04-04)
+
+Multiple bugs fixed across `sftp_hostdataeditor.py` and `sftp_connections_widget.py`.
+
+#### sftp_hostdataeditor.py — 10 bugs fixed
+
+**1. Non-atomic file writes (CRITICAL):**
+`save_connection_data()` wrote directly to the data file. A crash mid-write corrupted the entire file (partial JSON).
+
+**Fix:** New `_atomic_write_json()` helper writes to a temp file, flushes+fsyncs, then `os.replace()` for atomic replacement. Also removed the process-wide `os.umask()` hack (replaced by `secure_file_permissions()`).
+
+**2. `_ensure_keys()` defined but never called:**
+The function guarantees all expected dict keys exist, but was never invoked. Callers assuming keys like `nicknames` existed could get `KeyError`.
+
+**Fix:** `_ensure_keys()` now called at the end of every `load_connection_data()` return path.
+
+**3. Silent password loss on decryption failure:**
+If the key file was deleted but the data file remained, all passwords silently became empty strings with no warning.
+
+**Fix:** Decryption failures are counted and logged as a single prominent warning suggesting the key file was lost.
+
+**4. Key regeneration on transient errors:**
+`JSONDecodeError` and `OSError` error paths generated a new encryption key, permanently destroying the old one. A transient file-lock error would make all passwords unrecoverable.
+
+**Fix:** Only `FileNotFoundError` regenerates the key (correct: no data file = no passwords to lose). `JSONDecodeError` and `OSError` preserve the existing key.
+
+**5. `save_connection_data()` drops unknown keys:**
+Constructed a new dict with only known keys, silently discarding any keys added by a newer version.
+
+**Fix:** Reads existing file before save and preserves unknown top-level keys via `_KNOWN_TOP_LEVEL_KEYS` set.
+
+**6. `copy_site()`/`rename_site()` silently overwrite:**
+Neither checked if the target hostname already existed, silently destroying an existing site.
+
+**Fix:** Both return `False` if target exists (rename allows same-as-source no-op). Uses mutable list flag to propagate guard through `update_connection_data`.
+
+**7. Read functions not thread-safe:**
+`get_site_names()`, `get_site_data()`, `get_setting()` called `load_connection_data()` without `_data_lock`, reading partially-written data during concurrent writes.
+
+**Fix:** All three wrapped with `_data_lock`.
+
+**8. Redundant exception catch:**
+`except (InvalidToken, Exception)` — `InvalidToken` is a subclass of `Exception`.
+
+**Fix:** Narrowed to `(InvalidToken, ValueError, UnicodeDecodeError)`.
+
+**9. Module-level init crashes on unwritable config dir:**
+`_load_encryption_key()` at import time would crash the entire app.
+
+**Fix:** Wrapped in try/except with error logging.
+
+#### sftp_connections_widget.py — Delete display bugs
+
+**1. TOCTOU race in `_update_table()` causing blank rows:**
+Called `get_site_names()` (1 load), then `get_site_data()` per hostname (N loads), then `get_setting()` (1 load). If the file changed between calls, a hostname could return `None`, allocating a row that was never populated — visible as a blank row.
+
+**Fix:** Single `load_connection_data()` call reads all data at once.
+
+**2. Stale visual state after deleting second-to-last item:**
+Deleting row 5 of 7 left a blank row 6 and the last item (G) appeared missing. `QTableWidget.setRowCount(6)` on a 7-row table didn't fully clear the removed row's geometry. `_clear_details()` fired `textChanged` signals that cascaded into `_update_selected_row()`.
+
+**Fix:**
+- `setRowCount(0)` before `setRowCount(N)` fully tears down all rows, items, and header labels
+- `setUpdatesEnabled(False/True)` wraps the rebuild to prevent intermediate paints
+- `_clear_details()` blocks signals on each widget before clearing
+- `show_on_startup_checkbox` blocks signals during rebuild to prevent spurious saves
+
+**Files Modified:**
+- `sftp_hostdataeditor.py` — Atomic writes, `_ensure_keys`, key regeneration guards, overwrite guards, thread-safe reads
+- `sftp_connections_widget.py` — `_update_table()`, `delete_row()`, `_clear_details()`
+
 ### Remote Directory Tracking (CRITICAL)
 
 This has been a recurring source of bugs. Follow these rules:

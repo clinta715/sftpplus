@@ -8,6 +8,7 @@ import logging
 import os
 import stat
 import json
+import tempfile
 import threading
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -25,12 +26,19 @@ encryption_key = None
 cipher_suite = None
 _data_lock = threading.Lock()
 
+_KNOWN_TOP_LEVEL_KEYS = {
+    "hostnames", "usernames", "passwords", "ports", "key",
+    "connection_type", "initial_remote_dir", "initial_local_dir",
+    "bookmarks", "ssh_commands", "follow_symlinks", "nicknames",
+    "show_manager_on_startup",
+}
+
 
 def _ensure_keys(host_data):
     """Ensure all expected keys exist in host_data dict."""
     for key in ("hostnames", "usernames", "passwords", "ports", "key",
                 "connection_type", "initial_remote_dir", "initial_local_dir",
-                "bookmarks", "ssh_commands", "follow_symlinks"):
+                "bookmarks", "ssh_commands", "follow_symlinks", "nicknames"):
         if key not in host_data:
             host_data[key] = {}
     if "show_manager_on_startup" not in host_data:
@@ -86,12 +94,42 @@ def _migrate_old_key_format(data):
     return False
 
 
-_load_encryption_key()
+def _atomic_write_json(data, filepath):
+    """Write JSON data to file atomically using a temp file + rename.
+
+    Writes to a temporary file in the same directory, flushes to disk,
+    then atomically replaces the target file.
+    """
+    create_secure_directory(os.path.dirname(filepath))
+    dir_path = os.path.dirname(filepath)
+    fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, filepath)
+        secure_file_permissions(filepath)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+try:
+    _load_encryption_key()
+except Exception as e:
+    logger.error(f"Failed to initialize encryption on import: {e}")
 
 
 def save_connection_data(host_data):
     """
     Save connection data to encrypted JSON file.
+
+    Writes atomically to prevent data corruption on crash.
+    Preserves unknown keys from the existing file for forward compatibility.
 
     Args:
         host_data: Dictionary containing connection information
@@ -107,7 +145,7 @@ def save_connection_data(host_data):
         encrypted_passwords = {k: cipher_suite.encrypt(v.encode()).decode()
                              for k, v in host_data["passwords"].items()}
 
-        data = {
+        new_data = {
             "hostnames": host_data["hostnames"],
             "usernames": host_data["usernames"],
             "passwords": encrypted_passwords,
@@ -120,22 +158,20 @@ def save_connection_data(host_data):
             "bookmarks": host_data.get("bookmarks", {}),
             "ssh_commands": host_data.get("ssh_commands", {}),
             "follow_symlinks": host_data.get("follow_symlinks", {}),
-            "nicknames": host_data.get("nicknames", {})
+            "nicknames": host_data.get("nicknames", {}),
         }
 
-        create_secure_directory(os.path.dirname(DATA_FILE_PATH))
+        try:
+            if os.path.exists(DATA_FILE_PATH):
+                with open(DATA_FILE_PATH, 'r') as f:
+                    existing = json.load(f)
+                for k, v in existing.items():
+                    if k not in _KNOWN_TOP_LEVEL_KEYS and k not in new_data:
+                        new_data[k] = v
+        except (json.JSONDecodeError, OSError) as e:
+            logger.debug(f"Could not read existing data for key preservation: {e}")
 
-        if is_windows():
-            with open(DATA_FILE_PATH, 'w') as f:
-                json.dump(data, f, indent=4)
-        else:
-            old_umask = os.umask(0o077)
-            try:
-                with open(DATA_FILE_PATH, 'w') as f:
-                    json.dump(data, f, indent=4)
-                secure_file_permissions(DATA_FILE_PATH)
-            finally:
-                os.umask(old_umask)
+        _atomic_write_json(new_data, DATA_FILE_PATH)
         return True
     except (OSError, RuntimeError) as e:
         logger.error(f"Failed to save connection data: {e}")
@@ -147,15 +183,11 @@ def load_connection_data():
     Load connection data from encrypted JSON file.
 
     Returns:
-        dict: Connection data dictionary with decrypted passwords
+        dict: Connection data dictionary with decrypted passwords.
+              All expected keys are guaranteed to exist.
     """
     global encryption_key, cipher_suite
-    host_data = {
-        "hostnames": {}, "usernames": {}, "passwords": {}, "ports": {}, "key": {},
-        "connection_type": {}, "initial_remote_dir": {}, "initial_local_dir": {},
-        "show_manager_on_startup": True, "bookmarks": {},
-        "ssh_commands": {}, "follow_symlinks": {}, "nicknames": {}
-    }
+    host_data = {}
 
     try:
         filepath = DATA_FILE_PATH
@@ -180,12 +212,21 @@ def load_connection_data():
 
         encrypted_passwords = data.get("passwords", {})
         host_data["passwords"] = {}
+        decryption_failures = 0
         for k, v in encrypted_passwords.items():
             try:
                 host_data["passwords"][k] = cipher_suite.decrypt(v.encode()).decode()
-            except (InvalidToken, Exception) as e:
+            except (InvalidToken, ValueError, UnicodeDecodeError) as e:
                 logger.warning(f"Failed to decrypt password for '{k}': {e}")
                 host_data["passwords"][k] = ""
+                decryption_failures += 1
+
+        if decryption_failures:
+            logger.warning(
+                f"Failed to decrypt {decryption_failures} password(s). "
+                "The encryption key file may have been lost or regenerated. "
+                "Affected passwords have been cleared."
+            )
 
         host_data["ports"] = {k: int(v) if v else 22 for k, v in data.get("ports", {}).items()}
         host_data["key"] = data.get("key", {})
@@ -198,6 +239,7 @@ def load_connection_data():
         host_data["follow_symlinks"] = data.get("follow_symlinks", {})
         host_data["nicknames"] = data.get("nicknames", {})
 
+        _ensure_keys(host_data)
         return host_data
 
     except FileNotFoundError:
@@ -205,20 +247,25 @@ def load_connection_data():
         encryption_key = Fernet.generate_key()
         _save_encryption_key(encryption_key)
         cipher_suite = Fernet(encryption_key)
+        _ensure_keys(host_data)
         return host_data
 
     except json.JSONDecodeError as e:
         logger.error(f"Corrupted connection data file: {e}")
-        encryption_key = Fernet.generate_key()
-        _save_encryption_key(encryption_key)
-        cipher_suite = Fernet(encryption_key)
+        if cipher_suite is None:
+            encryption_key = Fernet.generate_key()
+            _save_encryption_key(encryption_key)
+            cipher_suite = Fernet(encryption_key)
+        _ensure_keys(host_data)
         return host_data
 
     except (OSError, RuntimeError) as e:
         logger.error(f"Error loading connection data: {e}")
-        encryption_key = Fernet.generate_key()
-        _save_encryption_key(encryption_key)
-        cipher_suite = Fernet(encryption_key)
+        if cipher_suite is None:
+            encryption_key = Fernet.generate_key()
+            _save_encryption_key(encryption_key)
+            cipher_suite = Fernet(encryption_key)
+        _ensure_keys(host_data)
         return host_data
 
 
@@ -246,8 +293,9 @@ def get_site_names():
     Returns:
         list[str]: Hostname strings.
     """
-    host_data = load_connection_data()
-    return list(host_data.get("hostnames", {}).keys())
+    with _data_lock:
+        host_data = load_connection_data()
+        return list(host_data.get("hostnames", {}).keys())
 
 
 def get_site_data(hostname):
@@ -262,22 +310,23 @@ def get_site_data(hostname):
               ssh_commands, follow_symlinks.
               Returns None if hostname not found.
     """
-    host_data = load_connection_data()
-    if hostname not in host_data.get("hostnames", {}):
-        return None
-    return {
-        "hostname": host_data["hostnames"].get(hostname, hostname),
-        "username": host_data["usernames"].get(hostname, ""),
-        "password": host_data["passwords"].get(hostname, ""),
-        "port": host_data["ports"].get(hostname, 22),
-        "key": host_data["key"].get(hostname, ""),
-        "connection_type": host_data.get("connection_type", {}).get(hostname, "SFTP Browser"),
-        "initial_remote_dir": host_data.get("initial_remote_dir", {}).get(hostname, ""),
-        "initial_local_dir": host_data.get("initial_local_dir", {}).get(hostname, ""),
-        "ssh_commands": host_data.get("ssh_commands", {}).get(hostname, ""),
-        "follow_symlinks": host_data.get("follow_symlinks", {}).get(hostname, False),
-        "nickname": host_data.get("nicknames", {}).get(hostname, ""),
-    }
+    with _data_lock:
+        host_data = load_connection_data()
+        if hostname not in host_data.get("hostnames", {}):
+            return None
+        return {
+            "hostname": host_data["hostnames"].get(hostname, hostname),
+            "username": host_data["usernames"].get(hostname, ""),
+            "password": host_data["passwords"].get(hostname, ""),
+            "port": host_data["ports"].get(hostname, 22),
+            "key": host_data["key"].get(hostname, ""),
+            "connection_type": host_data.get("connection_type", {}).get(hostname, "SFTP Browser"),
+            "initial_remote_dir": host_data.get("initial_remote_dir", {}).get(hostname, ""),
+            "initial_local_dir": host_data.get("initial_local_dir", {}).get(hostname, ""),
+            "ssh_commands": host_data.get("ssh_commands", {}).get(hostname, ""),
+            "follow_symlinks": host_data.get("follow_symlinks", {}).get(hostname, False),
+            "nickname": host_data.get("nicknames", {}).get(hostname, ""),
+        }
 
 
 def get_setting(key, default=None):
@@ -290,8 +339,9 @@ def get_setting(key, default=None):
     Returns:
         The setting value, or default.
     """
-    host_data = load_connection_data()
-    return host_data.get(key, default)
+    with _data_lock:
+        host_data = load_connection_data()
+        return host_data.get(key, default)
 
 
 def delete_site(hostname):
@@ -320,15 +370,28 @@ def copy_site(original_hostname, new_hostname):
         new_hostname: The destination hostname for the copy.
 
     Returns:
-        bool: True if successful, False otherwise.
+        bool: True if successful, False otherwise. Returns False if
+              new_hostname already exists or original not found.
     """
+    allowed = [True]
+
     def copier(host_data):
+        if new_hostname in host_data.get("hostnames", {}):
+            allowed[0] = False
+            return
+        if original_hostname not in host_data.get("hostnames", {}):
+            allowed[0] = False
+            return
         for key in host_data:
             if isinstance(host_data[key], dict):
                 if original_hostname in host_data[key]:
                     host_data[key][new_hostname] = host_data[key][original_hostname]
         host_data["hostnames"][new_hostname] = new_hostname
-    return update_connection_data(copier)
+
+    result = update_connection_data(copier)
+    if not result or not allowed[0]:
+        return False
+    return True
 
 
 def rename_site(old_hostname, new_hostname):
@@ -339,11 +402,25 @@ def rename_site(old_hostname, new_hostname):
         new_hostname: The new hostname.
 
     Returns:
-        bool: True if successful, False otherwise.
+        bool: True if successful, False otherwise. Returns False if
+              new_hostname already exists (and differs from old_hostname)
+              or old_hostname not found.
     """
+    allowed = [True]
+
     def migrator(host_data):
+        if new_hostname != old_hostname and new_hostname in host_data.get("hostnames", {}):
+            allowed[0] = False
+            return
+        if old_hostname not in host_data.get("hostnames", {}):
+            allowed[0] = False
+            return
         for key in host_data:
             if isinstance(host_data[key], dict):
                 if old_hostname in host_data[key]:
                     host_data[key][new_hostname] = host_data[key].pop(old_hostname)
-    return update_connection_data(migrator)
+
+    result = update_connection_data(migrator)
+    if not result or not allowed[0]:
+        return False
+    return True

@@ -314,11 +314,17 @@ class ConnectionsWidget(QWidget):
     def _clear_details(self):
         """Clear all detail fields"""
         for widget in [self.detail_nickname, self.detail_hostname, self.detail_username, self.detail_password,
-                      self.detail_port, self.detail_key, self.detail_remote_dir, 
+                      self.detail_port, self.detail_key, self.detail_remote_dir,
                       self.detail_local_dir, self.detail_ssh_commands]:
+            widget.blockSignals(True)
             widget.clear()
+            widget.blockSignals(False)
+        self.detail_connection_type.blockSignals(True)
         self.detail_connection_type.setCurrentIndex(0)
+        self.detail_connection_type.blockSignals(False)
+        self.detail_follow_symlinks.blockSignals(True)
         self.detail_follow_symlinks.setChecked(False)
+        self.detail_follow_symlinks.blockSignals(False)
     
     def _set_details_enabled(self, enabled):
         """Enable/disable detail panel"""
@@ -350,26 +356,38 @@ class ConnectionsWidget(QWidget):
             self.table.item(selected_row, 3).setText(self.detail_connection_type.currentText())
     
     def _update_table(self):
-        """Update table with current host data"""
-        hostnames = get_site_names()
+        """Update table with current host data.
+
+        Uses a single load_connection_data() call to avoid TOCTOU races
+        between get_site_names() and per-host get_site_data() calls.
+        """
+        host_data = load_connection_data()
+        hostnames = list(host_data.get("hostnames", {}).keys())
+
+        self.table.setRowCount(0)
         self.table.setRowCount(len(hostnames))
         for i, hostname in enumerate(hostnames):
-            site = get_site_data(hostname)
-            if site:
-                # Use nickname if available, otherwise hostname
-                display_name = site.get("nickname") or hostname
-                item = QTableWidgetItem(display_name)
-                item.setData(Qt.UserRole, hostname)  # Store actual hostname
-                self.table.setItem(i, 0, item)
-                self.table.setItem(i, 1, QTableWidgetItem(site.get("username", "")))
-                self.table.setItem(i, 2, QTableWidgetItem(str(site.get("port", 22))))
-                self.table.setItem(i, 3, QTableWidgetItem(site.get("connection_type", "SFTP Browser")))
-        
+            display_name = host_data.get("nicknames", {}).get(hostname, "") or hostname
+            item = QTableWidgetItem(display_name)
+            item.setData(Qt.UserRole, hostname)
+            self.table.setItem(i, 0, item)
+            self.table.setItem(i, 1, QTableWidgetItem(
+                host_data.get("usernames", {}).get(hostname, "")))
+            self.table.setItem(i, 2, QTableWidgetItem(
+                str(host_data.get("ports", {}).get(hostname, 22))))
+            self.table.setItem(i, 3, QTableWidgetItem(
+                host_data.get("connection_type", {}).get(hostname, "SFTP Browser")))
+
         count = len(hostnames)
         self.status_label.setText(f"{count} site{'s' if count != 1 else ''} configured")
-        
-        show_on_startup = get_setting("show_manager_on_startup", True)
-        self.show_on_startup_checkbox.setChecked(show_on_startup)
+
+        self.show_on_startup_checkbox.blockSignals(True)
+        self.show_on_startup_checkbox.setChecked(
+            host_data.get("show_manager_on_startup", True))
+        self.show_on_startup_checkbox.blockSignals(False)
+
+        self.table.updateGeometry()
+        self.table.viewport().update()
     
     def add_row(self):
         """Add a new empty row"""
@@ -429,11 +447,13 @@ class ConnectionsWidget(QWidget):
                 )
                 if reply == Qt.MsgBtn_Yes:
                     if delete_site(hostname):
-                        # Block signals to prevent stale selection events during rebuild
+                        self.table.setUpdatesEnabled(False)
                         self.table.blockSignals(True)
                         self._update_table()
                         self.table.clearSelection()
                         self.table.blockSignals(False)
+                        self.table.setUpdatesEnabled(True)
+                        self.table.viewport().update()
                         self._clear_details()
                         self._set_details_enabled(False)
                     else:
