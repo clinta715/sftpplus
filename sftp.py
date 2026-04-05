@@ -394,6 +394,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.transfer_queue_widget.signal_transfer_completed.connect(self._on_transfer_completed)
         self.transfer_queue_widget.signal_transfer_error.connect(self._on_transfer_error)
         self.transfer_queue_widget.signal_transfer_progress.connect(self._on_transfer_progress)
+        self.transfer_queue_widget.signal_overall_progress.connect(self._on_overall_progress)
         
         QTimer.singleShot(500, self.transfer_queue_widget.load_pending_transfers)
         
@@ -911,6 +912,41 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
                 eta_str = f" - {int(eta_sec/3600)}h remaining"
         
         self.status_message.setText(f"Transfer: {percent}% {speed_str}{eta_str}")
+        self.status_message.setStyleSheet("QLabel { color: #a0a0a0; font-size: 11px; }")
+    
+    def _on_overall_progress(self, percent, total_speed, eta_seconds, bytes_done, bytes_total):
+        """Handle overall aggregate progress updates for status bar"""
+        if percent <= 0 and total_speed <= 0:
+            return
+
+        def humanize(b):
+            if b >= 1024**3:
+                return f"{b / 1024**3:.1f} GB"
+            elif b >= 1024**2:
+                return f"{b / 1024**2:.1f} MB"
+            elif b >= 1024:
+                return f"{b / 1024:.1f} KB"
+            else:
+                return f"{b} B"
+
+        parts = [f"{percent}%"]
+        if bytes_total > 0:
+            parts.append(f"{humanize(bytes_done)}/{humanize(bytes_total)}")
+        if total_speed > 0:
+            speed_kbps = total_speed / 1024
+            if speed_kbps >= 1024:
+                parts.append(f"{speed_kbps/1024:.1f} MB/s")
+            else:
+                parts.append(f"{speed_kbps:.0f} KB/s")
+        if eta_seconds > 0:
+            if eta_seconds < 60:
+                parts.append(f"{int(eta_seconds)}s remaining")
+            elif eta_seconds < 3600:
+                parts.append(f"{int(eta_seconds/60)}m remaining")
+            else:
+                parts.append(f"{int(eta_seconds/3600)}h remaining")
+
+        self.status_message.setText(" • ".join(parts))
         self.status_message.setStyleSheet("QLabel { color: #a0a0a0; font-size: 11px; }")
     
     def _switch_to_connection_tab(self, tab_index):

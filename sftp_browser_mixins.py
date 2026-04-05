@@ -4,7 +4,7 @@ Browser Mixins
 Modular functionality for the Browser class, split into logical groups:
 - TreeViewMixin: Directory tree view operations (stubs for subclass override)
 - BookmarkMixin: Directory bookmark management
-- FileOpsMixin: SFTP file operations using SFTPOperations API with caching
+- FileOpsMixin: SFTP file operations using SFTPOperations API (dead code - overridden by Browser)
 - DragDropMixin: Drag and drop support for file transfers
 """
 
@@ -12,7 +12,6 @@ from PySide6.QtWidgets import QMenu
 from PySide6.QtCore import Qt
 import os
 import logging
-import threading
 
 from sftp_creds import get_credentials, sanitize_error_message
 from sftp_operations import SFTPOperations
@@ -71,51 +70,39 @@ class BookmarkMixin:
 
 
 class FileOpsMixin:
-    """Mixin for SFTP file operations using SFTPOperations API with caching"""
+    """Mixin for SFTP file operations using SFTPOperations API.
     
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._sftp_ops_cache = None
-        self._sftp_ops_session_id = None
-        self._sftp_ops_lock = threading.Lock()
-    
+    Note: The Browser class overrides all methods in this mixin via MRO.
+    This mixin is kept for documentation of the intended SFTPOperations-based
+    interface pattern. See sftp_browserclass.py for the active implementations
+    which use session_api instead.
+    """
+
     def get_sftp_operations(self):
-        """Get cached SFTPOperations instance (thread-safe)"""
-        with self._sftp_ops_lock:
-            creds = get_credentials(self.session_id)
-            
-            if (self._sftp_ops_cache is not None and 
-                self._sftp_ops_session_id == self.session_id):
-                return self._sftp_ops_cache
-            
-            self._sftp_ops_cache = SFTPOperations(
-                hostname=creds.get('hostname', ''),
-                username=creds.get('username', ''),
-                password=creds.get('password', ''),
-                port=creds.get('port', 22),
-                key=creds.get('key')
-            )
-            self._sftp_ops_session_id = self.session_id
-            return self._sftp_ops_cache
-    
-    def clear_sftp_cache(self):
-        """Clear cached SFTPOperations instance (thread-safe)"""
-        with self._sftp_ops_lock:
-            if self._sftp_ops_cache is not None:
-                try:
-                    self._sftp_ops_cache.close()
-                except (OSError, IOError, RuntimeError):
-                    pass
-            self._sftp_ops_cache = None
-            self._sftp_ops_session_id = None
-    
+        """Create a new SFTPOperations instance from session credentials"""
+        return self._create_ops()
+
+    def _create_ops(self):
+        """Create a new SFTPOperations instance from session credentials"""
+        creds = get_credentials(self.session_id)
+        return SFTPOperations(
+            hostname=creds.get('hostname', ''),
+            username=creds.get('username', ''),
+            password=creds.get('password', ''),
+            port=creds.get('port', 22),
+            key=creds.get('key')
+        )
+
     def sftp_mkdir(self, remote_path):
         """Create remote directory"""
         try:
-            ops = self.get_sftp_operations()
-            ops.mkdir(remote_path)
-            self.message_signal.emit(f"Created directory: {remote_path}")
-            return True
+            ops = self._create_ops()
+            try:
+                ops.mkdir(remote_path)
+                self.message_signal.emit(f"Created directory: {remote_path}")
+                return True
+            finally:
+                ops.close()
         except (OSError, IOError, RuntimeError) as e:
             self.message_signal.emit(f"Error creating directory: {sanitize_error_message(str(e))}")
             return False
@@ -123,10 +110,13 @@ class FileOpsMixin:
     def sftp_rmdir(self, remote_path):
         """Remove remote directory"""
         try:
-            ops = self.get_sftp_operations()
-            ops.rmdir(remote_path)
-            self.message_signal.emit(f"Removed directory: {remote_path}")
-            return True
+            ops = self._create_ops()
+            try:
+                ops.rmdir(remote_path)
+                self.message_signal.emit(f"Removed directory: {remote_path}")
+                return True
+            finally:
+                ops.close()
         except (OSError, IOError, RuntimeError) as e:
             self.message_signal.emit(f"Error removing directory: {sanitize_error_message(str(e))}")
             return False
@@ -134,10 +124,13 @@ class FileOpsMixin:
     def sftp_remove(self, remote_path):
         """Remove remote file"""
         try:
-            ops = self.get_sftp_operations()
-            ops.remove(remote_path)
-            self.message_signal.emit(f"Deleted: {remote_path}")
-            return True
+            ops = self._create_ops()
+            try:
+                ops.remove(remote_path)
+                self.message_signal.emit(f"Deleted: {remote_path}")
+                return True
+            finally:
+                ops.close()
         except (OSError, IOError, RuntimeError) as e:
             self.message_signal.emit(f"Error deleting file: {sanitize_error_message(str(e))}")
             return False
@@ -145,12 +138,14 @@ class FileOpsMixin:
     def sftp_rename(self, remote_path, new_name):
         """Rename remote file or directory"""
         try:
-            ops = self.get_sftp_operations()
-            ops.rename(remote_path, new_name)
-            
-            self.message_signal.emit(f"Renamed to: {new_name}")
-            self.refresh_files()
-            return True
+            ops = self._create_ops()
+            try:
+                ops.rename(remote_path, new_name)
+                self.message_signal.emit(f"Renamed to: {new_name}")
+                self.refresh_files()
+                return True
+            finally:
+                ops.close()
         except (OSError, IOError, RuntimeError) as e:
             self.message_signal.emit(f"Error renaming: {sanitize_error_message(str(e))}")
             return False
@@ -158,40 +153,55 @@ class FileOpsMixin:
     def sftp_exists(self, path):
         """Check if remote path exists"""
         try:
-            ops = self.get_sftp_operations()
-            return ops.exists(path)
+            ops = self._create_ops()
+            try:
+                return ops.exists(path)
+            finally:
+                ops.close()
         except (OSError, IOError, RuntimeError):
             return False
     
     def is_remote_directory(self, partial_remote_path):
         """Check if path is a directory"""
         try:
-            ops = self.get_sftp_operations()
-            return ops.is_directory(partial_remote_path)
+            ops = self._create_ops()
+            try:
+                return ops.is_directory(partial_remote_path)
+            finally:
+                ops.close()
         except (OSError, IOError, RuntimeError):
             return False
     
     def is_remote_file(self, partial_remote_path):
         """Check if path is a file"""
         try:
-            ops = self.get_sftp_operations()
-            return ops.is_file(partial_remote_path)
+            ops = self._create_ops()
+            try:
+                return ops.is_file(partial_remote_path)
+            finally:
+                ops.close()
         except (OSError, IOError, RuntimeError):
             return False
     
     def sftp_listdir(self, remote_path):
         """List directory contents"""
         try:
-            ops = self.get_sftp_operations()
-            return ops.list(remote_path)
+            ops = self._create_ops()
+            try:
+                return ops.list(remote_path)
+            finally:
+                ops.close()
         except (OSError, IOError, RuntimeError) as e:
             return []
     
     def sftp_listdir_attr(self, remote_path):
         """List directory with attributes"""
         try:
-            ops = self.get_sftp_operations()
-            return ops.list_attr(remote_path)
+            ops = self._create_ops()
+            try:
+                return ops.list_attr(remote_path)
+            finally:
+                ops.close()
         except (OSError, IOError, RuntimeError) as e:
             return []
     

@@ -136,6 +136,7 @@ class TransferQueueWidget(QWidget):
     signal_transfer_error = Signal(int, str)  # (count, message)
     signal_transfer_progress = Signal(int, int, float, float, int, int)  # (transfer_id, percent, speed_bps, eta_sec, bytes_done, bytes_total)
     signal_discovery_progress = Signal(int, int)  # (files_found, dirs_scanned)
+    signal_overall_progress = Signal(int, float, float, int, int)  # (percent, total_speed, eta_seconds, bytes_done, bytes_total)
     
     # Signal for adding transfer display from background threads (single tuple param)
     signal_add_transfer_display = Signal(object)
@@ -284,6 +285,17 @@ class TransferQueueWidget(QWidget):
             worker.transfer_id = transfer_id
             
             self.register_worker(transfer_id, worker)
+
+            group_id = transfer_info.get('group_id')
+            if group_id and group_id in self._transfer_groups:
+                file_size = 0
+                if not transfer_info['is_source_remote']:
+                    try:
+                        file_size = os.path.getsize(transfer_info['source_path'])
+                    except (OSError, IOError):
+                        pass
+                if file_size > 0:
+                    self._transfer_groups[group_id]["total_bytes"] += file_size
             
             worker.signals.progress.connect(
                 lambda bd, bt, sp, et, tid=transfer_id:
@@ -871,19 +883,6 @@ class TransferQueueWidget(QWidget):
         elif action == "cancel":
             self._group_cancel_all.add(group_id)
 
-    def update_group_progress(self, transfer_id, bytes_done):
-        """Update progress for a transfer that's part of a group"""
-        with QMutexLocker(self._transfer_lock):
-            for t in self.transfers:
-                if t.transfer_id == transfer_id and hasattr(t, 'group_id') and t.group_id:
-                    group_id = t.group_id
-                    if group_id in self._transfer_groups:
-                        old_bytes = getattr(t, '_last_bytes_done', 0)
-                        delta = bytes_done - old_bytes
-                        self._transfer_groups[group_id]["completed_bytes"] += delta
-                        t._last_bytes_done = bytes_done
-                    break
-
     def add_observee(self, observee):
         """Add an observer to be notified when transfers complete. Thread-safe."""
         with QMutexLocker(self._observees_lock):
@@ -963,137 +962,128 @@ class TransferQueueWidget(QWidget):
         return count
 
     def update_overall_progress(self):
-        """Update the overall progress bar based on all active transfers"""
+        """Update the overall progress bar based on all active transfers.
+
+        Aggregates both legacy Transfer objects and DirectTransferWorker
+        _transfer_displays entries.
+        """
         try:
-            # Handle discovery phase - show scanning status instead of percentage
             if self._discovery_active:
                 self.overall_progress_widget.setVisible(True)
-                self.overall_progress_bar.setRange(0, 0)  # Indeterminate
+                self.overall_progress_bar.setRange(0, 0)
                 self.overall_progress_bar.setValue(0)
-                
-                # Format discovery status
                 files_str = f"{self._discovery_files_found:,} files"
                 dirs_str = f"{self._discovery_dirs_scanned:,} dirs"
-                label_text = f"Scanning: {files_str} found in {dirs_str}..."
-                self.overall_progress_label.setText(label_text)
+                self.overall_progress_label.setText(f"Scanning: {files_str} found in {dirs_str}...")
                 self.header.set_active_count(0)
+                self.signal_overall_progress.emit(0, 0.0, 0.0, 0, 0)
                 return
-            
-            # Transfer phase - show actual progress
-            active_transfers = [t for t in self.transfers if t.active]
-            
-            if not active_transfers:
+
+            active_legacy = [t for t in self.transfers if t.active]
+            active_display_count = sum(
+                1 for d in self._transfer_displays.values() if d.get('is_active', False)
+            )
+            active_count = len(active_legacy) + active_display_count
+
+            if active_count == 0:
                 self.overall_progress_bar.setRange(0, 100)
                 self.overall_progress_bar.setValue(0)
                 self.overall_progress_label.setText("No active transfers")
                 self.overall_progress_widget.setVisible(False)
                 self.header.set_active_count(0)
-                self._discovery_total_files = None  # Reset discovery state
+                self._discovery_total_files = None
+                self.signal_overall_progress.emit(0, 0.0, 0.0, 0, 0)
                 return
-            
-            # Show overall progress widget when there are active transfers
+
             self.overall_progress_widget.setVisible(True)
             self.overall_progress_bar.setRange(0, 100)
-            self.header.set_active_count(len(active_transfers))
-            
-            # Check if we have an active group to track
+            self.header.set_active_count(active_count)
+
             group = None
             if self._current_group_id and self._current_group_id in self._transfer_groups:
                 group = self._transfer_groups[self._current_group_id]
-            
-            # If we have a group with known total files, show file count progress
+
             if group and group["total_files"] > 0:
-                # Calculate file-based progress for the group
                 completed = group["completed_files"]
                 total = group["total_files"]
                 overall_percent = int((completed / total) * 100)
                 self.overall_progress_bar.setValue(overall_percent)
-                
-                # Sum speed from active transfers
                 total_speed = 0.0
-                for transfer in active_transfers:
+                for transfer in active_legacy:
                     total_speed += getattr(transfer, 'speed_bps', 0.0) or 0.0
-                
-                # Show file count progress
+                for display in self._transfer_displays.values():
+                    if display.get('is_active', False):
+                        total_speed += display.get('speed_bps', 0) or 0
                 label_text = f"Transferring: {completed}/{total} files ({overall_percent}%)"
-                if total_speed > 0:
-                    if total_speed >= 1024 * 1024:
-                        speed_str = f"{total_speed / (1024 * 1024):.1f} MB/s"
-                    elif total_speed >= 1024:
-                        speed_str = f"{total_speed / 1024:.1f} KB/s"
-                    else:
-                        speed_str = f"{total_speed:.0f} B/s"
+                speed_str = self._format_speed(total_speed)
+                if speed_str:
                     label_text += f" • {speed_str}"
-                
                 self.overall_progress_label.setText(label_text)
+                eta_seconds = self._calc_eta(total_speed, group.get("total_bytes", 0) - group.get("completed_bytes", 0))
+                self.signal_overall_progress.emit(overall_percent, total_speed, eta_seconds, group.get("completed_bytes", 0), group.get("total_bytes", 0))
                 return
-            
-            # No group - show traditional bytes-based progress
-            
-            # Calculate total progress
+
             total_bytes_done = 0
             total_bytes = 0
             total_speed = 0.0
-            
-            for transfer in active_transfers:
-                # Get bytes from transfer object
-                done = getattr(transfer, 'bytes_done', 0) or 0
-                total = getattr(transfer, 'bytes_total', 0) or 0
-                speed = getattr(transfer, 'speed_bps', 0.0) or 0.0
-                
-                total_bytes_done += done
-                total_bytes += total
-                total_speed += speed
-            
-            # Calculate overall percentage
-            if total_bytes > 0:
-                overall_percent = int((total_bytes_done / total_bytes) * 100)
-            else:
-                overall_percent = 0
-            
-            # Update progress bar
+
+            for transfer in active_legacy:
+                total_bytes_done += getattr(transfer, 'bytes_done', 0) or 0
+                total_bytes += getattr(transfer, 'bytes_total', 0) or 0
+                total_speed += getattr(transfer, 'speed_bps', 0.0) or 0.0
+
+            for display in self._transfer_displays.values():
+                if display.get('is_active', False):
+                    total_bytes_done += display.get('bytes_done', 0) or 0
+                    total_bytes += display.get('bytes_total', 0) or 0
+                    total_speed += display.get('speed_bps', 0) or 0
+
+            overall_percent = int((total_bytes_done / total_bytes) * 100) if total_bytes > 0 else 0
             self.overall_progress_bar.setValue(overall_percent)
-            
-            # Format speed
-            if total_speed > 0:
-                if total_speed >= 1024 * 1024:
-                    speed_str = f"{total_speed / (1024 * 1024):.1f} MB/s"
-                elif total_speed >= 1024:
-                    speed_str = f"{total_speed / 1024:.1f} KB/s"
-                else:
-                    speed_str = f"{total_speed:.0f} B/s"
-            else:
-                speed_str = ""
-            
-            # Format bytes
-            def humanize_bytes(b):
-                if b >= 1024**3:
-                    return f"{b / 1024**3:.1f} GB"
-                elif b >= 1024**2:
-                    return f"{b / 1024**2:.1f} MB"
-                elif b >= 1024:
-                    return f"{b / 1024:.1f} KB"
-                else:
-                    return f"{b} B"
-            
-            if total_bytes > 0:
-                bytes_str = f"{humanize_bytes(total_bytes_done)}/{humanize_bytes(total_bytes)}"
-            else:
-                bytes_str = ""
-            
-            # Update label
-            count_str = f"{len(active_transfers)} active"
+
+            speed_str = self._format_speed(total_speed)
+            bytes_str = f"{self.humanize_bytes(total_bytes_done)}/{self.humanize_bytes(total_bytes)}" if total_bytes > 0 else ""
+            eta_seconds = self._calc_eta(total_speed, total_bytes - total_bytes_done if total_bytes > total_bytes_done else 0)
+            eta_str = self._format_eta(eta_seconds)
+
+            parts = [f"Overall: {active_count} active"]
+            if bytes_str:
+                parts.append(bytes_str)
             if speed_str:
-                label_text = f"Overall: {count_str} • {bytes_str} • {speed_str}"
-            elif bytes_str:
-                label_text = f"Overall: {count_str} • {bytes_str}"
-            else:
-                label_text = f"Overall: {count_str}"
-            
-            self.overall_progress_label.setText(label_text)
-            
+                parts.append(speed_str)
+            if eta_str:
+                parts.append(eta_str)
+            self.overall_progress_label.setText(" • ".join(parts))
+
+            self.signal_overall_progress.emit(overall_percent, total_speed, eta_seconds, total_bytes_done, total_bytes)
+
         except (OSError, IOError, RuntimeError):
             pass
+
+    def _format_speed(self, speed_bps):
+        if speed_bps <= 0:
+            return ""
+        if speed_bps >= 1024 * 1024:
+            return f"{speed_bps / (1024 * 1024):.1f} MB/s"
+        elif speed_bps >= 1024:
+            return f"{speed_bps / 1024:.1f} KB/s"
+        else:
+            return f"{speed_bps:.0f} B/s"
+
+    def _calc_eta(self, speed_bps, remaining_bytes):
+        if speed_bps > 0 and remaining_bytes > 0:
+            return remaining_bytes / speed_bps
+        return 0.0
+
+    def _format_eta(self, eta_seconds):
+        if eta_seconds <= 0:
+            return ""
+        if eta_seconds < 60:
+            return f"{int(eta_seconds)}s remaining"
+        elif eta_seconds < 3600:
+            return f"{int(eta_seconds / 60)}m remaining"
+        else:
+            return f"{int(eta_seconds / 3600)}h remaining"
 
     def check_and_start_transfers(self):
         """Check for new transfers in queue and start them"""
@@ -1565,7 +1555,10 @@ class TransferQueueWidget(QWidget):
             'is_active': (status == 'transferring'),
             'status': status,
             'hostname': hostname,
-            'group_id': transfer_info.get('group_id')
+            'group_id': transfer_info.get('group_id'),
+            'bytes_done': 0,
+            'bytes_total': 0,
+            'speed_bps': 0,
         }
     
     def _cancel_display_transfer(self, transfer_id):
@@ -1687,9 +1680,11 @@ class TransferQueueWidget(QWidget):
             value = 0
         
         # Update progress bar
+        display['bytes_done'] = bytes_done
+        display['bytes_total'] = bytes_total
+        display['speed_bps'] = speed_bps
+
         display['progress_bar'].setValue(value)
-        
-        # Format progress text: "45% • 2.3 MB / 5.1 MB • 1.2 MB/s"
         done_str = self.humanize_bytes(bytes_done)
         total_str = self.humanize_bytes(bytes_total)
         speed_str = self.humanize_bytes(int(speed_bps)) + "/s" if speed_bps > 0 else "-"
@@ -1713,6 +1708,21 @@ class TransferQueueWidget(QWidget):
             else:
                 eta_str = f"{int(eta_seconds/3600)}h"
             display['eta_label'].setText(eta_str)
+
+        # Store metrics for overall progress aggregation
+        display['bytes_done'] = bytes_done
+        display['bytes_total'] = bytes_total
+        display['speed_bps'] = speed_bps
+
+        group_id = display.get('group_id')
+        if group_id and group_id in self._transfer_groups:
+            old_bytes = display.get('_last_group_bytes', 0)
+            delta = bytes_done - old_bytes
+            if delta > 0:
+                self._transfer_groups[group_id]["completed_bytes"] += delta
+            display['_last_group_bytes'] = bytes_done
+
+        self.update_overall_progress()
     
     def mark_transfer_complete(self, transfer_id):
         """Mark a display transfer as complete"""
@@ -1734,15 +1744,18 @@ class TransferQueueWidget(QWidget):
 
         with QMutexLocker(self._active_transfers_lock):
             self.active_transfers = max(0, self.active_transfers - 1)
+
+        group_id = display.get('group_id')
+        if group_id and group_id in self._transfer_groups:
+            self._transfer_groups[group_id]["completed_files"] += 1
+
         self.update_overall_progress()
 
-        # Auto-clear if preference is enabled
         from sftp_preferences import get_preferences
         prefs = get_preferences()
         if prefs.get_bool("clear_completed_on_complete", False):
             QTimer.singleShot(500, self.clear_completed)
         
-        # Check for more queued transfers
         self._check_and_start_queued()
 
     def mark_transfer_failed(self, transfer_id, error_message):
@@ -1763,15 +1776,18 @@ class TransferQueueWidget(QWidget):
 
         with QMutexLocker(self._active_transfers_lock):
             self.active_transfers = max(0, self.active_transfers - 1)
+
+        group_id = display.get('group_id')
+        if group_id and group_id in self._transfer_groups:
+            self._transfer_groups[group_id]["completed_files"] += 1
+
         self.update_overall_progress()
 
-        # Auto-clear if preference is enabled
         from sftp_preferences import get_preferences
         prefs = get_preferences()
         if prefs.get_bool("clear_completed_on_complete", False):
             QTimer.singleShot(500, self.clear_completed)
         
-        # Check for more queued transfers
         self._check_and_start_queued()
     def remove_transfer_display(self, transfer_id):
         """Remove a transfer display"""

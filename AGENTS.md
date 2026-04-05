@@ -1091,3 +1091,74 @@ Key security improvements:
 3. **No hardcoded defaults**: Removed guest/guest credentials
 4. **Secure temp handling**: atexit cleanup, hidden files, proper permissions
 5. **Sanitized logging**: Private key data removed from debug output
+
+### Browser & Transfer Bug Fixes (2026-04-05)
+
+Multiple bugs fixed across the browser subsystem, transfer queue, and file preview panel.
+
+#### Duplicate Transfer Workers (CRITICAL)
+
+**Bug:** Directory upload/download progress bars flickered between two values.
+
+**Root Cause:** `_add_files_to_queue()` in both `sftp_browserclass.py` and `sftp_remotefilebrowserclass.py` created two `DirectTransferWorker` instances per file:
+1. **Path A:** `signal_add_transfer_display.emit(...)` → deferred via QueuedConnection → `_start_queued_transfer()` creates Worker B
+2. **Path B:** Direct `DirectTransferWorker(...)` + `QThreadPool.globalInstance().start()` creates Worker A
+
+Both workers transferred the same file and emitted progress to the same `transfer_id`'s progress bar.
+
+**Fix:** Removed direct worker creation (Path B). The signal → `_add_transfer_display` → `_start_queued_transfer` pipeline (Path A) already handles everything correctly.
+
+#### Overall Progress Bar Stuck at 0%
+
+**Bug:** The overall progress bar in the transfer tab never updated during directory transfers.
+
+**Root Cause:** The overall progress reads from `_transfer_groups[group_id]` which tracks `completed_files`/`total_files` and `completed_bytes`/`total_bytes`. These counters were only updated for legacy `Transfer` objects, never for `DirectTransferWorker`-based transfers (`_transfer_displays`). Since all transfers now use `DirectTransferWorker`, the counters stayed at 0.
+
+**Fix:**
+- `mark_transfer_complete` and `mark_transfer_failed` now increment `_transfer_groups[group_id]["completed_files"]`
+- `_start_queued_transfer` adds source file size to `_transfer_groups[group_id]["total_bytes"]`
+- `update_transfer_progress` tracks delta byte progress via `_transfer_groups[group_id]["completed_bytes"]`
+- Removed dead `update_group_progress` method (defined but never called)
+
+#### Directory Download Signal Tuple Mismatch
+
+**Bug:** Directory downloads showed no progress display and progress bar stayed at "Queued".
+
+**Root Cause:** `signal_add_transfer_display` emit in `sftp_remotefilebrowserclass.py` passed 11 items but `_add_transfer_display_slot` expects 13 (missing `session_id` and `group_id`). PySide6 silently swallowed the `ValueError`.
+
+**Fix:** Added missing `session_id` and `group_id` to the signal emit tuple.
+
+#### Other Bugs Fixed
+
+1. **`sftp_browserclass.py:1907` — Indentation error in `view_edit_file()`**: Over-indented `if is_remote:` block made entire method body unreachable.
+
+2. **`sftp_browserclass.py:1130-1135` — Double `upload_download` call**: Second call with wrong arguments after file save dialog.
+
+3. **`sftp_browserclass.py:1357` — Wrong command for overwrite upload**: Set `"download"` instead of `"upload"`.
+
+4. **`sftp_file_browser_panel.py:216-238` — `.get()` on tuples**: `RemoteFileTableModel.file_list` stores tuples, not dicts. Every `file_info.get(...)` crashed with `AttributeError`.
+
+5. **`sftp_remotefilebrowserclass.py` — `os.path.join` for remote paths**: On Windows, `os.path.join` produces backslash-separated paths. Remote SFTP paths require forward slashes. Added `_remote_join()` helper.
+
+6. **`sftp_remotefilebrowserclass.py:540-624` — 84 lines of dead code**: Copy-pasted `remove_directory_with_prompt` inside `_remove_remote_directory_recursive` that never executed.
+
+#### Thread Safety Fixes
+
+**`sftp_remotefiletablemodel.py` — Module-level `_sftp_ops_cache`:**
+- Added `_sftp_ops_lock = threading.Lock()` to protect the check-then-set TOCTOU race
+- Added `_clear_sftp_ops()` helper for safe invalidation (close + delete under lock)
+- Fixed mutable cache reference: `cache[path] = list(new_file_list)` instead of `cache[path] = self.file_list`
+
+**`sftp_browser_mixins.py` — Dead caching removed:**
+- Removed `_sftp_ops_cache`, `_sftp_ops_session_id`, `_sftp_ops_lock`, `get_sftp_operations()` (cached), and `clear_sftp_cache()` from `FileOpsMixin`
+- These were all dead code since `Browser` overrides every method via MRO
+- Methods now use `_create_ops()` which creates a fresh `SFTPOperations` per call
+
+**Files Modified:**
+- `sftp_browserclass.py` — Indentation fix, double call fix, wrong command fix, duplicate worker removal
+- `sftp_remotefilebrowserclass.py` — `_remote_join` helper, dead code removal, signal tuple fix, duplicate worker removal
+- `sftp_transfer_queue_widget.py` — Group progress tracking in `mark_transfer_complete`/`mark_transfer_failed`/`update_transfer_progress`/`_start_queued_transfer`, removed dead `update_group_progress`
+- `sftp_remotefiletablemodel.py` — Thread-safe `_sftp_ops_cache` with lock, cache stores copy not reference
+- `sftp_browser_mixins.py` — Removed dead caching, added `_create_ops()`
+- `sftp_file_browser_panel.py` — Fixed `.get()` on tuples, uses index access
+- `sftp.py` — Added `_on_overall_progress` status bar handler

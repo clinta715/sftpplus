@@ -4,6 +4,7 @@ from sftp_qt_compat import Qt
 import base64
 import logging
 import queue
+import threading
 import time
 from PySide6.QtGui import QFont, QColor
 from sftp_creds import get_credentials, create_random_integer
@@ -16,24 +17,36 @@ logger = logging.getLogger('sftp.model')
 
 
 _sftp_ops_cache = {}
+_sftp_ops_lock = threading.Lock()
 
 
 def _get_sftp_operations(session_id):
-    """Get cached SFTPOperations instance for session"""
-    creds = get_credentials(session_id)
-    
-    if session_id in _sftp_ops_cache:
-        return _sftp_ops_cache[session_id]
-    
-    ops = SFTPOperations(
-        hostname=creds.get('hostname', ''),
-        username=creds.get('username', ''),
-        password=creds.get('password', ''),
-        port=creds.get('port', 22),
-        key=creds.get('key')
-    )
-    _sftp_ops_cache[session_id] = ops
-    return ops
+    """Get cached SFTPOperations instance for session (thread-safe)"""
+    with _sftp_ops_lock:
+        if session_id in _sftp_ops_cache:
+            return _sftp_ops_cache[session_id]
+
+        creds = get_credentials(session_id)
+        ops = SFTPOperations(
+            hostname=creds.get('hostname', ''),
+            username=creds.get('username', ''),
+            password=creds.get('password', ''),
+            port=creds.get('port', 22),
+            key=creds.get('key')
+        )
+        _sftp_ops_cache[session_id] = ops
+        return ops
+
+
+def _clear_sftp_ops(session_id):
+    """Close and remove cached SFTPOperations for session (thread-safe)"""
+    with _sftp_ops_lock:
+        ops = _sftp_ops_cache.pop(session_id, None)
+        if ops is not None:
+            try:
+                ops.close()
+            except (OSError, IOError, RuntimeError):
+                pass
 
 def _safe_decode(s, encoding='utf-8', errors='replace'):
     """Safely decode a string or bytes, handling encoding issues"""
@@ -247,7 +260,7 @@ class RemoteFileTableModel(QAbstractTableModel):
 
             logger.debug(f"_on_files_ready: updating file_list, count={len(new_file_list)}")
             self.file_list = new_file_list
-            self.cache[path] = self.file_list
+            self.cache[path] = list(new_file_list)
             self.cache_time[path] = time.time()
             logger.debug("_on_files_ready: calling endResetModel")
             self.endResetModel()
@@ -266,14 +279,7 @@ class RemoteFileTableModel(QAbstractTableModel):
         """Callback for when file listing fails"""
         logger.debug(f"_on_files_error: {path} - {error_msg}")
         
-        # Clear cached operations on error so next attempt gets a fresh connection
-        if self.session_id in _sftp_ops_cache:
-            logger.debug(f"clearing cached SFTPOperations for {self.session_id}")
-            try:
-                _sftp_ops_cache[self.session_id].close()
-            except (OSError, IOError, RuntimeError):
-                pass
-            del _sftp_ops_cache[self.session_id]
+        _clear_sftp_ops(self.session_id)
             
         try:
             self.status_message.emit(f"Error loading {path}: {error_msg}")

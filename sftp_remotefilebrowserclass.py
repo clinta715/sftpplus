@@ -15,6 +15,14 @@ from sftp_creds import (get_credentials, create_random_integer, set_credentials,
 from sftp_downloadworkerclass import add_sftp_job
 from sftp_preferences import get_preferences
 
+
+def _remote_join(base, name):
+    """Join remote path components using forward slashes (SFTP-safe on all platforms)."""
+    base = base.rstrip('/')
+    if not base:
+        return '/' + name
+    return base + '/' + name
+
 # SECURITY: Debug logging to /tmp is DISABLED to prevent sensitive information leakage
 # The /tmp directory is world-readable and could expose file paths and operations
 # Use the icecream (ic) function for debugging instead, which goes to stderr
@@ -386,7 +394,7 @@ class RemoteFileBrowser(FileBrowser):
                     if temp_path:
                         set_credentials(self.session_id, 'current_remote_directory', self.remove_trailing_dot(temp_path))
 
-                full_path = os.path.join(creds.get('current_remote_directory'), filename)
+                full_path = _remote_join(creds.get('current_remote_directory'), filename)
                 selected_paths.append(full_path)
 
         if not selected_paths:
@@ -515,7 +523,7 @@ class RemoteFileBrowser(FileBrowser):
         
         # Remove files
         for entry in files:
-            entry_path = os.path.join(remote_path, entry['filename'])
+            entry_path = _remote_join(remote_path, entry['filename'])
             try:
                 self.sftp_remove(entry_path)
             except PermissionError:
@@ -527,7 +535,7 @@ class RemoteFileBrowser(FileBrowser):
         
         # Recursively remove subdirectories
         for entry in subdirectories:
-            entry_path = os.path.join(remote_path, entry['filename'])
+            entry_path = _remote_join(remote_path, entry['filename'])
             self._remove_remote_directory_recursive(entry_path, _depth + 1)
         
         # Remove the directory itself
@@ -537,90 +545,6 @@ class RemoteFileBrowser(FileBrowser):
             pass
         except OSError as e:
             pass
-        creds = get_credentials(self.session_id)
-        if remote_path is None or remote_path is False:
-            # current_browser = self.focusWidget()
-            current_browser = self.table
-            if current_browser is not None and isinstance(current_browser, QTableView):
-                current_index = current_browser.currentIndex()
-                if current_index.isValid():
-                    # ALWAYS use column 0 for filename
-                    filename_index = current_index.sibling(current_index.row(), 0)
-                    selected_item = current_browser.model().data(filename_index, Qt.DisplayRole)
-                    
-                    # Remove type prefix if present
-                    prefixes = ['[DIR]', '[FILE]', '[LINK]', '📁', '📄', '🔗']
-                    for prefix in prefixes:
-                        if selected_item.startswith(prefix):
-                            selected_item = selected_item[len(prefix):].lstrip()
-                            break
-
-                    if creds.get('current_remote_directory') == '.':
-                        temp_path = self.sftp_getcwd()
-                    else:
-                        temp_path = creds.get('current_remote_directory')
-                    set_credentials(self.session_id, 'current_remote_directory', self.remove_trailing_dot(temp_path))
-                    remote_path = os.path.join(creds.get('current_remote_directory'), selected_item)
-            else:
-                return
-        try:
-            # Check if the remote path exists
-            if not self.sftp_exists(remote_path):
-                self.message_signal.emit(f"Remote path '{remote_path}' does not exist.")
-                return
-            # Check if it's a file
-            if self.is_remote_file(remote_path):
-                self.sftp_remove(remote_path)
-                self.message_signal.emit(f"File '{remote_path}' removed successfully.")
-                return
-            # Get attributes of directory contents
-            directory_contents_attr = self.sftp_listdir_attr(remote_path)
-            if directory_contents_attr is False:
-                self.message_signal.emit(f"Failed to get contents of '{remote_path}'. It might be an empty directory.")
-                # Try to remove the directory even if it's empty
-                self.sftp_rmdir(remote_path)
-                self.message_signal.emit(f"Empty directory '{remote_path}' removed successfully.")
-                return
-            # Separate files and subdirectories
-            # Items are now dicts, not SFTPAttribute objects
-            # Filter out '.', '..', and symlinks
-            subdirectories = [entry for entry in directory_contents_attr 
-                             if stat.S_ISDIR(entry['st_mode']) 
-                             and entry['filename'] not in ['.', '..']]
-            files = [entry for entry in directory_contents_attr 
-                     if stat.S_ISREG(entry['st_mode'])
-                     and entry['filename'] not in ['.', '..']]
-            if (subdirectories or files) and not self.always:
-                response = QMessageBox.question(
-                    None,
-                    'Confirmation',
-                    f"The directory '{remote_path}' contains subdirectories or files. Do you want to remove them all?",
-                    Qt.MsgBtn_Yes | Qt.MsgBtn_No | Qt.MsgBtn_YesToAll,
-                    Qt.MsgBtn_No
-                )
-                if response == Qt.MsgBtn_YesToAll:
-                    self.always = 1
-                if response == Qt.MsgBtn_No:
-                    return
-
-            # Remove files
-            for entry in files:
-                entry_path = os.path.join(remote_path, entry['filename'])
-                self.message_signal.emit(f"Removing file: {entry_path}")
-                self.sftp_remove(entry_path)
-            # Recursively remove subdirectories
-            for entry in subdirectories:
-                entry_path = os.path.join(remote_path, entry['filename'])
-                self.message_signal.emit(f"Recursing into subdirectory: {entry_path}")
-                self.remove_directory_with_prompt(entry_path, self.always, _depth + 1)
-            # Remove the directory
-            self.sftp_rmdir(remote_path)
-            self.message_signal.emit(f"Directory '{remote_path}' removed successfully.")
-        except (OSError, IOError, RuntimeError) as e:
-            self.message_signal.emit(f"remove_directory_with_prompt() error: {e}")
-        finally:
-            # Note: invalidate_cache is redundant since get_files with force_refresh=True bypasses cache
-            self.model.get_files(force_refresh=True)
 
     def upload_download(self, optionalpath=None, local_destination=None):
         """Upload or download files. When optionalpath and local_destination are provided,
@@ -923,9 +847,6 @@ class RemoteFileBrowser(FileBrowser):
             return
         
         import time
-        from PySide6.QtCore import QThreadPool, QTimer
-        from sftp_transfer_handler import DirectTransferWorker
-        from sftp_creds import get_credentials
         
         group_id = f"download_{int(time.time() * 1000)}"
         
@@ -947,10 +868,8 @@ class RemoteFileBrowser(FileBrowser):
         key = creds.get('key', '')
         
         for idx, (source_path, dest_path, command) in enumerate(file_list):
-            # Generate transfer_id
             transfer_id = f"download_{idx}_{int(time.time() * 1000)}"
             
-            # Add display entry using signal for thread safety
             self.transfer_queue_widget.signal_add_transfer_display.emit((
                 transfer_id,
                 source_path,
@@ -962,51 +881,13 @@ class RemoteFileBrowser(FileBrowser):
                 username,
                 password,
                 command,
-                key
-            ))
-            
-            # Create and start worker
-            transfer_worker = DirectTransferWorker(
+                key,
                 worker.session_id,
-                source_path,
-                dest_path,
-                worker.is_source_remote,
-                worker.is_dest_remote,
-                command
-            )
-            transfer_worker.transfer_id = transfer_id
-            
-            # Register for cancellation
-            self.transfer_queue_widget.register_worker(transfer_id, transfer_worker)
-            
-            # Connect signals
-            transfer_worker.signals.progress.connect(
-                lambda bd, bt, sp, et, tid=transfer_id:
-                    self.transfer_queue_widget.update_transfer_progress(tid, bd, bt, sp),
-                type=Qt.QueuedConnection
-            )
-            
-            transfer_worker.signals.finished.connect(
-                lambda s, f, tid=transfer_id: self.transfer_queue_widget.mark_transfer_complete(tid),
-                type=Qt.QueuedConnection
-            )
-            
-            transfer_worker.signals.error.connect(
-                lambda err, tid=transfer_id: self.transfer_queue_widget.mark_transfer_failed(tid, err),
-                type=Qt.QueuedConnection
-            )
-
-            # Connect conflict signal for overwrite prompting
-            transfer_worker.signals.conflict.connect(
-                lambda tid, dest, dtype: self.transfer_queue_widget._handle_conflict(tid, dest, dtype),
-                type=Qt.QueuedConnection
-            )
-            
-            QThreadPool.globalInstance().start(transfer_worker)
+                group_id
+            ))
         
         self.transfer_queue_widget.on_discovery_finished()
         
-        # Show feedback
         self.message_signal.emit(f"Added {len(file_list)} item(s) to transfer queue")
 
     def _prompt_batch_overwrite(self, filename, remaining):
@@ -1143,7 +1024,7 @@ class RemoteFileBrowser(FileBrowser):
                 child_item = QTreeWidgetItem(parent_item)
                 # Items are now dicts, not SFTPAttribute objects
                 child_item.setText(0, "📁 " + attr['filename'])
-                full_path = os.path.join(pop_path, attr['filename']) if pop_path != '/' else '/' + attr['filename']
+                full_path = _remote_join(pop_path, attr['filename']) if pop_path != '/' else '/' + attr['filename']
                 child_item.setData(0, Qt.UserRole, {'path': full_path, 'is_dir': True, 'is_root': False})
                 dummy_child = QTreeWidgetItem(child_item)
                 dummy_child.setText(0, "⏳ Loading...")

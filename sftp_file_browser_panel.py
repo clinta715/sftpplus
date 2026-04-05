@@ -215,8 +215,15 @@ class FileBrowserPanel(QWidget):
         
         file_info = self.right_browser.model.file_list[row]
         
-        filename = file_info.get('filename', file_info.get('name', ''))
-        is_dir = file_info.get('is_directory', file_info.get('is_dir', False))
+        if not isinstance(file_info, (list, tuple)) or len(file_info) < 4:
+            return
+        
+        filename = file_info[0]
+        file_size = file_info[1]
+        mode = file_info[2]
+        
+        import stat as stat_mod
+        is_dir = stat_mod.S_ISDIR(mode) if filename != ".." else True
         
         if is_dir:
             self.preview_widget.clear_preview()
@@ -226,16 +233,8 @@ class FileBrowserPanel(QWidget):
         current_dir = creds.get('current_remote_directory', '.')
         file_path = f"{current_dir}/{filename}".replace('//', '/')
         
-        file_size = file_info.get('size', file_info.get('st_size', 0))
-        if 'attr' in file_info:
-            attr = file_info['attr']
-            if isinstance(attr, dict):
-                file_size = attr.get('st_size', 0)
-            elif hasattr(attr, 'st_size'):
-                file_size = attr.st_size
-        
-        modified = file_info.get('modified', file_info.get('mtime', ''))
-        permissions = file_info.get('permissions', file_info.get('mode', ''))
+        modified = file_info[3]
+        permissions = oct(mode)[-4:] if filename != ".." else ""
         
         self.preview_widget.preview_file(
             file_path, file_size, modified, permissions,
