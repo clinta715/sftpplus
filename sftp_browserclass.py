@@ -198,13 +198,28 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         self.table.customContextMenuRequested.connect(self.context_menu_handler)
         self.table.setFocusPolicy(Qt.StrongFocus)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.table.sortByColumn(0, Qt.AscendingOrder)
+        
+        from sftp_preferences import get_preferences
+        prefs = get_preferences()
+        col = prefs.get("sort_column", 0)
+        order_str = prefs.get("sort_order", "ascending")
+        order = Qt.AscendingOrder if order_str == "ascending" else Qt.DescendingOrder
+        self.table.sortByColumn(col, order)
+        
+        self.table.horizontalHeader().sortIndicatorChanged.connect(self._on_sort_changed)
 
         self._tree_position = "above"
         self._apply_tree_layout()
         
         self._tree_root_path = None
         self._tree_current_path = None
+        
+        pref_key = "remote_tree_visible" if self.is_remote_browser() else "local_tree_visible"
+        tree_visible = get_preferences().get_bool(pref_key, False)
+        self.tree_toggle_btn.setChecked(tree_visible)
+        self.tree_container.setVisible(tree_visible)
+        self.tree_position_btn.setVisible(tree_visible)
+        self._pending_tree_populate = tree_visible
         
         self.progressBar = QProgressBar()
         self.layout.addWidget(self.progressBar)
@@ -412,6 +427,10 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         show_tree = self.tree_toggle_btn.isChecked()
         self.tree_container.setVisible(show_tree)
         self.tree_position_btn.setVisible(show_tree)
+        
+        pref_key = "remote_tree_visible" if self.is_remote_browser() else "local_tree_visible"
+        from sftp_preferences import get_preferences
+        get_preferences().set_bool(pref_key, show_tree)
         
         if show_tree:
             self.populate_tree_view()
@@ -847,6 +866,12 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             str: The normalized path.
         """
         return os.path.normpath(path)
+
+    def _on_sort_changed(self, logicalIndex, order):
+        from sftp_preferences import get_preferences
+        prefs = get_preferences()
+        prefs.set("sort_column", logicalIndex)
+        prefs.set("sort_order", "ascending" if order == Qt.AscendingOrder else "descending")
 
     def on_header_clicked(self, logicalIndex):
         # Check the current sort order and toggle it

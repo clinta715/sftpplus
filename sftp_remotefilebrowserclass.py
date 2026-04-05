@@ -34,6 +34,11 @@ class RemoteFileBrowser(FileBrowser):
         self.model = RemoteFileTableModel(self.session_id)
         self._active_tree_workers = set()  # Track workers to prevent premature deletion
         
+        if getattr(self, '_pending_tree_populate', False):
+            self._pending_tree_populate = False
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, self.populate_tree_view)
+        
         # Connect model signals for status and loading feedback
         self.model.status_message.connect(self.message_signal.emit)
         self.model.loading_started.connect(lambda: self.progressBar.setRange(0, 0))
@@ -67,10 +72,6 @@ class RemoteFileBrowser(FileBrowser):
         # Add these lines to enable full row selection
         self.table.setSelectionBehavior(Qt.TableView_SelectRows)
         self.table.setSelectionMode(Qt.TableView_ExtendedSelection)  # Allow Ctrl+Click and Shift+Click multi-select
-
-        # Enable sorting and set initial sort column
-        self.table.setSortingEnabled(True)
-        self.table.sortByColumn(0, Qt.AscendingOrder)
 
         # Don't initialize model here - defer until explicitly called
         # This allows credentials to be fully set before making SFTP calls

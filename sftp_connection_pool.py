@@ -84,14 +84,17 @@ class ConnectionPool:
         Get or create an SSH connection and an SFTP channel.
         
         Blocks if the per-host connection limit is reached until a connection
-        becomes available.
+        becomes available. Retries up to 15 times with exponential backoff
+        on transient channel open failures, then raises to let the caller
+        handle it.
         
         Returns:
             Tuple of (ssh_client, sftp_client)
         """
         conn_key = self.get_connection_key(hostname, port, username)
+        max_attempts = 15
         
-        while True:
+        for attempt in range(max_attempts):
             action = None
             conn_to_use = None
             request_placeholder = None
@@ -157,7 +160,9 @@ class ConnectionPool:
                     with self._pool_lock:
                         if request_placeholder in conn_to_use.busy_sftp_channels:
                             conn_to_use.busy_sftp_channels.remove(request_placeholder)
-                    # Loop back to try again (maybe create new connection)
+                    delay = min(0.3 * (2 ** min(attempt, 5)), 8.0)
+                    time.sleep(delay)
+                    continue
             
             elif action == 'create_new':
                 try:
@@ -179,17 +184,25 @@ class ConnectionPool:
                             self._pool[conn_key] = []
                         self._pool[conn_key].append(conn_info)
                         self._pending_connections[conn_key] = max(0, self._pending_connections.get(conn_key, 0) - 1)
+                        self._connection_condition.notify_all()
                     
                     return ssh, sftp
                 except Exception:
                     with self._connection_condition:
                         self._pending_connections[conn_key] = max(0, self._pending_connections.get(conn_key, 0) - 1)
                         self._connection_condition.notify_all()
-                    raise
+                    delay = min(0.5 * (2 ** min(attempt, 5)), 10.0)
+                    time.sleep(delay)
+                    continue
             
             else:
                 with self._connection_condition:
                     self._connection_condition.wait(timeout=5.0)
+        
+        raise RuntimeError(
+            f"Failed to get SFTP channel for {hostname}:{port} after {max_attempts} attempts. "
+            "Server may be rejecting channel opens due to concurrent session limits."
+        )
 
     def acquire_discovery_channel(self, hostname: str, port: int, username: str,
                                    password: Optional[str] = None,

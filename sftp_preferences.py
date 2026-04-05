@@ -23,6 +23,10 @@ DEFAULT_PREFERENCES = {
     "default_local_directory": "",
     "default_remote_directory": "",
     "follow_symlinks": False,
+    "sort_column": 0,
+    "sort_order": "ascending",
+    "local_tree_visible": False,
+    "remote_tree_visible": False,
     "tree_view_position": "above",
     "toolbar_buttons": [
         {"id": "refresh", "text": "↻ Refresh", "tooltip": "Refresh current directory", "visible": True},

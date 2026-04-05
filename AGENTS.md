@@ -1162,3 +1162,69 @@ Both workers transferred the same file and emitted progress to the same `transfe
 - `sftp_browser_mixins.py` — Removed dead caching, added `_create_ops()`
 - `sftp_file_browser_panel.py` — Fixed `.get()` on tuples, uses index access
 - `sftp.py` — Added `_on_overall_progress` status bar handler
+
+### Transfer Reliability & Persistent UI State (2026-04-05)
+
+Transfer retry logic, connection pool resilience, and persistent browser preferences.
+
+#### Transient Connection Failures During Bulk Transfers (CRITICAL)
+
+**Bug:** When uploading/downloading many files simultaneously, ~10% of transfers failed with `Secsh channel N open FAILED: open failed: Connect failed`. Retrying manually always succeeded.
+
+**Root Cause:** Two issues:
+1. `ConnectionPool.get_connection()` used an infinite `while True` loop. When `open_sftp()` or SSH connect failed, it never gave up — so `DirectTransferWorker` had no way to know a failure occurred and retry at a higher level.
+2. `DirectTransferWorker` had **zero retry logic** — any connection failure was a permanent failure.
+
+**Fix — Connection pool bounded retries with exponential backoff:**
+- `get_connection()` now retries up to 15 times with exponential backoff (0.3s → 0.6s → 1.2s → ... → 8s cap for channel opens, 0.5s → 10s cap for new SSH connections)
+- After 15 failed attempts, raises `RuntimeError` so the caller can handle it
+- Failed `open_sftp()` on existing connections now backs off before retrying instead of spinning
+
+**Fix — Worker retry with visual feedback:**
+- `DirectTransferWorker.run()` now calls `_do_transfer()` up to 5 times with exponential backoff (2s, 4s, 8s, 16s)
+- `_is_transient_error()` detects channel/timeout/EOF/transport errors as retryable; permission errors fail immediately
+- New `retrying` signal emits `(attempt, max_attempts, error_msg)` before each retry
+- Transfer queue shows amber "Retry 2/5" status and "Retry 2/5 - waiting..." progress bar during retries
+
+**Fix — Manual retry for failed transfers:**
+- Failed transfers show "Failed - double-click to retry" in progress bar
+- Double-click a failed transfer to re-queue it immediately
+- Right-click context menu shows "Retry" option for failed items
+- Full `transfer_info` dict stored in each display for re-creation on retry
+
+**Files Modified:**
+- `sftp_connection_pool.py` — Bounded retries with exponential backoff in `get_connection()`
+- `sftp_transfer_handler.py` — `DirectTransferWorker` retry loop, `_is_transient_error()`, `_do_transfer()`, `retrying` signal
+- `sftp_transfer_queue_widget.py` — `retrying` status color, `_handle_retrying()`, `_retry_failed_transfer()` on double-click, context menu retry action, stores `transfer_info` in display dict
+
+#### Persistent Sort Order
+
+Column sort order is now saved between sessions.
+
+**Implementation:**
+- `sort_column` (default 0) and `sort_order` (default "ascending") added to preferences
+- Browser base class reads preferences on init via `sortByColumn()`
+- `sortIndicatorChanged` signal saves to preferences on every column header click
+- Subclasses no longer hardcode `sortByColumn(0, AscendingOrder)`
+
+**Files Modified:**
+- `sftp_preferences.py` — Added `sort_column` and `sort_order` defaults
+- `sftp_browserclass.py` — Read/apply sort preferences, `_on_sort_changed()` handler
+- `sftp_filebrowserclass.py` — Removed hardcoded sort
+- `sftp_remotefilebrowserclass.py` — Removed hardcoded sort
+
+#### Persistent Tree View State
+
+Tree view enabled/disabled state is saved per side (local/remote) between sessions.
+
+**Implementation:**
+- `local_tree_visible` and `remote_tree_visible` (default `False`) added to preferences
+- Browser base class sets `_pending_tree_populate` flag during `init_ui()` (before subclass attrs exist)
+- Each subclass (`FileBrowser`, `RemoteFileBrowser`) checks flag at end of `__init__` and defers `populate_tree_view()` via `QTimer.singleShot(0, ...)`
+- `toggle_tree_view()` saves preference on every toggle
+
+**Files Modified:**
+- `sftp_preferences.py` — Added `local_tree_visible` and `remote_tree_visible` defaults
+- `sftp_browserclass.py` — Restore tree state, save on toggle, `_pending_tree_populate` flag
+- `sftp_filebrowserclass.py` — Deferred tree populate at end of `__init__`
+- `sftp_remotefilebrowserclass.py` — Deferred tree populate at end of `__init__`

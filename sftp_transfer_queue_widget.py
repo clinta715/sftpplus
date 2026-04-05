@@ -206,6 +206,7 @@ class TransferQueueWidget(QWidget):
             'complete': '#2196F3',            # Blue
             'failed': '#F44336',              # Red
             'paused': '#666666',              # Dark gray
+            'retrying': '#FF9800',            # Amber
         }
         
         # Connect signal for thread-safe transfer display addition
@@ -314,6 +315,11 @@ class TransferQueueWidget(QWidget):
                 lambda tid, dest, dtype: self._handle_conflict(tid, dest, dtype),
                 type=Qt.QueuedConnection
             )
+            worker.signals.retrying.connect(
+                lambda attempt, max_att, err, tid=transfer_id:
+                    self._handle_retrying(tid, attempt, max_att, err),
+                type=Qt.QueuedConnection
+            )
             
             QThreadPool.globalInstance().start(worker)
             
@@ -359,7 +365,40 @@ class TransferQueueWidget(QWidget):
         elif status == 'complete':
             display['progress_bar'].setFormat("100% - Complete")
         elif status == 'failed':
-            display['progress_bar'].setFormat("Failed")
+            display['progress_bar'].setFormat("Failed - double-click to retry")
+        elif status == 'retrying':
+            display['progress_bar'].setFormat("Retrying...")
+    
+    def _handle_retrying(self, transfer_id, attempt, max_attempts, error_msg):
+        """Update UI when a transfer is being retried"""
+        if transfer_id not in self._transfer_displays:
+            return
+        
+        display = self._transfer_displays[transfer_id]
+        display['status'] = 'retrying'
+        
+        color = self._status_colors['retrying']
+        display['status_label'].setText(f"Retry {attempt}/{max_attempts}")
+        display['status_label'].setStyleSheet(f"font-size: 10px; color: {color}; font-weight: 500;")
+        
+        chunk_color = color
+        display['progress_bar'].setStyleSheet(f"""
+            QProgressBar {{
+                border: none;
+                border-radius: 3px;
+                background-color: {DARK_THEME['bg_secondary']};
+                text-align: center;
+                color: white;
+                font-size: 10px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {chunk_color};
+                border-radius: 3px;
+            }}
+        """)
+        display['progress_bar'].setFormat(f"Retry {attempt}/{max_attempts} - waiting...")
+        display['speed_label'].setText("-")
+        display['eta_label'].setText("-")
     
     def _update_queue_status_label(self):
         """Update the queue status label in header"""
@@ -569,6 +608,7 @@ class TransferQueueWidget(QWidget):
         self.transfer_list.setMinimumHeight(100)
         self.transfer_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.transfer_list.customContextMenuRequested.connect(self._show_transfer_context_menu)
+        self.transfer_list.itemDoubleClicked.connect(self._retry_failed_transfer)
         
         # Debug label to show item count
         self._debug_count_label = QLabel("List: 0 | Dict: 0")
@@ -1559,6 +1599,7 @@ class TransferQueueWidget(QWidget):
             'bytes_done': 0,
             'bytes_total': 0,
             'speed_bps': 0,
+            'transfer_info': dict(transfer_info),
         }
     
     def _cancel_display_transfer(self, transfer_id):
@@ -1598,6 +1639,38 @@ class TransferQueueWidget(QWidget):
         # Check for more queued transfers
         self._check_and_start_queued()
     
+    def _retry_failed_transfer(self, item):
+        """Retry a failed transfer on double-click"""
+        transfer_id = item.data(Qt.UserRole)
+        if not transfer_id or transfer_id not in self._transfer_displays:
+            return
+        
+        display = self._transfer_displays[transfer_id]
+        if display['status'] != 'failed':
+            return
+        
+        transfer_info = display.get('transfer_info')
+        if not transfer_info:
+            return
+        
+        self.remove_transfer_display(transfer_id)
+        
+        self.add_transfer_display(
+            transfer_id=transfer_info['transfer_id'],
+            source_path=transfer_info['source_path'],
+            dest_path=transfer_info['dest_path'],
+            is_source_remote=transfer_info['is_source_remote'],
+            is_destination_remote=transfer_info['is_destination_remote'],
+            hostname=transfer_info['hostname'],
+            port=transfer_info['port'],
+            username=transfer_info['username'],
+            password=transfer_info['password'],
+            command=transfer_info['command'],
+            key=transfer_info.get('key', ''),
+            session_id=transfer_info.get('session_id'),
+            group_id=transfer_info.get('group_id')
+        )
+    
     def _show_transfer_context_menu(self, pos):
         """Show context menu for transfer at position"""
         item = self.transfer_list.itemAt(pos)
@@ -1609,6 +1682,14 @@ class TransferQueueWidget(QWidget):
             return
         
         menu = QMenu(self)
+        
+        # Retry action for failed transfers
+        if transfer_id in self._transfer_displays:
+            display = self._transfer_displays[transfer_id]
+            if display['status'] == 'failed':
+                retry_action = menu.addAction("Retry")
+                retry_action.triggered.connect(lambda: self._retry_failed_transfer(item))
+                menu.addSeparator()
         
         # Priority submenu
         priority_menu = menu.addMenu("Priority")

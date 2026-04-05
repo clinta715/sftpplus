@@ -11,7 +11,7 @@ A PySide6-based SFTP client application with:
 - Enhanced security with separate key storage
 """
 
-__version__ = "1.0.0"
+__version__ = "2.3.0"
 __author__ = "Developer"
 
 from .sftp import MainWindow

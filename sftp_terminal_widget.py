@@ -164,8 +164,8 @@ class SSHTerminalWidget(QWidget):
                 )
                 
                 if reply == Qt.MsgBtn_Yes:
-                    # Add to known_hosts
                     try:
+                        client.get_host_keys().add(hostname, key.get_name(), key)
                         client.save_host_keys(self.known_hosts_path)
                         return
                     except (OSError, IOError) as e:

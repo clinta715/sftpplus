@@ -601,6 +601,7 @@ class DirectTransferWorker(QRunnable):
         finished = Signal(int, int)
         error = Signal(str)
         conflict = Signal(str, str, str)  # (transfer_id, dest_path, dest_type)
+        retrying = Signal(int, int, str)  # (attempt, max_attempts, error_msg)
     
     def __init__(self, session_id, source_path, dest_path, 
                  is_source_remote, is_dest_remote, command):
@@ -694,6 +695,49 @@ class DirectTransferWorker(QRunnable):
         
         logger.debug(f"Starting transfer: source={self.source_path}, dest={self.dest_path}, cmd={self.command}")
         
+        max_retries = 5
+        for attempt in range(max_retries):
+            if self._cancel_requested:
+                logger.debug("Worker cancelled before attempt")
+                return
+            
+            try:
+                self._do_transfer()
+                return
+            except Exception as e:
+                is_transient = self._is_transient_error(e)
+                if is_transient and attempt < max_retries - 1:
+                    delay = 2.0 * (2 ** attempt)
+                    logger.debug(f"Transient error on attempt {attempt + 1}/{max_retries}, retrying in {delay}s: {e}")
+                    _safe_emit(self.signals.retrying, attempt + 2, max_retries, sanitize_error_message(str(e)))
+                    time.sleep(delay)
+                    continue
+                
+                logger.exception(f"Transfer exception (attempt {attempt + 1}/{max_retries}): {e}")
+                error_msg = sanitize_error_message(str(e))
+                _safe_emit(self.signals.error, error_msg)
+                _safe_emit(self.signals.finished, 0, 1)
+                return
+        
+        _safe_emit(self.signals.error, "Transfer failed after all retries")
+        _safe_emit(self.signals.finished, 0, 1)
+    
+    def _is_transient_error(self, exc):
+        """Check if an exception is likely transient and worth retrying."""
+        exc_str = str(exc).lower()
+        transient_indicators = [
+            'channel', 'open failed', 'connect failed',
+            'timed out', 'timeout', 'connection reset',
+            'broken pipe', 'eof', 'transport',
+            'session', 'not open', 'closed',
+        ]
+        return any(indicator in exc_str for indicator in transient_indicators)
+    
+    def _do_transfer(self):
+        """Perform the actual transfer. Raises on failure for retry logic."""
+        from sftp_creds import get_credentials
+        from sftp_connection_pool import get_connection_pool
+        
         ssh = None
         sftp = None
         start_time = time.time()
@@ -701,12 +745,10 @@ class DirectTransferWorker(QRunnable):
         bytes_transferred = 0
         
         def progress_callback(bytes_sent, total_bytes):
-            """Callback for upload/download progress"""
             nonlocal bytes_transferred, last_update_time
             bytes_transferred = bytes_sent
             current_time = time.time()
             
-            # Update progress every 0.2 seconds to avoid excessive signal emissions
             if current_time - last_update_time >= 0.2:
                 elapsed = current_time - start_time
                 speed = bytes_transferred / elapsed if elapsed > 0 else 0
@@ -719,7 +761,6 @@ class DirectTransferWorker(QRunnable):
         creds = get_credentials(self.session_id)
         
         try:
-            # Get connection from pool
             ssh, sftp = pool.get_connection(
                 hostname=creds.get('hostname', ''),
                 port=creds.get('port', 22),
@@ -728,10 +769,8 @@ class DirectTransferWorker(QRunnable):
                 key=creds.get('key')
             )
             
-            # Set longer timeout for file transfers
             sftp.get_channel().settimeout(300)
             
-            # Check for existing destination file
             resume = False
             action = self._check_destination_exists(sftp)
             if action == "skip":
@@ -745,18 +784,15 @@ class DirectTransferWorker(QRunnable):
                 return
             
             if self.command == "upload":
-                # Verify local file exists
                 if not os.path.exists(self.source_path):
                     raise FileNotFoundError(f"Local file not found: {self.source_path}")
                 
-                # Create remote parent directories if needed
                 self._ensure_remote_dir(sftp, os.path.dirname(self.dest_path))
                 
                 logger.debug(f"Uploading {self.source_path} to {self.dest_path}")
                 file_size = os.path.getsize(self.source_path)
                 
                 if resume:
-                    # Implement resume upload
                     existing_size = sftp.stat(self.dest_path).st_size if sftp.stat(self.dest_path) else 0
                     if existing_size >= file_size:
                         _safe_emit(self.signals.progress, file_size, file_size, 0, 0)
@@ -778,11 +814,9 @@ class DirectTransferWorker(QRunnable):
                                 bytes_uploaded += len(chunk)
                                 progress_callback(bytes_uploaded, file_size)
                 else:
-                    # Normal upload
                     sftp.put(self.source_path, self.dest_path, progress_callback)
                 
             elif self.command == "download":
-                # Create local parent directories if needed
                 local_parent = os.path.dirname(self.dest_path)
                 if local_parent and not os.path.exists(local_parent):
                     os.makedirs(local_parent, exist_ok=True)
@@ -791,7 +825,6 @@ class DirectTransferWorker(QRunnable):
                 file_size = sftp.stat(self.source_path).st_size
                 
                 if resume:
-                    # Implement resume download
                     existing_size = os.path.getsize(self.dest_path) if os.path.exists(self.dest_path) else 0
                     if existing_size >= file_size:
                         _safe_emit(self.signals.progress, file_size, file_size, 0, 0)
@@ -813,7 +846,6 @@ class DirectTransferWorker(QRunnable):
                                 bytes_downloaded += len(chunk)
                                 progress_callback(bytes_downloaded, file_size)
                 else:
-                    # Normal download
                     sftp.get(self.source_path, self.dest_path, progress_callback)
             else:
                 _safe_emit(self.signals.error, f"Unknown command: {self.command}")
@@ -825,17 +857,11 @@ class DirectTransferWorker(QRunnable):
                 return
 
             logger.debug("Transfer completed successfully")
-            # Emit final progress (100%)
             elapsed = time.time() - start_time
             speed = file_size / elapsed if elapsed > 0 else 0
             _safe_emit(self.signals.progress, file_size, file_size, speed, 0)
             _safe_emit(self.signals.finished, 1, 0)
             
-        except Exception as e:
-            logger.exception(f"Transfer exception: {e}")
-            error_msg = sanitize_error_message(str(e))
-            _safe_emit(self.signals.error, error_msg)
-            _safe_emit(self.signals.finished, 0, 1)
         finally:
             if sftp:
                 pool.release_connection(

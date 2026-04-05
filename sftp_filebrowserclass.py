@@ -48,15 +48,16 @@ class FileBrowser(Browser):
         self.table.setSelectionBehavior(Qt.TableView_SelectRows)
         self.table.setSelectionMode(Qt.TableView_ExtendedSelection)  # Allow Ctrl+Click and Shift+Click multi-select
 
-        # Enable sorting and set initial sort column
-        self.table.setSortingEnabled(True)
-        self.table.sortByColumn(0, Qt.AscendingOrder)
-
         # Fix tree view buttons for local browser (upload, not download)
         self.tree_download_btn.setText("⬆️ Upload")
         self.tree_download_btn.setToolTip("Upload selected directory to remote")
         self.tree_download_all_btn.setText("⬆️⬆️ Upload All")
         self.tree_download_all_btn.setToolTip("Upload all visible directories to remote")
+
+        if getattr(self, '_pending_tree_populate', False):
+            self._pending_tree_populate = False
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, self.populate_tree_view)
 
     def remove_directory_with_prompt(self, local_path=None, always=0):
         self.always = always
