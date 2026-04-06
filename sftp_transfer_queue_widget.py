@@ -236,36 +236,98 @@ class TransferQueueWidget(QWidget):
         
         self._pending_display_transfers.insert(insert_pos, transfer_info)
     
+    @staticmethod
+    def _is_transient_error(msg):
+        if not msg:
+            return False
+        msg_lower = msg.lower()
+        transient_indicators = [
+            'channel', 'open failed', 'connect failed',
+            'timed out', 'timeout', 'connection reset',
+            'broken pipe', 'eof', 'transport',
+            'session', 'not open', 'closed',
+        ]
+        return any(indicator in msg_lower for indicator in transient_indicators)
+
+    def _auto_retry_failed_transfers(self):
+        for tid, display in list(self._transfer_displays.items()):
+            if display.get('status') != 'failed':
+                continue
+
+            error_msg = display.get('error_message', '')
+            if not self._is_transient_error(error_msg):
+                continue
+
+            transfer_info = display.get('transfer_info')
+            if not transfer_info:
+                continue
+
+            retry_count = display.get('_auto_retry_count', 0) + 1
+            file_name = os.path.basename(display['source'])
+            self.text_console.append(f"Auto-retrying (attempt {retry_count}): {file_name}")
+
+            self.remove_transfer_display(tid)
+
+            transfer_info = dict(transfer_info)
+            new_id = f"{tid}_r{retry_count}"
+            self.add_transfer_display(
+                transfer_id=new_id,
+                source_path=transfer_info['source_path'],
+                dest_path=transfer_info['dest_path'],
+                is_source_remote=transfer_info['is_source_remote'],
+                is_destination_remote=transfer_info['is_destination_remote'],
+                hostname=transfer_info['hostname'],
+                port=transfer_info['port'],
+                username=transfer_info['username'],
+                password=transfer_info['password'],
+                command=transfer_info['command'],
+                key=transfer_info.get('key', ''),
+                session_id=transfer_info.get('session_id'),
+                group_id=transfer_info.get('group_id')
+            )
+
+            if new_id in self._transfer_displays:
+                self._transfer_displays[new_id]['_auto_retry_count'] = retry_count
+
+            return True
+
+        return False
+
     def _check_and_start_queued(self):
-        """Start transfers if under limit and not paused"""
+        """Start transfers one at a time with staggered delays to avoid thundering herd."""
         if self._paused:
             return
         
         active = len([t for t in self._transfer_displays.values() 
                       if t.get('status') == 'transferring'])
         
-        started = 0
-        while (self._pending_display_transfers and 
-               active < self._max_concurrent_transfers):
-            
-            transfer_info = None
-            for t in self._pending_display_transfers:
-                if t['status'] in ('queued',):
-                    transfer_info = t
-                    break
-            
-            if not transfer_info:
+        if active >= self._max_concurrent_transfers:
+            self._update_queue_status_label()
+            return
+        
+        if self._auto_retry_failed_transfers():
+            QTimer.singleShot(150, self._check_and_start_queued)
+            return
+        
+        transfer_info = None
+        for t in self._pending_display_transfers:
+            if t['status'] in ('queued',):
+                transfer_info = t
                 break
-            
-            self._pending_display_transfers.remove(transfer_info)
-            self._start_queued_transfer(transfer_info)
-            active += 1
-            started += 1
         
-        if started > 0:
-            self._schedule_queue_save()
+        if not transfer_info:
+            self._update_queue_status_label()
+            return
         
+        self._pending_display_transfers.remove(transfer_info)
+        self._start_queued_transfer(transfer_info)
+        
+        self._schedule_queue_save()
         self._update_queue_status_label()
+        
+        # Stagger: schedule next start after short delay so channel opens
+        # don't all hit the server simultaneously
+        QTimer.singleShot(150, self._check_and_start_queued)
     
     def _start_queued_transfer(self, transfer_info):
         """Create worker from stored transfer info and start it"""
@@ -294,6 +356,26 @@ class TransferQueueWidget(QWidget):
                     try:
                         file_size = os.path.getsize(transfer_info['source_path'])
                     except (OSError, IOError):
+                        pass
+                else:
+                    try:
+                        from sftp_connection_pool import get_connection_pool
+                        pool = get_connection_pool()
+                        _ssh, _sftp = pool.get_connection(
+                            transfer_info['hostname'],
+                            transfer_info.get('port', 22),
+                            transfer_info['username'],
+                            transfer_info.get('password'),
+                            transfer_info.get('key'),
+                        )
+                        file_size = _sftp.stat(transfer_info['source_path']).st_size
+                        pool.release_connection(
+                            transfer_info['hostname'],
+                            transfer_info.get('port', 22),
+                            transfer_info['username'],
+                            _sftp,
+                        )
+                    except Exception:
                         pass
                 if file_size > 0:
                     self._transfer_groups[group_id]["total_bytes"] += file_size
@@ -1046,7 +1128,14 @@ class TransferQueueWidget(QWidget):
             if group and group["total_files"] > 0:
                 completed = group["completed_files"]
                 total = group["total_files"]
-                overall_percent = int((completed / total) * 100)
+                completed_bytes = group.get("completed_bytes", 0)
+                total_bytes = group.get("total_bytes", 0)
+
+                if total_bytes > 0:
+                    overall_percent = min(99, int((completed_bytes / total_bytes) * 100))
+                else:
+                    overall_percent = int((completed / total) * 100)
+
                 self.overall_progress_bar.setValue(overall_percent)
                 total_speed = 0.0
                 for transfer in active_legacy:
@@ -1054,13 +1143,19 @@ class TransferQueueWidget(QWidget):
                 for display in self._transfer_displays.values():
                     if display.get('is_active', False):
                         total_speed += display.get('speed_bps', 0) or 0
-                label_text = f"Transferring: {completed}/{total} files ({overall_percent}%)"
+
+                parts = [f"Transferring: {completed}/{total} files"]
+                if total_bytes > 0:
+                    parts.append(f"{self.humanize_bytes(completed_bytes)}/{self.humanize_bytes(total_bytes)}")
+                parts.append(f"{overall_percent}%")
                 speed_str = self._format_speed(total_speed)
                 if speed_str:
-                    label_text += f" • {speed_str}"
-                self.overall_progress_label.setText(label_text)
-                eta_seconds = self._calc_eta(total_speed, group.get("total_bytes", 0) - group.get("completed_bytes", 0))
-                self.signal_overall_progress.emit(overall_percent, total_speed, eta_seconds, group.get("completed_bytes", 0), group.get("total_bytes", 0))
+                    parts.append(speed_str)
+                self.overall_progress_label.setText(" • ".join(parts))
+
+                remaining = max(0, total_bytes - completed_bytes) if total_bytes > 0 else 0
+                eta_seconds = self._calc_eta(total_speed, remaining)
+                self.signal_overall_progress.emit(overall_percent, total_speed, eta_seconds, completed_bytes, total_bytes)
                 return
 
             total_bytes_done = 0
@@ -1829,6 +1924,10 @@ class TransferQueueWidget(QWidget):
         group_id = display.get('group_id')
         if group_id and group_id in self._transfer_groups:
             self._transfer_groups[group_id]["completed_files"] += 1
+            if self._transfer_groups[group_id]["completed_files"] >= self._transfer_groups[group_id]["total_files"]:
+                if self._current_group_id == group_id:
+                    self._current_group_id = None
+                del self._transfer_groups[group_id]
 
         self.update_overall_progress()
 
@@ -1847,6 +1946,7 @@ class TransferQueueWidget(QWidget):
         display = self._transfer_displays[transfer_id]
         display['is_active'] = False
         display['status'] = 'failed'
+        display['error_message'] = error_message
         display['status_label'].setText("Failed")
         display['status_label'].setStyleSheet(f"font-size: 10px; color: {DARK_THEME['error']}; font-weight: 500;")
 
@@ -1861,6 +1961,10 @@ class TransferQueueWidget(QWidget):
         group_id = display.get('group_id')
         if group_id and group_id in self._transfer_groups:
             self._transfer_groups[group_id]["completed_files"] += 1
+            if self._transfer_groups[group_id]["completed_files"] >= self._transfer_groups[group_id]["total_files"]:
+                if self._current_group_id == group_id:
+                    self._current_group_id = None
+                del self._transfer_groups[group_id]
 
         self.update_overall_progress()
 

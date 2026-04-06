@@ -31,6 +31,12 @@ def _remote_join(base, name):
 class RemoteFileBrowser(FileBrowser):
     def __init__(self, title, session_id, parent=None):
         super().__init__(title, session_id, parent)  # Initialize the FileBrowser parent class
+        # Remote browser tree buttons: download from remote
+        self.tree_download_btn.setText("⬇️ Download")
+        self.tree_download_btn.setToolTip("Download selected directory")
+        self.tree_download_all_btn.setText("⬇️⬇️ Download All")
+        self.tree_download_all_btn.setToolTip("Download all visible directories")
+
         self.model = RemoteFileTableModel(self.session_id)
         self._active_tree_workers = set()  # Track workers to prevent premature deletion
         
@@ -44,10 +50,17 @@ class RemoteFileBrowser(FileBrowser):
         self.model.loading_started.connect(lambda: self.progressBar.setRange(0, 0))
         self.model.loading_finished.connect(lambda: self.progressBar.setRange(0, 100))
         self.model.loading_finished.connect(lambda: self.progressBar.setValue(100))
+        self.model.loading_finished.connect(self._reapply_sort)
         
         self.proxy_model = DirectoryFirstSortProxyModel()
         self.proxy_model.setSourceModel(self.model)
         self.table.setModel(self.proxy_model)
+
+        prefs = get_preferences()
+        col = prefs.get("sort_column", 0)
+        order_str = prefs.get("sort_order", "ascending")
+        order = Qt.AscendingOrder if order_str == "ascending" else Qt.DescendingOrder
+        self.table.sortByColumn(col, order)
 
         # Set horizontal scroll bar policy for the entire table
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -84,6 +97,11 @@ class RemoteFileBrowser(FileBrowser):
             return
         self._initialized = True
         self.initialize_model()
+
+    def _reapply_sort(self):
+        col = self.table.horizontalHeader().sortIndicatorSection()
+        order = self.table.horizontalHeader().sortIndicatorOrder()
+        self.table.sortByColumn(col, order)
 
     @property
     def session_api(self):

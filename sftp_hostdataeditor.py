@@ -30,7 +30,7 @@ _KNOWN_TOP_LEVEL_KEYS = {
     "hostnames", "usernames", "passwords", "ports", "key",
     "connection_type", "initial_remote_dir", "initial_local_dir",
     "bookmarks", "ssh_commands", "follow_symlinks", "nicknames",
-    "show_manager_on_startup",
+    "max_connections", "show_manager_on_startup",
 }
 
 
@@ -38,7 +38,8 @@ def _ensure_keys(host_data):
     """Ensure all expected keys exist in host_data dict."""
     for key in ("hostnames", "usernames", "passwords", "ports", "key",
                 "connection_type", "initial_remote_dir", "initial_local_dir",
-                "bookmarks", "ssh_commands", "follow_symlinks", "nicknames"):
+                "bookmarks", "ssh_commands", "follow_symlinks", "nicknames",
+                "max_connections"):
         if key not in host_data:
             host_data[key] = {}
     if "show_manager_on_startup" not in host_data:
@@ -159,6 +160,7 @@ def save_connection_data(host_data):
             "ssh_commands": host_data.get("ssh_commands", {}),
             "follow_symlinks": host_data.get("follow_symlinks", {}),
             "nicknames": host_data.get("nicknames", {}),
+            "max_connections": host_data.get("max_connections", {}),
         }
 
         try:
@@ -238,6 +240,7 @@ def load_connection_data():
         host_data["ssh_commands"] = data.get("ssh_commands", {})
         host_data["follow_symlinks"] = data.get("follow_symlinks", {})
         host_data["nicknames"] = data.get("nicknames", {})
+        host_data["max_connections"] = data.get("max_connections", {})
 
         _ensure_keys(host_data)
         return host_data
@@ -326,6 +329,7 @@ def get_site_data(hostname):
             "ssh_commands": host_data.get("ssh_commands", {}).get(hostname, ""),
             "follow_symlinks": host_data.get("follow_symlinks", {}).get(hostname, False),
             "nickname": host_data.get("nicknames", {}).get(hostname, ""),
+            "max_connections": host_data.get("max_connections", {}).get(hostname, 0),
         }
 
 

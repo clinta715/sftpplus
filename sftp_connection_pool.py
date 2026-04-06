@@ -5,6 +5,7 @@ Provides thread-safe SSH/SFTP connection pooling for reuse across operations.
 Works with both the legacy add_sftp_job API and the new session-based API.
 """
 from threading import Lock, Condition
+import random
 import time
 import os
 import paramiko
@@ -49,12 +50,13 @@ class ConnectionPool:
                     # Key: (hostname, port, username), Value: List of ConnectionInfo
                     cls._instance._pool: Dict[Tuple, List[ConnectionInfo]] = {}
                     cls._instance._pool_lock = Lock()
+                    cls._instance._channel_open_lock = Lock()  # Serialize open_sftp() to prevent thundering herd
                     cls._instance._max_age = 300  # Keep SSH connections for 5 minutes
-                    cls._instance._max_channels_per_ssh = 8 # Safe limit below standard 10
+                    cls._instance._max_channels_per_ssh = 4  # Conservative limit; leaves headroom for exec channels
                     cls._instance._cleanup_interval = 60
                     cls._instance._last_cleanup = 0
-                    cls._instance._discovery_channels_used = 0  # Track discovery channel usage
-                    cls._instance._max_discovery_channels = 2  # Reserve up to 2 channels for discovery
+                    cls._instance._discovery_channels_used = 0
+                    cls._instance._max_discovery_channels = 1
                     # Per-host SSH connection limits
                     cls._instance._max_connections_per_host: Dict[Tuple, int] = {}
                     cls._instance._pending_connections: Dict[Tuple, int] = {}
@@ -147,7 +149,8 @@ class ConnectionPool:
             
             if action == 'use_existing':
                 try:
-                    sftp = conn_to_use.ssh.open_sftp()
+                    with self._channel_open_lock:
+                        sftp = conn_to_use.ssh.open_sftp()
                     with self._pool_lock:
                         if request_placeholder in conn_to_use.busy_sftp_channels:
                             idx = conn_to_use.busy_sftp_channels.index(request_placeholder)
@@ -160,14 +163,15 @@ class ConnectionPool:
                     with self._pool_lock:
                         if request_placeholder in conn_to_use.busy_sftp_channels:
                             conn_to_use.busy_sftp_channels.remove(request_placeholder)
-                    delay = min(0.3 * (2 ** min(attempt, 5)), 8.0)
+                    delay = min(0.3 * (2 ** min(attempt, 5)), 8.0) + random.uniform(0, 0.5)
                     time.sleep(delay)
                     continue
             
             elif action == 'create_new':
                 try:
                     ssh = self._create_ssh_connection(hostname, port, username, password, key)
-                    sftp = ssh.open_sftp()
+                    with self._channel_open_lock:
+                        sftp = ssh.open_sftp()
                     
                     conn_info = ConnectionInfo(
                         ssh=ssh,
@@ -191,7 +195,7 @@ class ConnectionPool:
                     with self._connection_condition:
                         self._pending_connections[conn_key] = max(0, self._pending_connections.get(conn_key, 0) - 1)
                         self._connection_condition.notify_all()
-                    delay = min(0.5 * (2 ** min(attempt, 5)), 10.0)
+                    delay = min(0.5 * (2 ** min(attempt, 5)), 10.0) + random.uniform(0, 0.5)
                     time.sleep(delay)
                     continue
             

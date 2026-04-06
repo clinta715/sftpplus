@@ -40,7 +40,7 @@ def show_about(parent=None):
     layout.addWidget(title)
     
     # Version
-    version = QLabel("Version 2.3.0")
+    version = QLabel("Version 2.4.0")
     version.setAlignment(Qt.AlignmentFlag.AlignCenter)
     version.setStyleSheet(f"color: {DARK_THEME['text_secondary']}; font-size: 12px;")
     layout.addWidget(version)

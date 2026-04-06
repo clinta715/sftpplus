@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QMessageBox, QHeaderView,
     QLineEdit, QLabel, QFormLayout, QGroupBox, QSplitter, QFrame,
-    QCheckBox, QComboBox
+    QCheckBox, QComboBox, QSpinBox, QSpinBox
 )
 from PySide6.QtGui import QIntValidator
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
@@ -174,6 +174,16 @@ class ConnectionsWidget(QWidget):
         )
         self.detail_follow_symlinks.stateChanged.connect(self.update_selected_row)
         
+        self.detail_max_connections = QSpinBox()
+        self.detail_max_connections.setRange(0, 20)
+        self.detail_max_connections.setSpecialValueText("Global default")
+        self.detail_max_connections.setValue(0)
+        self.detail_max_connections.setToolTip(
+            "Maximum concurrent SSH connections for this site.\n"
+            "0 = use global default from toolbar spinner."
+        )
+        self.detail_max_connections.valueChanged.connect(self.update_selected_row)
+        
         details_layout.addRow("Nickname:", self.detail_nickname)
         details_layout.addRow("Hostname:", self.detail_hostname)
         details_layout.addRow("Username:", self.detail_username)
@@ -183,6 +193,7 @@ class ConnectionsWidget(QWidget):
         details_layout.addRow("Connection Type:", self.detail_connection_type)
         details_layout.addRow("Startup Commands:", self.detail_ssh_commands)
         details_layout.addRow("Transfers:", self.detail_follow_symlinks)
+        details_layout.addRow("SSH Connections:", self.detail_max_connections)
         
         line = QFrame()
         line.setFrameShape(Qt.Frame_HLine)
@@ -298,6 +309,10 @@ class ConnectionsWidget(QWidget):
             
             self.detail_follow_symlinks.setChecked(site.get("follow_symlinks", False))
             
+            self.detail_max_connections.blockSignals(True)
+            self.detail_max_connections.setValue(site.get("max_connections", 0))
+            self.detail_max_connections.blockSignals(False)
+            
             connection_type = site.get("connection_type", "SFTP Browser")
             if connection_type == "SSH Terminal":
                 self.detail_connection_type.setCurrentIndex(1)
@@ -325,6 +340,9 @@ class ConnectionsWidget(QWidget):
         self.detail_follow_symlinks.blockSignals(True)
         self.detail_follow_symlinks.setChecked(False)
         self.detail_follow_symlinks.blockSignals(False)
+        self.detail_max_connections.blockSignals(True)
+        self.detail_max_connections.setValue(0)
+        self.detail_max_connections.blockSignals(False)
     
     def _set_details_enabled(self, enabled):
         """Enable/disable detail panel"""
@@ -332,7 +350,7 @@ class ConnectionsWidget(QWidget):
                       self.detail_port, self.detail_key, self.detail_remote_dir, 
                       self.detail_local_dir, self.detail_ssh_commands,
                       self.connect_button, self.detail_connection_type,
-                      self.detail_follow_symlinks]:
+                      self.detail_follow_symlinks, self.detail_max_connections]:
             widget.setEnabled(enabled)
     
     def _update_selected_row(self):
@@ -401,7 +419,7 @@ class ConnectionsWidget(QWidget):
         
         # Add the new site atomically
         def add_site(host_data):
-            for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "ssh_commands", "follow_symlinks"]:
+            for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "ssh_commands", "follow_symlinks", "max_connections"]:
                 if key not in host_data:
                     host_data[key] = {}
             host_data["hostnames"][new_hostname] = new_hostname
@@ -414,6 +432,7 @@ class ConnectionsWidget(QWidget):
             host_data["initial_local_dir"][new_hostname] = ""
             host_data["ssh_commands"][new_hostname] = ""
             host_data["follow_symlinks"][new_hostname] = False
+            host_data["max_connections"][new_hostname] = 0
         
         from sftp_hostdataeditor import update_connection_data
         update_connection_data(add_site)
@@ -507,7 +526,7 @@ class ConnectionsWidget(QWidget):
             host_data = load_connection_data()
             
             # Ensure all required keys exist
-            for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks", "ssh_commands", "follow_symlinks"]:
+            for key in ["connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks", "ssh_commands", "follow_symlinks", "max_connections"]:
                 if key not in host_data:
                     host_data[key] = {}
             
@@ -528,7 +547,8 @@ class ConnectionsWidget(QWidget):
                     if new_hostname != old_hostname:
                         for key in ["hostnames", "usernames", "passwords", "ports", "key",
                                    "connection_type", "initial_remote_dir", "initial_local_dir",
-                                   "bookmarks", "ssh_commands", "follow_symlinks", "nicknames"]:
+                                   "bookmarks", "ssh_commands", "follow_symlinks", "nicknames",
+                                   "max_connections"]:
                             if key in host_data and old_hostname in host_data[key]:
                                 host_data[key][new_hostname] = host_data[key].pop(old_hostname)
                     
@@ -542,6 +562,8 @@ class ConnectionsWidget(QWidget):
                     host_data["initial_local_dir"][new_hostname] = self.detail_local_dir.text()
                     host_data["ssh_commands"][new_hostname] = self.detail_ssh_commands.text()
                     host_data["follow_symlinks"][new_hostname] = self.detail_follow_symlinks.isChecked()
+                    max_conn = self.detail_max_connections.value()
+                    host_data["max_connections"][new_hostname] = max_conn if max_conn > 0 else 0
                     
                     nickname = self.detail_nickname.text().strip()
                     if nickname:
@@ -573,7 +595,7 @@ class ConnectionsWidget(QWidget):
             for hostname in orphaned:
                 for key in ["hostnames", "usernames", "passwords", "ports", "key", 
                            "connection_type", "initial_remote_dir", "initial_local_dir", "bookmarks",
-                           "ssh_commands", "follow_symlinks", "nicknames"]:
+                           "ssh_commands", "follow_symlinks", "nicknames", "max_connections"]:
                     if key in host_data:
                         host_data[key].pop(hostname, None)
             
@@ -613,7 +635,7 @@ class ConnectionsWidget(QWidget):
                         if hostname != keep_hostname:
                             for key in ["hostnames", "usernames", "passwords", "ports", "key",
                                        "connection_type", "initial_remote_dir", "initial_local_dir",
-                                       "bookmarks", "ssh_commands", "follow_symlinks"]:
+                                       "bookmarks", "ssh_commands", "follow_symlinks", "max_connections"]:
                                 if key in host_data:
                                     host_data[key].pop(hostname, None)
                 else:
@@ -683,6 +705,7 @@ class ConnectionsWidget(QWidget):
         connection_type = self.detail_connection_type.currentText()
         ssh_commands = self.detail_ssh_commands.text()
         follow_symlinks = self.detail_follow_symlinks.isChecked()
+        max_connections = self.detail_max_connections.value()
         
         if not username:
             QMessageBox.critical(self, "Error", f"Username required for {hostname}")
@@ -702,7 +725,8 @@ class ConnectionsWidget(QWidget):
             "initial_remote_dir": initial_remote_dir,
             "initial_local_dir": initial_local_dir,
             "ssh_commands": ssh_commands,
-            "follow_symlinks": follow_symlinks
+            "follow_symlinks": follow_symlinks,
+            "max_connections": max_connections
         }
         
         self.connect_requested.emit(connection_data)

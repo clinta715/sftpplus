@@ -3,12 +3,13 @@ from sftp_filetablemodel import FileTableModel
 from sftp_sortfiltermodel import DirectoryFirstSortProxyModel
 from PySide6.QtWidgets import QMessageBox, QHeaderView, QTableView, QApplication, QProgressDialog
 from PySide6.QtCore import QThreadPool
-from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
-import os 
+from sftp_qt_compat import Qt
+import os
 import shutil
 
 from sftp_creds import get_credentials, set_credentials
 from sftp_transfer_handler import DeletionWorker
+from sftp_preferences import get_preferences
 
 class FileBrowser(Browser):
     def __init__(self, title, session_id, parent=None):
@@ -21,6 +22,12 @@ class FileBrowser(Browser):
         self.proxy_model = DirectoryFirstSortProxyModel()
         self.proxy_model.setSourceModel(self.model)
         self.table.setModel(self.proxy_model)
+
+        prefs = get_preferences()
+        col = prefs.get("sort_column", 0)
+        order_str = prefs.get("sort_order", "ascending")
+        order = Qt.AscendingOrder if order_str == "ascending" else Qt.DescendingOrder
+        self.table.sortByColumn(col, order)
 
         # Set horizontal scroll bar policy for the entire table
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)

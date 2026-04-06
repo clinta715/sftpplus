@@ -16,6 +16,7 @@ This document provides guidelines for AI coding agents working on this PyQt6-bas
 - **Bookmarks**: Per-host directory bookmarks
 - **Tree view**: Directory tree panel (above or below list)
 - **Progress tracking**: Real-time progress indicators for file transfers
+- **Connection progress dialog**: Step-by-step progress dialog during SSH/SFTP connection
 - **Delete feedback**: Progress dialog and summary when deleting multiple items
 - **Queue management**: Pause/cancel transfer operations
 - **Transfer history**: Log of completed transfers with export capability
@@ -1228,3 +1229,115 @@ Tree view enabled/disabled state is saved per side (local/remote) between sessio
 - `sftp_browserclass.py` — Restore tree state, save on toggle, `_pending_tree_populate` flag
 - `sftp_filebrowserclass.py` — Deferred tree populate at end of `__init__`
 - `sftp_remotefilebrowserclass.py` — Deferred tree populate at end of `__init__`
+
+### Connection Progress Dialog (2026-04-06)
+
+The connection process now shows a modal `QProgressDialog` with step labels instead of freezing the UI.
+
+**Problem:**
+The `connect()` method's `test_connection()` call blocked the UI thread for 2-12+ seconds during DNS resolution, SSH handshake, auth, and SFTP channel open. Status messages emitted during this time were never painted because the Qt event loop was blocked. User saw a blank tab and spinning beachball cursor.
+
+**Solution:**
+Moved the SSH/SFTP connection test to a background `ConnectionTestWorker` (QRunnable) while showing a window-modal `QProgressDialog` with a local `QEventLoop` to keep the UI responsive.
+
+**New classes in `sftp.py`:**
+
+```python
+class ConnectionTestSignals(QObject):
+    step = Signal(str)           # "Connecting to host:port..."
+    success = Signal(str)        # home directory path
+    error = Signal(str)          # error message
+    prompt_unknown_host = Signal(str, str, str)  # host, key_type, fingerprint
+    prompt_bad_host_key = Signal(str, str)        # host, fingerprint
+
+class ConnectionTestWorker(QRunnable):
+    # Runs SSH/SFTP connection test in background thread
+    # Emits step labels at each phase
+    # Handles host key prompts via threading.Event synchronization
+```
+
+**Progress dialog steps:**
+1. "Connecting to {hostname}:{port}..." — before `ssh.connect()`
+2. "Authenticating..." / "Authenticating with SSH key..." — during auth
+3. "Opening SFTP channel..." — before `ssh.open_sftp()`
+4. "Testing directory access..." — before `sftp.listdir('.')`
+5. "Determining home directory..." — before `ssh.exec_command('pwd')`
+
+**Host key handling in background worker:**
+The worker uses `threading.Event` + `resolve_prompt()` for synchronous host key prompts. When `InteractivePolicy.missing_host_key()` or `BadHostKeyException` occurs in the worker thread, it emits a signal (QueuedConnection → UI thread), shows a `QMessageBox`, and calls `worker.resolve_prompt(True/False)`. The worker thread blocks on `Event.wait()` until the UI thread resolves the prompt.
+
+**Modified `connect()` method (`sftp.py:1397`):**
+- Validation and credential setup remain synchronous (fast, <100ms)
+- SSH key loading (`_load_private_key()`) runs on UI thread (may show passphrase dialog)
+- Connection test delegated to `_test_connection_with_progress()` which runs the worker with progress dialog
+- Post-connection steps (navigate, create widget, initialize browser) remain synchronous
+
+**Files Modified:**
+- `sftp.py` — `ConnectionTestSignals`, `ConnectionTestWorker`, `_test_connection_with_progress()` (new), `connect()` (modified to use worker), added `threading`, `QProgressDialog`, `QRunnable`, `QThreadPool`, `QEventLoop` imports
+
+### Remote Browser Tree View Button Labels (2026-04-06)
+
+**Bug:** Remote browser tree view showed "Upload" and "Upload All" buttons instead of "Download" and "Download All".
+
+**Root Cause:**
+`RemoteFileBrowser` extends `FileBrowser`, which overrides the base `Browser` tree buttons from "Download"/"Download All" to "Upload"/"Upload All" (correct for local browser). `RemoteFileBrowser` inherited these overrides without correcting them back.
+
+**Fix:**
+Added button text override in `RemoteFileBrowser.__init__()` to set them back to "Download"/"Download All".
+
+**Files Modified:**
+- `sftp_remotefilebrowserclass.py` — Added tree button text override after `super().__init__()`
+
+### Overall Transfer Progress Fixes (2026-04-06)
+
+Multiple bugs fixed in the overall progress bar and status display for directory transfers.
+
+#### Bug 1: `total_bytes` always 0 for downloads (CRITICAL)
+
+**Root Cause:**
+`_start_queued_transfer()` only called `os.path.getsize()` when `is_source_remote` was `False` (uploads). For downloads the source is remote, so `total_bytes` stayed 0. This broke ETA calculation and status bar byte display (showed "150 MB / 0 B").
+
+**Fix:**
+For downloads, use the connection pool to do a quick SFTP `stat()` call to get the remote file size before starting the worker. Adds ~50-100ms per file start but provides accurate byte totals.
+
+```python
+if transfer_info['is_source_remote']:
+    from sftp_connection_pool import get_connection_pool
+    pool = get_connection_pool()
+    _ssh, _sftp = pool.get_connection(hostname, port, username, password, key)
+    file_size = _sftp.stat(source_path).st_size
+    pool.release_connection(hostname, port, username, _sftp)
+```
+
+#### Bug 2: `_current_group_id` never reset
+
+**Root Cause:**
+`_current_group_id` was set in `start_transfer_group()` but never reset to `None` when the group completed. After a directory transfer finished, subsequent individual transfers would still use the stale group's metrics.
+
+**Fix:**
+`mark_transfer_complete()` and `mark_transfer_failed()` now check if `completed_files >= total_files` and reset `_current_group_id = None`.
+
+#### Bug 3: `_transfer_groups` entries never cleaned up
+
+**Root Cause:**
+Group entries accumulated indefinitely — one per directory transfer, never deleted. Memory leak over long sessions.
+
+**Fix:**
+Same as Bug 2 — `del self._transfer_groups[group_id]` when the group completes.
+
+#### Bug 4: File-count based progress instead of byte-based
+
+**Root Cause:**
+`overall_percent = int((completed_files / total_files) * 100)` jumped in equal increments per file regardless of size. A directory with 99 small files and 1 large file would hit 99% almost instantly then stall.
+
+**Fix:**
+`update_overall_progress()` now uses `completed_bytes / total_bytes` for the progress bar percentage (capped at 99% while active), falling back to file-count when `total_bytes` is 0 (e.g., if all stat calls failed). The label shows both file count and humanized byte totals:
+
+```
+Transferring: 5/20 files • 45.2 MB/120.0 MB • 2.3 MB/s
+```
+
+ETA uses `max(0, total_bytes - completed_bytes)` to avoid negative values.
+
+**Files Modified:**
+- `sftp_transfer_queue_widget.py` — `_start_queued_transfer()` (remote stat), `mark_transfer_complete()` (group cleanup), `mark_transfer_failed()` (group cleanup), `update_overall_progress()` (byte-based progress)

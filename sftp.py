@@ -3,6 +3,7 @@ import os
 import argparse
 import platform
 import time
+import threading
 import logging
 from sftp_downloadworkerclass import transferSignals, add_sftp_job, clear_sftp_queue
 from sftp_transfer_queue_widget import TransferQueueWidget
@@ -19,8 +20,8 @@ from sftp_filebrowserclass import FileBrowser
 from sftp_creds import get_credentials, set_credentials, del_credentials, create_random_integer, clear_all_credentials, get_home_directory
 from sftp_session import get_session_manager
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
-from PySide6.QtWidgets import QInputDialog, QFileDialog, QLabel, QToolButton, QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QTextEdit, QCompleter, QComboBox, QSpinBox, QTabWidget, QMessageBox, QCheckBox, QMenu, QSizePolicy
-from PySide6.QtCore import Signal, QObject, QCoreApplication, QTimer, QEvent, QMutexLocker
+from PySide6.QtWidgets import QInputDialog, QFileDialog, QLabel, QToolButton, QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QTextEdit, QCompleter, QComboBox, QSpinBox, QTabWidget, QMessageBox, QCheckBox, QMenu, QSizePolicy, QProgressDialog
+from PySide6.QtCore import Signal, QObject, QCoreApplication, QTimer, QEvent, QMutexLocker, QRunnable, QThreadPool, QEventLoop
 from PySide6.QtGui import QKeySequence, QShortcut
 import paramiko
 
@@ -44,6 +45,155 @@ class CustomComboBox(QComboBox):
 
 class WorkerSignals(QObject):
     error = Signal(int, str)
+
+
+class ConnectionTestSignals(QObject):
+    step = Signal(str)
+    success = Signal(str)
+    error = Signal(str)
+    prompt_unknown_host = Signal(str, str, str)
+    prompt_bad_host_key = Signal(str, str)
+
+
+class ConnectionTestWorker(QRunnable):
+    MAX_RETRIES = 4
+
+    def __init__(self, hostname, port, username, password, pkey,
+                 known_hosts_path):
+        super().__init__()
+        self.hostname = hostname
+        self.port = port
+        self.username = username
+        self.password = password
+        self.pkey = pkey
+        self.known_hosts_path = known_hosts_path
+        self.signals = ConnectionTestSignals()
+        self._prompt_event = threading.Event()
+        self._prompt_result = None
+        self.setAutoDelete(True)
+
+    def resolve_prompt(self, accepted):
+        self._prompt_result = accepted
+        self._prompt_event.set()
+
+    def _wait_for_prompt(self, timeout=120):
+        self._prompt_event.wait(timeout)
+        return self._prompt_result
+
+    def run(self):
+        for _attempt in range(self.MAX_RETRIES):
+            try:
+                home_dir = self._do_connect()
+                self.signals.success.emit(home_dir)
+                return
+            except paramiko.BadHostKeyException as e:
+                fingerprint = (e.key.get_fingerprint().hex()
+                               if e.key else 'unknown')
+                self._prompt_event.clear()
+                self._prompt_result = None
+                self.signals.prompt_bad_host_key.emit(
+                    e.hostname, fingerprint)
+                if self._wait_for_prompt():
+                    self._remove_host_key(e.hostname)
+                    continue
+                self.signals.error.emit(
+                    f"Host key verification failed for {e.hostname}")
+                return
+            except Exception as e:
+                self.signals.error.emit(f"Failed to connect: {str(e)}")
+                return
+        self.signals.error.emit("Connection failed after multiple retries")
+
+    def _do_connect(self):
+        ssh = paramiko.SSHClient()
+        sftp = None
+        home_dir = '/'
+        try:
+            if os.path.exists(self.known_hosts_path):
+                try:
+                    ssh.load_host_keys(self.known_hosts_path)
+                except (OSError, IOError, RuntimeError):
+                    pass
+
+            worker_self = self
+
+            class _Policy(paramiko.MissingHostKeyPolicy):
+                def missing_host_key(self, client, hostname, key):
+                    worker_self._prompt_event.clear()
+                    worker_self._prompt_result = None
+                    worker_self.signals.prompt_unknown_host.emit(
+                        hostname, key.get_name(),
+                        key.get_fingerprint().hex())
+                    if worker_self._wait_for_prompt():
+                        client.get_host_keys().add(
+                            hostname, key.get_name(), key)
+                        try:
+                            client.save_host_keys(
+                                worker_self.known_hosts_path)
+                        except (OSError, IOError, RuntimeError):
+                            pass
+                        return
+                    raise paramiko.SSHException(
+                        f"Host key verification failed for {hostname}")
+
+            ssh.set_missing_host_key_policy(_Policy())
+
+            self.signals.step.emit(
+                f"Connecting to {self.hostname}:{self.port}...")
+
+            kwargs = {
+                'hostname': self.hostname,
+                'port': self.port,
+                'username': self.username,
+                'timeout': 60,
+            }
+
+            if self.pkey:
+                self.signals.step.emit("Authenticating with SSH key...")
+                ssh.connect(**kwargs, pkey=self.pkey)
+            else:
+                self.signals.step.emit("Authenticating...")
+                kwargs['password'] = self.password
+                ssh.connect(**kwargs)
+
+            self.signals.step.emit("Opening SFTP channel...")
+            sftp = ssh.open_sftp()
+
+            self.signals.step.emit("Testing directory access...")
+            sftp.listdir('.')
+
+            self.signals.step.emit("Determining home directory...")
+            try:
+                stdin, stdout, stderr = ssh.exec_command('pwd')
+                output = stdout.read().decode().strip()
+                err = stderr.read().decode().strip()
+                if output and not err:
+                    home_dir = output
+            except (OSError, IOError, RuntimeError):
+                pass
+
+            return home_dir
+        finally:
+            if sftp:
+                try:
+                    sftp.close()
+                except (OSError, IOError, RuntimeError):
+                    pass
+            try:
+                ssh.close()
+            except (OSError, IOError, RuntimeError):
+                pass
+
+    def _remove_host_key(self, hostname):
+        if os.path.exists(self.known_hosts_path):
+            try:
+                tmp = paramiko.SSHClient()
+                tmp.load_host_keys(self.known_hosts_path)
+                tmp.get_host_keys().remove(hostname)
+                tmp.save_host_keys(self.known_hosts_path)
+            except Exception:
+                pass
+
 
 class MainWindow(QMainWindow):  # Inherits from QMainWindow
     message_signal = Signal(str)
@@ -1096,6 +1246,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         initial_local_dir = connection_data.get("initial_local_dir", "")
         ssh_commands = connection_data.get("ssh_commands", "")
         follow_symlinks = connection_data.get("follow_symlinks", False)
+        self._pending_max_connections = connection_data.get("max_connections", 0)
         
         from sftp_preferences import get_preferences
         get_preferences().set_bool("follow_symlinks", bool(follow_symlinks))
@@ -1295,19 +1446,30 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             from sftp_preferences import get_preferences
             pool = get_connection_pool()
             prefs = get_preferences()
-            max_conns = prefs.get("max_ssh_connections_per_host", 8)
+            site_limit = getattr(self, '_pending_max_connections', 0) or 0
+            max_conns = site_limit if site_limit > 0 else prefs.get("max_ssh_connections_per_host", 8)
             pool.set_max_connections(self.temp_hostname, self.temp_port, self.temp_username, max_conns)
+            self._pending_max_connections = 0
 
-            # Test the connection with actual SFTP operation
+            # Pre-load SSH key on UI thread (may show passphrase dialog)
+            pkey = None
+            if self.temp_key:
+                self.message_signal.emit("Loading SSH key...")
+                pkey = self._load_private_key(self.temp_key)
+                if pkey is None:
+                    raise ValueError("Failed to load SSH key")
+
+            # Test connection in background with progress dialog
             self.message_signal.emit("Testing SFTP connection...")
-            try:
-                home_dir = self.test_connection()
-                if not home_dir:
-                    raise ValueError("SFTP connection test failed")
-                self.message_signal.emit("Connection test passed!")
-            except (OSError, IOError, RuntimeError) as e:
-                self.message_signal.emit(f"Connection test failed: {e}")
-                raise  # Re-raise to trigger main exception handling
+            known_hosts_path = os.path.expanduser('~/.ssh/known_hosts')
+            home_dir = self._test_connection_with_progress(
+                self.temp_hostname, self.temp_port,
+                self.temp_username, self.temp_password,
+                pkey, known_hosts_path
+            )
+            if home_dir is None:
+                return None
+            self.message_signal.emit("Connection test passed!")
 
             self.message_signal.emit(f"Successfully connected to {self.temp_hostname}")
 
@@ -1510,7 +1672,93 @@ Do you want to update the host key and continue connecting?"""
                 ssh.close()
             except (OSError, IOError, RuntimeError) as e:
                 pass
-        
+
+    def _test_connection_with_progress(self, hostname, port, username,
+                                       password, pkey, known_hosts_path):
+        progress = QProgressDialog(
+            f"Connecting to {hostname}:{port}...", None, 0, 0, self)
+        progress.setWindowTitle("Connecting")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setMinimumWidth(380)
+        progress.show()
+        QApplication.processEvents()
+
+        worker = ConnectionTestWorker(
+            hostname, port, username, password, pkey, known_hosts_path)
+
+        result = {'home_dir': None, 'error': None}
+        cancelled = [False]
+        loop = QEventLoop(self)
+
+        def on_step(msg):
+            progress.setLabelText(msg)
+
+        def on_success(home_dir):
+            result['home_dir'] = home_dir
+            loop.quit()
+
+        def on_error(msg):
+            result['error'] = msg
+            loop.quit()
+
+        def on_prompt_unknown_host(host, key_type, fingerprint):
+            msg = (
+                f"Unknown host: {host}\n\n"
+                f"Key type: {key_type}\n"
+                f"Fingerprint: {fingerprint}\n\n"
+                "Do you want to trust this host?")
+            reply = QMessageBox.question(
+                self, "Unknown Host Key", msg,
+                Qt.MsgBtn_Yes | Qt.MsgBtn_No, Qt.MsgBtn_No)
+            worker.resolve_prompt(reply == Qt.MsgBtn_Yes)
+
+        def on_prompt_bad_host_key(host, fingerprint):
+            msg = (
+                f"Host key mismatch for {host}\n\n"
+                "The server's host key has changed. "
+                "This could indicate:\n"
+                "  \u2022 The server was rebuilt\n"
+                "  \u2022 A man-in-the-middle attack\n\n"
+                f"Fingerprint: {fingerprint}\n\n"
+                "Update the host key and continue?")
+            reply = QMessageBox.question(
+                self, "Host Key Changed", msg,
+                Qt.MsgBtn_Yes | Qt.MsgBtn_No, Qt.MsgBtn_No)
+            worker.resolve_prompt(reply == Qt.MsgBtn_Yes)
+
+        def on_rejected():
+            cancelled[0] = True
+            loop.quit()
+
+        worker.signals.step.connect(on_step)
+        worker.signals.success.connect(on_success)
+        worker.signals.error.connect(on_error)
+        worker.signals.prompt_unknown_host.connect(on_prompt_unknown_host)
+        worker.signals.prompt_bad_host_key.connect(on_prompt_bad_host_key)
+        progress.rejected.connect(on_rejected)
+
+        QThreadPool.globalInstance().start(worker)
+        loop.exec()
+
+        progress.close()
+
+        if cancelled[0]:
+            self.message_signal.emit("Connection cancelled")
+            return None
+
+        if result['error']:
+            self.message_signal.emit(
+                f"Connection test failed: {result['error']}")
+            QMessageBox.critical(
+                self, "Connection Error", result['error'])
+            return None
+
+        return result['home_dir']
+
     def set_credentials_async(self):
             set_credentials(self.session_id, 'hostname', self.temp_hostname)
             set_credentials(self.session_id, 'username', self.temp_username)

@@ -199,13 +199,6 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         self.table.setFocusPolicy(Qt.StrongFocus)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         
-        from sftp_preferences import get_preferences
-        prefs = get_preferences()
-        col = prefs.get("sort_column", 0)
-        order_str = prefs.get("sort_order", "ascending")
-        order = Qt.AscendingOrder if order_str == "ascending" else Qt.DescendingOrder
-        self.table.sortByColumn(col, order)
-        
         self.table.horizontalHeader().sortIndicatorChanged.connect(self._on_sort_changed)
 
         self._tree_position = "above"
@@ -563,9 +556,9 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         # Force the view to re-sort after data is loaded
         if hasattr(self, 'proxy_model') and self.proxy_model:
             self.proxy_model.invalidate()
-            # Use view's sortByColumn to trigger actual sorting
-            current_order = self.table.horizontalHeader().sortIndicatorOrder()
-            self.table.sortByColumn(0, current_order)
+            col = self.table.horizontalHeader().sortIndicatorSection()
+            order = self.table.horizontalHeader().sortIndicatorOrder()
+            self.table.sortByColumn(col, order)
 
     def add_observer(self, observer):
         """Add an observer with thread-safe lock protection."""
