@@ -14,6 +14,7 @@ from sftp_creds import (get_credentials, create_random_integer, set_credentials,
                         verify_credential_update, verify_directory_consistency)
 from sftp_downloadworkerclass import add_sftp_job
 from sftp_preferences import get_preferences
+from sftp_context_menu_customizer import is_visible
 
 
 def _remote_join(base, name):
@@ -886,7 +887,13 @@ class RemoteFileBrowser(FileBrowser):
         password = creds.get('password', '')
         key = creds.get('key', '')
         
-        for idx, (source_path, dest_path, command) in enumerate(file_list):
+        self.transfer_queue_widget.begin_batch_add()
+        for idx, item in enumerate(file_list):
+            if len(item) >= 4:
+                source_path, dest_path, command, file_size = item[0], item[1], item[2], item[3]
+            else:
+                source_path, dest_path, command = item[0], item[1], item[2]
+                file_size = 0
             transfer_id = f"download_{idx}_{int(time.time() * 1000)}"
             
             self.transfer_queue_widget.signal_add_transfer_display.emit((
@@ -902,8 +909,11 @@ class RemoteFileBrowser(FileBrowser):
                 command,
                 key,
                 worker.session_id,
-                group_id
+                group_id,
+                file_size
             ))
+        
+        self.transfer_queue_widget.end_batch_add()
         
         self.transfer_queue_widget.on_discovery_finished()
         
@@ -1259,65 +1269,93 @@ class RemoteFileBrowser(FileBrowser):
         # Disable if at filesystem root
         self.tree_up_btn.setEnabled(current_dir != '/' and current_dir != '')
     
-    def tree_context_menu_handler(self, pos):
-        """Handle context menu on tree widget"""
-        from PySide6.QtWidgets import QMenu, QInputDialog
-        
-        item = self.tree_widget.itemAt(pos)
+    def _get_remote_tree_menu_config(self):
+        prefs = get_preferences()
+        items = prefs.get('context_menu_items', {}).get('remote_tree')
+        if not items:
+            from sftp_preferences import DEFAULT_PREFERENCES
+            items = DEFAULT_PREFERENCES.get('context_menu_items', {}).get('remote_tree', [])
+        return items
+
+    def populate_tree_context_menu(self, menu, pos, item):
+        """Populate the remote tree context menu."""
+        from PySide6.QtWidgets import QInputDialog
+
+        items = self._get_remote_tree_menu_config()
+
         if not item:
+            refresh_action = menu.addAction("🔄 Refresh Tree")
+            refresh_action.triggered.connect(self.populate_tree_view)
             return
-        
+
         data = item.data(0, Qt.UserRole)
         if not data:
             return
-        
+
         path = data.get('path')
         is_root = data.get('is_root', False)
-        
-        menu = QMenu()
-        
+
         if not is_root:
-            open_action = menu.addAction("📂 Open")
-            rename_action = menu.addAction("✏️ Rename")
-            delete_action = menu.addAction("🗑️ Delete")
-        refresh_action = menu.addAction("🔄 Refresh")
+            if is_visible(items, 'open'):
+                open_action = menu.addAction("📂 Open")
+                open_action.triggered.connect(lambda: self.tree_open_handler(path, item))
+
+            if is_visible(items, 'rename'):
+                rename_action = menu.addAction("✏️ Rename")
+                rename_action.triggered.connect(lambda: self.tree_rename_handler(path))
+
+            if is_visible(items, 'delete'):
+                delete_action = menu.addAction("🗑️ Delete")
+                delete_action.triggered.connect(lambda: self.tree_delete_handler(path, item))
+
+        if is_visible(items, 'refresh'):
+            refresh_action = menu.addAction("🔄 Refresh")
+            refresh_action.triggered.connect(self.populate_tree_view)
+
         if not is_root:
-            menu.addSeparator()
-            download_action = menu.addAction("⬇️ Download Directory")
-        
-        action = menu.exec(self.tree_widget.mapToGlobal(pos))
-        
-        if action == open_action:
-            self.change_directory(path)
-            self._tree_current_path = path
-            self._mark_current_item(item)
-            self.tree_path_input.setText(path)
-        elif action == rename_action:
-            folder_name = os.path.basename(path.rstrip('/'))
-            new_name, ok = QInputDialog.getText(
-                None, "Rename", 
-                f"Enter new name for '{folder_name}':",
-                text=folder_name
-            )
-            if ok and new_name and new_name != folder_name:
-                parent_dir = os.path.dirname(path.rstrip('/'))
-                new_path = os.path.join(parent_dir, new_name)
-                self.sftp_rename(path, new_path)
-                self.populate_tree_view()
-        elif action == delete_action:
-            # Check if it's a directory and confirm deletion
-            data = item.data(0, Qt.UserRole)
-            is_dir = data.get('is_dir', False) if data else False
-            if is_dir:
-                self.remove_directory_with_prompt(remote_path=path)
-            else:
-                self.sftp_remove(path)
+            if is_visible(items, 'download_directory'):
+                menu.addSeparator()
+                download_action = menu.addAction("⬇️ Download Directory")
+                download_action.triggered.connect(lambda: self.tree_download_handler(path))
+
+        self.add_custom_tree_context_menu_actions(menu, pos, item)
+
+    def tree_open_handler(self, path, item):
+        """Handle opening a directory from the tree."""
+        self.change_directory(path)
+        self._tree_current_path = path
+        self._mark_current_item(item)
+        self.tree_path_input.setText(path)
+
+    def tree_rename_handler(self, path):
+        """Handle renaming a directory from the tree."""
+        from PySide6.QtWidgets import QInputDialog
+        folder_name = os.path.basename(path.rstrip('/'))
+        new_name, ok = QInputDialog.getText(
+            None, "Rename", 
+            f"Enter new name for '{folder_name}':",
+            text=folder_name
+        )
+        if ok and new_name and new_name != folder_name:
+            parent_dir = os.path.dirname(path.rstrip('/'))
+            new_path = os.path.join(parent_dir, new_name)
+            self.sftp_rename(path, new_path)
             self.populate_tree_view()
-        elif action == refresh_action:
-            self.populate_tree_view()
-        elif action == download_action:
-            creds = get_credentials(self.session_id)
-            local_base = creds.get('current_local_directory', os.path.expanduser('~'))
-            folder_name = os.path.basename(path.rstrip('/'))
-            local_dir = os.path.join(local_base, folder_name)
-            self.download_directory(path, local_dir)
+
+    def tree_delete_handler(self, path, item):
+        """Handle deleting a directory from the tree."""
+        data = item.data(0, Qt.UserRole)
+        is_dir = data.get('is_dir', False) if data else False
+        if is_dir:
+            self.remove_directory_with_prompt(remote_path=path)
+        else:
+            self.sftp_remove(path)
+        self.populate_tree_view()
+
+    def tree_download_handler(self, path):
+        """Handle downloading a directory from the tree."""
+        creds = get_credentials(self.session_id)
+        local_base = creds.get('current_local_directory', os.path.expanduser('~'))
+        folder_name = os.path.basename(path.rstrip('/'))
+        local_dir = os.path.join(local_base, folder_name)
+        self.download_directory(path, local_dir)

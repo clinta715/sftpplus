@@ -252,7 +252,7 @@ class RemoteFileTableModel(QAbstractTableModel):
                         size = item.st_size
                         mode = item.st_mode
                         mtime = item.st_mtime
-                    modified_time = QDateTime.fromSecsSinceEpoch(mtime).toString(Qt.ISODate)
+                    modified_time = QDateTime.fromSecsSinceEpoch(int(mtime)).toString(Qt.ISODate)
                     new_file_list.append((name, size, mode, modified_time, item))
                 except Exception as e:
                     logger.debug(f"Error processing item: {e}")

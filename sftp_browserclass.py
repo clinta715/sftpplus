@@ -24,6 +24,7 @@ from sftp_preferences import get_preferences
 from sftp_session import SFTPCredentials, get_session_manager
 from sftp_browser_mixins import TreeViewMixin, BookmarkMixin, FileOpsMixin
 from sftp_drag_drop import start_drag, can_accept_drop, DragDropInfo
+from sftp_context_menu_customizer import is_visible
 
 logger = logging.getLogger('sftp.browser')
 
@@ -473,7 +474,22 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         pass
     
     def tree_context_menu_handler(self, pos):
-        """Handle context menu on tree widget. Override in subclasses."""
+        """Handle context menu on tree widget."""
+        item = self.tree_widget.itemAt(pos)
+        
+        menu = QMenu(self)
+        self.populate_tree_context_menu(menu, pos, item)
+        
+        if not menu.isEmpty():
+            menu.exec(self.tree_widget.mapToGlobal(pos))
+
+    def populate_tree_context_menu(self, menu, pos, item):
+        """Populate the tree context menu. Override in subclasses."""
+        # Hook for custom actions
+        self.add_custom_tree_context_menu_actions(menu, pos, item)
+
+    def add_custom_tree_context_menu_actions(self, menu, pos, item):
+        """Hook for adding custom actions to the tree context menu. Override in subclasses."""
         pass
     
     def tree_item_expanded_handler(self, item):
@@ -1154,12 +1170,12 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             self.message_signal.emit(f"double_click_handler() error: {e}")
 
     def context_menu_handler(self, point):
+        """Handle context menu for the file table."""
         # If point is not provided, use the center of the list widget
         if not point:
             point = self.table.rect().center()
 
         # Get the currently focused widget
-        # current_browser = self.focusWidget()
         current_browser = self.table
         
         if current_browser is not None:
@@ -1175,32 +1191,76 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                             Qt.Select | Qt.Rows)
                         current_browser.setCurrentIndex(index_at_point)
             
-            # Debug: check what's selected
-            indexes = current_browser.selectedIndexes()
-            
-            if not indexes:
-                # Don't show menu if nothing selected
-                return
-            
             menu = QMenu(self)
-            # Add actions to the menu
-            rename_action = menu.addAction("Rename")
-            remove_dir_action = menu.addAction("Remove Directory")
-            change_dir_action = menu.addAction("Change Directory")
-            upload_download_action = menu.addAction("Upload/Download")
-            prompt_and_create_directory = menu.addAction("Create Directory")
-            view_edit_action = menu.addAction("View/Edit")
+            self.populate_context_menu(menu, point)
             
-            # Add the new Refresh action
-            refresh_action = menu.addAction("Refresh")
-            
-            menu.addSeparator()  # Visual separator
-            
-            # Add bookmark actions
+            if not menu.isEmpty():
+                # Show the menu at the cursor position
+                menu.exec(current_browser.mapToGlobal(point))
+
+    def _get_file_table_menu_config(self):
+        prefs = get_preferences()
+        items = prefs.get('context_menu_items', {}).get('file_table')
+        if not items:
+            from sftp_preferences import DEFAULT_PREFERENCES
+            items = DEFAULT_PREFERENCES.get('context_menu_items', {}).get('file_table', [])
+        return items
+
+    def populate_context_menu(self, menu, point):
+        """Populate the table context menu. Override to customize."""
+        indexes = self.table.selectedIndexes()
+        self.add_selection_context_menu_actions(menu, bool(indexes))
+        self.add_general_context_menu_actions(menu)
+        self.add_bookmark_context_menu_actions(menu)
+        self.add_custom_context_menu_actions(menu, point)
+
+    def add_selection_context_menu_actions(self, menu, has_selection):
+        """Add actions that require a selection."""
+        if not has_selection:
+            return
+        items = self._get_file_table_menu_config()
+        actions_map = {
+            'rename': ("Rename", self.prompt_and_rename),
+            'remove_directory': ("Remove Directory", self.remove_directory_with_prompt),
+            'change_directory': ("Change Directory", self.change_directory_handler),
+            'upload_download': ("Upload/Download", self.upload_download),
+            'view_edit': ("View/Edit", self.view_edit_file),
+        }
+        added = False
+        for item in items:
+            aid = item['id']
+            if aid in actions_map and is_visible(items, aid):
+                text, callback = actions_map[aid]
+                action = menu.addAction(text)
+                action.triggered.connect(callback)
+                added = True
+        if added:
+            menu.addSeparator()
+
+    def add_general_context_menu_actions(self, menu):
+        """Add general actions that don't necessarily require a selection."""
+        items = self._get_file_table_menu_config()
+        actions_map = {
+            'create_directory': ("Create Directory", self.prompt_and_create_directory),
+            'refresh': ("Refresh", self.refresh_files),
+        }
+        for item in items:
+            aid = item['id']
+            if aid in actions_map and is_visible(items, aid):
+                text, callback = actions_map[aid]
+                action = menu.addAction(text)
+                action.triggered.connect(callback)
+        menu.addSeparator()
+
+    def add_bookmark_context_menu_actions(self, menu):
+        """Add bookmark-related actions."""
+        items = self._get_file_table_menu_config()
+        if is_visible(items, 'add_bookmark'):
             add_bookmark_action = menu.addAction("Add Bookmark")
+            add_bookmark_action.triggered.connect(lambda: self.add_bookmark())
+
+        if is_visible(items, 'go_to_bookmark'):
             bookmarks_menu = menu.addMenu("Go to Bookmark")
-            
-            # Populate bookmarks submenu
             bookmarks = self.get_bookmarks()
             if bookmarks:
                 for bookmark in bookmarks:
@@ -1212,22 +1272,23 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                 no_bookmarks_action = bookmarks_menu.addAction("No bookmarks")
                 no_bookmarks_action.setEnabled(False)
 
-        # Connect actions
-        rename_action.triggered.connect(self.prompt_and_rename)
-        remove_dir_action.triggered.connect(self.remove_directory_with_prompt)
-        change_dir_action.triggered.connect(self.change_directory_handler)
-        upload_download_action.triggered.connect(self.upload_download)
-        prompt_and_create_directory.triggered.connect(self.prompt_and_create_directory)
-        view_edit_action.triggered.connect(self.view_edit_file)
-        
-        # Connect the new Refresh action
-        refresh_action.triggered.connect(self.refresh_files)
-        
-        # Connect bookmark action
-        add_bookmark_action.triggered.connect(lambda: self.add_bookmark())
+    def add_custom_context_menu_actions(self, menu, point):
+        """Hook for adding custom actions to the table context menu. Override in subclasses."""
+        menu.addSeparator()
+        customize_action = menu.addAction("\u2699 Customize Context Menus...")
+        customize_action.triggered.connect(self._open_context_menu_customizer)
 
-        # Show the menu at the cursor position
-        menu.exec(current_browser.mapToGlobal(point))
+    def _open_context_menu_customizer(self):
+        from sftp_context_menu_customizer import customize_context_menus
+        prefs = get_preferences()
+        current = prefs.get('context_menu_items')
+        if not current:
+            from sftp_preferences import DEFAULT_PREFERENCES
+            current = DEFAULT_PREFERENCES.get('context_menu_items', {})
+        configs = {k: [item.copy() for item in v] for k, v in current.items()}
+        result = customize_context_menus(self, configs)
+        if result is not None:
+            prefs.set('context_menu_items', result)
 
     def upload_download(self):
         logger.debug("upload_download() CALLED in Browser")
@@ -1763,7 +1824,13 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         password = creds.get('password', '')
         key = creds.get('key', '')
         
-        for idx, (source_path, dest_path, command) in enumerate(file_list):
+        self.transfer_queue_widget.begin_batch_add()
+        for idx, item in enumerate(file_list):
+            if len(item) >= 4:
+                source_path, dest_path, command, file_size = item[0], item[1], item[2], item[3]
+            else:
+                source_path, dest_path, command = item[0], item[1], item[2]
+                file_size = 0
             transfer_id = f"upload_{idx}_{int(time.time() * 1000)}"
             
             self.transfer_queue_widget.signal_add_transfer_display.emit((
@@ -1779,8 +1846,11 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                 command,
                 key,
                 worker.session_id,
-                group_id
+                group_id,
+                file_size
             ))
+        
+        self.transfer_queue_widget.end_batch_add()
         
         self.transfer_queue_widget.on_discovery_finished()
         self.message_signal.emit(f"Added {len(file_list)} item(s) to transfer queue")

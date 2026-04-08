@@ -36,7 +36,43 @@ DEFAULT_PREFERENCES = {
         {"id": "delete", "text": "✕ Delete", "tooltip": "Delete selected file(s)", "visible": True},
         {"id": "rename", "text": "⇄ Rename", "tooltip": "Rename selected file(s)", "visible": True},
         {"id": "view", "text": "👁 View", "tooltip": "View/Edit selected text file", "visible": True},
-    ]
+    ],
+    "context_menu_items": {
+        "file_table": [
+            {"id": "rename", "text": "Rename", "visible": True},
+            {"id": "remove_directory", "text": "Remove Directory", "visible": True},
+            {"id": "change_directory", "text": "Change Directory", "visible": True},
+            {"id": "upload_download", "text": "Upload/Download", "visible": True},
+            {"id": "view_edit", "text": "View/Edit", "visible": True},
+            {"id": "create_directory", "text": "Create Directory", "visible": True},
+            {"id": "refresh", "text": "Refresh", "visible": True},
+            {"id": "add_bookmark", "text": "Add Bookmark", "visible": True},
+            {"id": "go_to_bookmark", "text": "Go to Bookmark", "visible": True},
+        ],
+        "remote_tree": [
+            {"id": "open", "text": "📂 Open", "visible": True},
+            {"id": "rename", "text": "✏️ Rename", "visible": True},
+            {"id": "delete", "text": "🗑️ Delete", "visible": True},
+            {"id": "refresh", "text": "🔄 Refresh", "visible": True},
+            {"id": "download_directory", "text": "⬇️ Download Directory", "visible": True},
+        ],
+        "local_tree": [
+            {"id": "open", "text": "📂 Open", "visible": True},
+            {"id": "refresh", "text": "🔄 Refresh", "visible": True},
+            {"id": "upload_directory", "text": "⬆️ Upload Directory", "visible": True},
+            {"id": "delete", "text": "🗑️ Delete", "visible": True},
+        ],
+        "transfer_queue": [
+            {"id": "retry", "text": "Retry", "visible": True},
+            {"id": "priority", "text": "Priority", "visible": True},
+            {"id": "cancel", "text": "Cancel", "visible": True},
+        ],
+        "tab_bar": [
+            {"id": "rename", "text": "Rename Tab", "visible": True},
+            {"id": "close", "text": "Close Tab", "visible": True},
+            {"id": "close_others", "text": "Close Other Tabs", "visible": True},
+        ],
+    }
 }
 
 

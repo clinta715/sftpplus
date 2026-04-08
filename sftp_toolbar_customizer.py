@@ -2,9 +2,12 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
     QPushButton, QLabel, QCheckBox, QWidget, QFrame, QAbstractItemView
 )
+from PySide6.QtGui import QColor
 from sftp_qt_compat import Qt
 from sftp_theme import BUTTON_STYLE_DARK
 from sftp_preferences import get_preferences
+
+_DARK_GRAY = QColor(169, 169, 169)
 
 
 class ToolbarCustomizerDialog(QDialog):
@@ -99,7 +102,7 @@ class ToolbarCustomizerDialog(QDialog):
         display_text = f"{check}  {text}    —    {tooltip}"
         item.setText(display_text)
         if not visible:
-            item.setForeground(Qt.Color_darkGray)
+            item.setForeground(_DARK_GRAY)
     
     def _populate_list(self):
         self.list_widget.clear()
@@ -113,7 +116,7 @@ class ToolbarCustomizerDialog(QDialog):
             item = QListWidgetItem(display_text)
             item.setData(Qt.UserRole, btn)
             if not visible:
-                item.setForeground(Qt.Color_darkGray)
+                item.setForeground(_DARK_GRAY)
             self.list_widget.addItem(item)
     
     def _update_visibility(self, btn_config, state):

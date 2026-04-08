@@ -14,6 +14,7 @@ from PySide6.QtGui import QTextCursor
 import paramiko
 
 from sftp_creds import sanitize_error_message
+from sftp_platform import get_known_hosts_path, create_secure_directory
 
 
 # Comprehensive ANSI escape code regex pattern
@@ -133,14 +134,14 @@ class SSHTerminalWidget(QWidget):
         Setup SSH host key verification policy.
         Loads known_hosts and prompts user for unknown hosts.
         """
-        known_hosts_path = os.path.expanduser('~/.ssh/known_hosts')
+        known_hosts_path = get_known_hosts_path()
         
         # Try to load existing known_hosts
         if os.path.exists(known_hosts_path):
             try:
                 ssh.load_host_keys(known_hosts_path)
             except (OSError, IOError, paramiko.SSHException) as e:
-                self.terminal.appendPlainText(f"Warning: Could not load known_hosts: {sanitize_error_message(str(e))}\n")
+                self.terminal.appendPlainText(f"Warning: Could not load known_hosts from {known_hosts_path}: {sanitize_error_message(str(e))}\n")
         
         # Set up policy to warn about unknown hosts
         class InteractivePolicy(paramiko.MissingHostKeyPolicy):
@@ -165,6 +166,11 @@ class SSHTerminalWidget(QWidget):
                 
                 if reply == Qt.MsgBtn_Yes:
                     try:
+                        # Ensure the directory exists
+                        dir_path = os.path.dirname(self.known_hosts_path)
+                        if dir_path:
+                            create_secure_directory(dir_path)
+                            
                         client.get_host_keys().add(hostname, key.get_name(), key)
                         client.save_host_keys(self.known_hosts_path)
                         return

@@ -13,6 +13,7 @@ This document provides guidelines for AI coding agents working on this PyQt6-bas
 - **Dual-pane interface**: Local and remote file browsers side-by-side
 - **File preview panel**: Collapsible side panel for text/image preview
 - **Customizable toolbar**: Drag-and-drop reordering, visibility toggles
+- **Customizable context menus**: Toggle visibility of right-click menu items per menu
 - **Bookmarks**: Per-host directory bookmarks
 - **Tree view**: Directory tree panel (above or below list)
 - **Progress tracking**: Real-time progress indicators for file transfers
@@ -44,6 +45,7 @@ The project now uses a clean session-based API for SFTP operations. This provide
 | `sftp_preferences.py` | Persistent user preferences storage |
 | `sftp_preview_widget.py` | File preview side panel (text/images) |
 | `sftp_toolbar_customizer.py` | Toolbar customization dialog |
+| `sftp_context_menu_customizer.py` | Context menu customization dialog |
 | `sftp_qt_compat.py` | Qt6 enum compatibility layer |
 | `sftp_platform.py` | Cross-platform utilities (paths, permissions, shell detection) |
 | `sftp_logging.py` | Application logging to file |
@@ -1054,6 +1056,14 @@ Toolbar buttons can be customized via `sftp_toolbar_customizer.py`:
 - Right-click toolbar for quick toggle menu
 - Settings persist in preferences
 
+### Customizable Context Menus
+
+Context menus can be customized via `sftp_context_menu_customizer.py`:
+- Toggle visibility of individual menu items
+- Separate configs for: file table, remote tree, local tree, transfer queue, tab bar
+- Access via right-click menu → "Customize Context Menus..." or toolbar right-click
+- Settings persist in `context_menu_items` preference
+
 ### Tree View Position
 
 The directory tree panel can be positioned:
@@ -1341,3 +1351,79 @@ ETA uses `max(0, total_bytes - completed_bytes)` to avoid negative values.
 
 **Files Modified:**
 - `sftp_transfer_queue_widget.py` — `_start_queued_transfer()` (remote stat), `mark_transfer_complete()` (group cleanup), `mark_transfer_failed()` (group cleanup), `update_overall_progress()` (byte-based progress)
+
+### Type Safety & Resume Fix (2026-04-08)
+
+Multiple type mismatch bugs fixed across signals, models, and the transfer resume feature.
+
+#### Bug 1: Signal type mismatch in `mark_transfer_failed` (CRITICAL)
+
+**Root Cause:**
+`signal_transfer_error` is declared as `Signal(int, str)` (count, message), but `mark_transfer_failed()` emitted `signal_transfer_error.emit(transfer_id, error_message)` where `transfer_id` is a string. PySide6 silently logged `_pythonToCppCopy: Cannot copy-convert (str) to C++` and the handler `_on_transfer_error()` received garbage for the `count` parameter.
+
+**Fix:**
+Moved `active_transfers` decrement before the emit, and changed to `signal_transfer_error.emit(self.active_transfers, error_message)` so the first arg is always an int.
+
+#### Bug 2: `QDateTime.fromSecsSinceEpoch()` with float mtime
+
+**Root Cause:**
+Paramiko's `SFTPAttributes.st_mtime` can be a float (sub-second precision from some servers). PySide6's `QDateTime.fromSecsSinceEpoch()` expects `int` (C++ `qint64`).
+
+**Fix:**
+Wrapped `mtime` in `int()` at `sftp_remotefiletablemodel.py:255`.
+
+#### Bug 3: Port stored as string in credentials
+
+**Root Cause:**
+`set_credentials()` stored port as `str(self.temp_port)` instead of `int(self.temp_port)`. The string port propagated through `SFTPOperations`, `ConnectionPool`, and signal emit tuples.
+
+**Fix:**
+Changed to `int(self.temp_port)` at `sftp.py:1886`.
+
+#### Bug 4: Resume command not handled in `DirectTransferWorker` (CRITICAL)
+
+**Root Cause:**
+When users picked "Resume" from the file conflict dialog, callers set `command = "resume"`. But `_do_transfer()` only checked `self.command == "upload"` and `self.command == "download"`. The "resume" command fell through to the `else` block, emitting `"Unknown command: resume"` and marking the transfer as failed. The resume logic (seek + append) was correct but never executed.
+
+**Fix:**
+Added normalization at the top of `_do_transfer()`:
+```python
+command = self.command
+if command == "resume":
+    command = "download" if self.is_source_remote else "upload"
+```
+This maps resume to the correct upload/download branch, where the existing `if resume:` code paths handle seek + append correctly.
+
+#### Bug 5: `QColor` from compat layer not accepted by `setForeground()`
+
+**Root Cause:**
+`sftp_toolbar_customizer.py` used `Qt.Color_darkGray` from the compat layer, but PySide6's `QListWidgetItem.setForeground()` requires a proper `QColor` object, not a `QtCore.Qt.GlobalColor` enum value.
+
+**Fix:**
+Replaced with `QColor(169, 169, 169)` constant.
+
+#### Other Changes
+
+- Connection test worker: Added transient error retry logic with friendly error messages for banner/timeout/refused/unreachable errors
+- Host key removal: Robust `HostKeys` deletion handling across paramiko versions
+- Known hosts directory: Auto-created via `create_secure_directory()` before saving
+- Tree context menus: Refactored to use customizable context menu items with per-menu configs
+- File table context menus: Refactored to use customizable context menu items
+- Tab bar context menus: Refactored to use customizable context menu items
+- Discovery progress throttling: `TraversalWorker` now throttles discovery signals to max every 200ms or 50 files
+- File size tracking: `TraversalWorker` now collects file sizes during discovery (included in 4-tuple)
+- Disk full detection: `DirectTransferWorker` detects disk full errors and stops retries
+- Batch add: Browser classes use `begin_batch_add()`/`end_batch_add()` when adding multiple transfers from traversal
+
+**Files Modified:**
+- `sftp_transfer_queue_widget.py` — Signal type fix, batch add methods, file size in tuples, discovery throttling
+- `sftp_transfer_handler.py` — Resume command normalization, disk full detection, file size in collected files, discovery throttling
+- `sftp_remotefiletablemodel.py` — `int(mtime)` guard
+- `sftp.py` — Port stored as int, transient error retry, friendly error messages, host key fixes, context menu customization, known_hosts path
+- `sftp_browserclass.py` — Customizable context menus, file size in transfer tuples, batch add
+- `sftp_filebrowserclass.py` — Customizable tree context menus
+- `sftp_remotefilebrowserclass.py` — Customizable tree context menus, file size in transfer tuples, batch add
+- `sftp_preferences.py` — Added `context_menu_items` default configuration
+- `sftp_toolbar_customizer.py` — QColor fix for setForeground
+- `sftp_terminal_widget.py` — Known hosts path and directory creation
+- `sftp_context_menu_customizer.py` — New file: context menu customization dialog

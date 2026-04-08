@@ -17,6 +17,7 @@ from sftp_downloadworkerclass import Transfer, DownloadWorker, SFTPJob, sftp_que
 from sftp_theme import (BUTTON_STYLE_DARK, LIST_WIDGET_STYLE_DARK, PROGRESS_BAR_STYLE_DARK,
                         TEXT_EDIT_STYLE_DARK, DARK_THEME)
 from sftp_preferences import get_preferences
+from sftp_context_menu_customizer import is_visible
 import sftp_hostdataeditor
 from sftp_transfer_history import log_transfer
 from sftp_platform import get_transfer_queue_path, create_secure_directory, secure_file_permissions, is_windows
@@ -197,6 +198,7 @@ class TransferQueueWidget(QWidget):
         self._paused_by_user = False         # User-initiated pause (vs system)
         self._session_waiters = {}            # transfer_id -> hostname waiting for session
         self._queue_save_timer = None         # Debounce timer for saves
+        self._batch_add_active = False        # True during batch add to defer UI updates
         
         # Status colors for UI
         self._status_colors = {
@@ -221,7 +223,10 @@ class TransferQueueWidget(QWidget):
         self.init_ui()
 
     def _insert_pending_by_priority(self, transfer_info):
-        """Insert transfer into queue based on priority (higher = sooner)"""
+        """Insert transfer into queue. During batch mode, append to end for O(1)."""
+        if self._batch_add_active:
+            self._pending_display_transfers.append(transfer_info)
+            return
         priority = transfer_info['priority']
         added_time = transfer_info['added_time']
         
@@ -235,6 +240,19 @@ class TransferQueueWidget(QWidget):
                 break
         
         self._pending_display_transfers.insert(insert_pos, transfer_info)
+
+    def begin_batch_add(self):
+        """Start batch add mode - defers UI updates and uses O(1) insertion"""
+        self._batch_add_active = True
+        self.transfer_list.setUpdatesEnabled(False)
+
+    def end_batch_add(self):
+        """End batch add mode - re-enables UI and starts queued transfers"""
+        self._batch_add_active = False
+        self.transfer_list.setUpdatesEnabled(True)
+        self._schedule_queue_save()
+        if not self._paused:
+            self._check_and_start_queued()
     
     @staticmethod
     def _is_transient_error(msg):
@@ -351,31 +369,11 @@ class TransferQueueWidget(QWidget):
 
             group_id = transfer_info.get('group_id')
             if group_id and group_id in self._transfer_groups:
-                file_size = 0
-                if not transfer_info['is_source_remote']:
+                file_size = transfer_info.get('file_size', 0)
+                if file_size <= 0 and not transfer_info['is_source_remote']:
                     try:
                         file_size = os.path.getsize(transfer_info['source_path'])
                     except (OSError, IOError):
-                        pass
-                else:
-                    try:
-                        from sftp_connection_pool import get_connection_pool
-                        pool = get_connection_pool()
-                        _ssh, _sftp = pool.get_connection(
-                            transfer_info['hostname'],
-                            transfer_info.get('port', 22),
-                            transfer_info['username'],
-                            transfer_info.get('password'),
-                            transfer_info.get('key'),
-                        )
-                        file_size = _sftp.stat(transfer_info['source_path']).st_size
-                        pool.release_connection(
-                            transfer_info['hostname'],
-                            transfer_info.get('port', 22),
-                            transfer_info['username'],
-                            _sftp,
-                        )
-                    except Exception:
                         pass
                 if file_size > 0:
                     self._transfer_groups[group_id]["total_bytes"] += file_size
@@ -400,6 +398,10 @@ class TransferQueueWidget(QWidget):
             worker.signals.retrying.connect(
                 lambda attempt, max_att, err, tid=transfer_id:
                     self._handle_retrying(tid, attempt, max_att, err),
+                type=Qt.QueuedConnection
+            )
+            worker.signals.disk_full.connect(
+                lambda err: self._handle_disk_full(err),
                 type=Qt.QueuedConnection
             )
             
@@ -481,6 +483,49 @@ class TransferQueueWidget(QWidget):
         display['progress_bar'].setFormat(f"Retry {attempt}/{max_attempts} - waiting...")
         display['speed_label'].setText("-")
         display['eta_label'].setText("-")
+
+    def _handle_disk_full(self, error_message):
+        """Handle disk full by stopping all active and pending transfers."""
+        self.text_console.append(f"\u26a0 {error_message}")
+
+        stopped = 0
+        for transfer_id, display in list(self._transfer_displays.items()):
+            if display.get('is_active', False):
+                display['is_active'] = False
+                display['status'] = 'failed'
+                display['error_message'] = error_message
+                display['status_label'].setText("Disk Full")
+                display['status_label'].setStyleSheet(
+                    f"font-size: 10px; color: {DARK_THEME['error']}; font-weight: 500;")
+                display['progress_bar'].setFormat("Stopped - disk full")
+                if transfer_id in self._active_workers:
+                    worker = self._active_workers[transfer_id]
+                    if hasattr(worker, 'cancel'):
+                        worker.cancel()
+                stopped += 1
+
+        self._pending_display_transfers.clear()
+
+        with QMutexLocker(self._active_transfers_lock):
+            self.active_transfers = 0
+
+        self._current_group_id = None
+
+        if stopped > 0:
+            self.text_console.append(
+                f"Stopped {stopped} transfer(s). Free up disk space and retry.")
+
+        self.update_overall_progress()
+        self._update_queue_status_label()
+        self._schedule_queue_save()
+
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.warning(
+            self, "Disk Full",
+            "The destination drive has run out of space.\n\n"
+            f"All remaining transfers have been stopped ({stopped} active).\n"
+            "Free up disk space and retry your transfers."
+        )
     
     def _update_queue_status_label(self):
         """Update the queue status label in header"""
@@ -566,11 +611,12 @@ class TransferQueueWidget(QWidget):
     
     def _schedule_queue_save(self):
         """Debounced save - wait 1 second after last change"""
-        if self._queue_save_timer:
+        if self._queue_save_timer is None:
+            self._queue_save_timer = QTimer(self)
+            self._queue_save_timer.setSingleShot(True)
+            self._queue_save_timer.timeout.connect(self._save_pending_queue)
+        else:
             self._queue_save_timer.stop()
-        self._queue_save_timer = QTimer()
-        self._queue_save_timer.setSingleShot(True)
-        self._queue_save_timer.timeout.connect(self._save_pending_queue)
         self._queue_save_timer.start(1000)
     
     def _load_pending_queue(self):
@@ -845,7 +891,8 @@ class TransferQueueWidget(QWidget):
         
     def _add_transfer_display_slot(self, args_tuple):
         """Slot for thread-safe transfer display addition (called via signal from background threads)"""
-        transfer_id, source_path, dest_path, is_source_remote, is_destination_remote, hostname, port, username, password, command, key, session_id, group_id = args_tuple
+        transfer_id, source_path, dest_path, is_source_remote, is_destination_remote, hostname, port, username, password, command, key, session_id, group_id = args_tuple[:13]
+        file_size = args_tuple[13] if len(args_tuple) > 13 else 0
         if DEBUG:
             print(f"DEBUG: _add_transfer_display_slot called for {transfer_id}", file=sys.stderr)
         self.add_transfer_display(
@@ -861,7 +908,8 @@ class TransferQueueWidget(QWidget):
             command=command,
             key=key,
             session_id=session_id,
-            group_id=group_id
+            group_id=group_id,
+            file_size=file_size
         )
 
     def toggle_panel(self):
@@ -1487,7 +1535,8 @@ class TransferQueueWidget(QWidget):
     def add_transfer_display(self, transfer_id, source_path, dest_path, 
                              is_source_remote, is_destination_remote, hostname,
                              port, username, password, command, key,
-                             session_id=None, group_id=None, priority=0):
+                             session_id=None, group_id=None, priority=0,
+                             file_size=0):
         """
         Add a transfer to the queue (not started immediately if at limit).
         """
@@ -1533,6 +1582,7 @@ class TransferQueueWidget(QWidget):
                 'status': status,
                 'session_id': session_id,
                 'added_time': time.time(),
+                'file_size': file_size,
             }
             
             # Insert by priority
@@ -1541,12 +1591,11 @@ class TransferQueueWidget(QWidget):
             # Create UI with appropriate status
             self._create_transfer_display(transfer_info, status)
             
-            # Save to disk
-            self._schedule_queue_save()
-            
-            # Try to start
-            if not self._paused:
-                self._check_and_start_queued()
+            # Save to disk and try to start (deferred during batch)
+            if not self._batch_add_active:
+                self._schedule_queue_save()
+                if not self._paused:
+                    self._check_and_start_queued()
             
         except Exception as e:
             import traceback
@@ -1766,44 +1815,55 @@ class TransferQueueWidget(QWidget):
             group_id=transfer_info.get('group_id')
         )
     
+    def _get_transfer_menu_config(self):
+        prefs = get_preferences()
+        items = prefs.get('context_menu_items', {}).get('transfer_queue')
+        if not items:
+            from sftp_preferences import DEFAULT_PREFERENCES
+            items = DEFAULT_PREFERENCES.get('context_menu_items', {}).get('transfer_queue', [])
+        return items
+
     def _show_transfer_context_menu(self, pos):
         """Show context menu for transfer at position"""
         item = self.transfer_list.itemAt(pos)
         if not item:
             return
-        
+
         transfer_id = item.data(Qt.UserRole)
         if not transfer_id:
             return
-        
+
         menu = QMenu(self)
-        
-        # Retry action for failed transfers
+        items = self._get_transfer_menu_config()
+
+        is_failed = False
         if transfer_id in self._transfer_displays:
             display = self._transfer_displays[transfer_id]
             if display['status'] == 'failed':
-                retry_action = menu.addAction("Retry")
-                retry_action.triggered.connect(lambda: self._retry_failed_transfer(item))
-                menu.addSeparator()
-        
-        # Priority submenu
-        priority_menu = menu.addMenu("Priority")
-        top_action = priority_menu.addAction("Move to Top")
-        up_action = priority_menu.addAction("Move Up")
-        down_action = priority_menu.addAction("Move Down")
-        bottom_action = priority_menu.addAction("Move to Bottom")
-        
-        # Connect
-        top_action.triggered.connect(lambda: self._move_transfer(transfer_id, 'top'))
-        up_action.triggered.connect(lambda: self._move_transfer(transfer_id, 'up'))
-        down_action.triggered.connect(lambda: self._move_transfer(transfer_id, 'down'))
-        bottom_action.triggered.connect(lambda: self._move_transfer(transfer_id, 'bottom'))
-        
-        # Cancel action
-        menu.addSeparator()
-        cancel_action = menu.addAction("Cancel")
-        cancel_action.triggered.connect(lambda: self._cancel_display_transfer(transfer_id))
-        
+                is_failed = True
+
+        if is_failed and is_visible(items, 'retry'):
+            retry_action = menu.addAction("Retry")
+            retry_action.triggered.connect(lambda: self._retry_failed_transfer(item))
+            menu.addSeparator()
+
+        if is_visible(items, 'priority'):
+            priority_menu = menu.addMenu("Priority")
+            top_action = priority_menu.addAction("Move to Top")
+            up_action = priority_menu.addAction("Move Up")
+            down_action = priority_menu.addAction("Move Down")
+            bottom_action = priority_menu.addAction("Move to Bottom")
+
+            top_action.triggered.connect(lambda: self._move_transfer(transfer_id, 'top'))
+            up_action.triggered.connect(lambda: self._move_transfer(transfer_id, 'up'))
+            down_action.triggered.connect(lambda: self._move_transfer(transfer_id, 'down'))
+            bottom_action.triggered.connect(lambda: self._move_transfer(transfer_id, 'bottom'))
+
+        if is_visible(items, 'cancel'):
+            menu.addSeparator()
+            cancel_action = menu.addAction("Cancel")
+            cancel_action.triggered.connect(lambda: self._cancel_display_transfer(transfer_id))
+
         menu.exec(self.transfer_list.mapToGlobal(pos))
     
     def _move_transfer(self, transfer_id, direction):
@@ -1953,10 +2013,10 @@ class TransferQueueWidget(QWidget):
         file_name = os.path.basename(display['source'])
         self.text_console.append(f"Transfer failed: {file_name} - {error_message}")
 
-        self.signal_transfer_error.emit(transfer_id, error_message)
-
         with QMutexLocker(self._active_transfers_lock):
             self.active_transfers = max(0, self.active_transfers - 1)
+
+        self.signal_transfer_error.emit(self.active_transfers, error_message)
 
         group_id = display.get('group_id')
         if group_id and group_id in self._transfer_groups:

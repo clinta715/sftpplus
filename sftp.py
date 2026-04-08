@@ -27,8 +27,10 @@ import paramiko
 
 from sftp_preferences import get_preferences
 from sftp_toolbar_customizer import customize_toolbar
+from sftp_context_menu_customizer import is_visible, customize_context_menus
 from sftp_about import show_about
 from sftp_logging import setup_logging, get_logger
+from sftp_platform import get_known_hosts_path, create_secure_directory
 
 logger = logging.getLogger('sftp')
 
@@ -80,6 +82,56 @@ class ConnectionTestWorker(QRunnable):
         self._prompt_event.wait(timeout)
         return self._prompt_result
 
+    @staticmethod
+    def _is_transient_error(exc):
+        msg = str(exc).lower()
+        transient_keywords = [
+            'banner', 'timeout', 'timed out', 'eof', 'connection reset',
+            'broken pipe', 'refused', 'unreachable', 'no route',
+            'network is', 'temporarily unavailable', 'channel',
+            'session is not active', 'session active', 'transport',
+        ]
+        return any(kw in msg for kw in transient_keywords)
+
+    @staticmethod
+    def _friendly_error(exc):
+        msg = str(exc)
+        lower = msg.lower()
+        if 'banner' in lower:
+            return (
+                "Could not establish SSH connection.\n\n"
+                "The server did not respond in time. This may be caused by:\n"
+                "  \u2022 Network congestion or temporary outage\n"
+                "  \u2022 The server is overloaded or restarting\n"
+                "  \u2022 A firewall blocking the connection\n\n"
+                "Please try again in a moment."
+            )
+        if 'timeout' in lower or 'timed out' in lower:
+            return (
+                "Connection timed out.\n\n"
+                "The server did not respond within the allowed time.\n"
+                "Please check your network connection and try again."
+            )
+        if 'refused' in lower:
+            return (
+                "Connection refused.\n\n"
+                f"The server refused the connection on port {msg}.\n"
+                "The SSH service may not be running."
+            )
+        if 'unreachable' in lower or 'no route' in lower:
+            return (
+                "Host unreachable.\n\n"
+                "The server could not be reached. Please check:\n"
+                "  \u2022 The hostname is correct\n"
+                "  \u2022 Your network connection is active"
+            )
+        if 'authentication' in lower or 'permission denied' in lower:
+            return (
+                "Authentication failed.\n\n"
+                "Please check your username and password or SSH key."
+            )
+        return f"Connection failed:\n{msg}"
+
     def run(self):
         for _attempt in range(self.MAX_RETRIES):
             try:
@@ -100,7 +152,12 @@ class ConnectionTestWorker(QRunnable):
                     f"Host key verification failed for {e.hostname}")
                 return
             except Exception as e:
-                self.signals.error.emit(f"Failed to connect: {str(e)}")
+                if self._is_transient_error(e) and _attempt < self.MAX_RETRIES - 1:
+                    import time as _time
+                    _time.sleep(1)
+                    continue
+                msg = self._friendly_error(e)
+                self.signals.error.emit(msg)
                 return
         self.signals.error.emit("Connection failed after multiple retries")
 
@@ -128,6 +185,10 @@ class ConnectionTestWorker(QRunnable):
                         client.get_host_keys().add(
                             hostname, key.get_name(), key)
                         try:
+                            # Ensure the directory exists
+                            dir_path = os.path.dirname(worker_self.known_hosts_path)
+                            if dir_path:
+                                create_secure_directory(dir_path)
                             client.save_host_keys(
                                 worker_self.known_hosts_path)
                         except (OSError, IOError, RuntimeError):
@@ -189,10 +250,24 @@ class ConnectionTestWorker(QRunnable):
             try:
                 tmp = paramiko.SSHClient()
                 tmp.load_host_keys(self.known_hosts_path)
-                tmp.get_host_keys().remove(hostname)
+                host_keys = tmp.get_host_keys()
+                # HostKeys is dict-like for some operations, but not always for deletion
+                if hostname in host_keys:
+                    try:
+                        # Try standard dict-like pop
+                        if hasattr(host_keys, 'pop'):
+                            host_keys.pop(hostname)
+                        elif hasattr(host_keys, '_keys'):
+                            # Fallback to private dict if necessary
+                            host_keys._keys.pop(hostname, None)
+                        else:
+                            # Final fallback - clear and re-add others (inefficient but safe)
+                            del host_keys[hostname]
+                    except (TypeError, KeyError, AttributeError):
+                        pass
                 tmp.save_host_keys(self.known_hosts_path)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Error removing host key for {hostname}: {e}")
 
 
 class MainWindow(QMainWindow):  # Inherits from QMainWindow
@@ -387,23 +462,40 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         if ok and new_name:
             self.tab_widget.setTabText(index, new_name)
 
+    def _get_tab_bar_menu_config(self):
+        prefs = get_preferences()
+        items = prefs.get('context_menu_items', {}).get('tab_bar')
+        if not items:
+            from sftp_preferences import DEFAULT_PREFERENCES
+            items = DEFAULT_PREFERENCES.get('context_menu_items', {}).get('tab_bar', [])
+        return items
+
     def _show_tab_context_menu(self, pos):
         index = self.tab_widget.tabBar().tabAt(pos)
         if index <= 1:
             return
-        
+
+        items = self._get_tab_bar_menu_config()
         menu = QMenu(self)
-        rename_action = menu.addAction("Rename Tab")
-        close_action = menu.addAction("Close Tab")
-        close_others_action = menu.addAction("Close Other Tabs")
-        
+        action_map = {}
+
+        if is_visible(items, 'rename'):
+            rename_action = menu.addAction("Rename Tab")
+            action_map['rename'] = rename_action
+        if is_visible(items, 'close'):
+            close_action = menu.addAction("Close Tab")
+            action_map['close'] = close_action
+        if is_visible(items, 'close_others'):
+            close_others_action = menu.addAction("Close Other Tabs")
+            action_map['close_others'] = close_others_action
+
         action = menu.exec(self.tab_widget.tabBar().mapToGlobal(pos))
-        
-        if action == rename_action:
+
+        if action == action_map.get('rename'):
             self._rename_tab_by_index(index)
-        elif action == close_action:
+        elif action == action_map.get('close'):
             self.closeTab(index)
-        elif action == close_others_action:
+        elif action == action_map.get('close_others'):
             for i in range(self.tab_widget.count() - 1, 1, -1):
                 if i != index:
                     self.closeTab(i)
@@ -674,6 +766,8 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         menu.addSeparator()
         customize_action = menu.addAction("⚙ Customize Toolbar...")
         customize_action.triggered.connect(self._customize_toolbar)
+        customize_ctx_action = menu.addAction("⚙ Customize Context Menus...")
+        customize_ctx_action.triggered.connect(self._customize_context_menus)
         
         menu.exec(self._toolbar_container.mapToGlobal(pos))
     
@@ -757,6 +851,17 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         if new_config is not None:
             prefs.set('toolbar_buttons', new_config)
             self._apply_toolbar_config()
+
+    def _customize_context_menus(self):
+        prefs = get_preferences()
+        current = prefs.get('context_menu_items')
+        if not current:
+            from sftp_preferences import DEFAULT_PREFERENCES
+            current = DEFAULT_PREFERENCES.get('context_menu_items', {})
+        configs = {k: [item.copy() for item in v] for k, v in current.items()}
+        result = customize_context_menus(self, configs)
+        if result is not None:
+            prefs.set('context_menu_items', result)
 
     def setup_hostname_completer(self):
         # Make sure self.hostnames is initialized and filled with data
@@ -1461,7 +1566,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
 
             # Test connection in background with progress dialog
             self.message_signal.emit("Testing SFTP connection...")
-            known_hosts_path = os.path.expanduser('~/.ssh/known_hosts')
+            known_hosts_path = get_known_hosts_path()
             home_dir = self._test_connection_with_progress(
                 self.temp_hostname, self.temp_port,
                 self.temp_username, self.temp_password,
@@ -1515,13 +1620,13 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         Setup SSH host key verification policy.
         Loads known_hosts and prompts user for unknown hosts.
         """
-        known_hosts_path = os.path.expanduser('~/.ssh/known_hosts')
+        known_hosts_path = get_known_hosts_path()
         
         # Try to load existing known_hosts
         if os.path.exists(known_hosts_path):
             try:
                 ssh.load_host_keys(known_hosts_path)
-                self.message_signal.emit("Loaded known hosts from ~/.ssh/known_hosts")
+                self.message_signal.emit(f"Loaded known hosts from {known_hosts_path}")
             except (OSError, IOError, RuntimeError) as e:
                 self.message_signal.emit(f"Warning: Could not load known_hosts: {e}")
         
@@ -1553,6 +1658,11 @@ Do you want to trust this host and add it to known_hosts?"""
                 
                 if reply == Qt.MsgBtn_Yes:
                     try:
+                        # Ensure the directory exists
+                        dir_path = os.path.dirname(self.known_hosts_path)
+                        if dir_path:
+                            create_secure_directory(dir_path)
+                        
                         client.get_host_keys().add(hostname, key.get_name(), key)
                         client.save_host_keys(self.known_hosts_path)
                         return
@@ -1563,7 +1673,7 @@ Do you want to trust this host and add it to known_hosts?"""
                     raise paramiko.SSHException(f"Host key verification failed for {hostname}")
         
         ssh.set_missing_host_key_policy(InteractivePolicy(self))
-    
+
     def test_connection(self):
         """Test SSH/SFTP connection with guaranteed cleanup. Returns home directory path."""
         import paramiko
@@ -1640,15 +1750,25 @@ Do you want to update the host key and continue connecting?"""
             
             if reply == Qt.MsgBtn_Yes:
                 # Remove old key and retry
-                known_hosts_path = os.path.expanduser('~/.ssh/known_hosts')
+                known_hosts_path = get_known_hosts_path()
                 if os.path.exists(known_hosts_path):
                     try:
                         ssh.load_host_keys(known_hosts_path)
                         # Remove the old key
-                        ssh.get_host_keys().remove(e.hostname)
+                        host_keys = ssh.get_host_keys()
+                        if e.hostname in host_keys:
+                            try:
+                                if hasattr(host_keys, 'pop'):
+                                    host_keys.pop(e.hostname)
+                                elif hasattr(host_keys, '_keys'):
+                                    host_keys._keys.pop(e.hostname, None)
+                                else:
+                                    del host_keys[e.hostname]
+                            except (TypeError, KeyError, AttributeError):
+                                pass
                         ssh.save_host_keys(known_hosts_path)
-                    except Exception:
-                        pass
+                    except Exception as ex:
+                        logger.error(f"Error updating known_hosts: {ex}")
                 
                 # Retry connection
                 return self.test_connection()
@@ -1763,7 +1883,7 @@ Do you want to update the host key and continue connecting?"""
             set_credentials(self.session_id, 'hostname', self.temp_hostname)
             set_credentials(self.session_id, 'username', self.temp_username)
             set_credentials(self.session_id, 'password', self.temp_password)
-            set_credentials(self.session_id, 'port', str(self.temp_port))
+            set_credentials(self.session_id, 'port', int(self.temp_port))
             set_credentials(self.session_id, 'current_local_directory', get_home_directory())
             set_credentials(self.session_id, 'current_remote_directory', '.')
             set_credentials(self.session_id, "key", self.temp_key)

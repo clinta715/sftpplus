@@ -10,6 +10,7 @@ import shutil
 from sftp_creds import get_credentials, set_credentials
 from sftp_transfer_handler import DeletionWorker
 from sftp_preferences import get_preferences
+from sftp_context_menu_customizer import is_visible
 
 class FileBrowser(Browser):
     def __init__(self, title, session_id, parent=None):
@@ -638,43 +639,59 @@ class FileBrowser(Browser):
         # Disable if at filesystem root
         self.tree_up_btn.setEnabled(parent_dir != current_dir)
     
-    def tree_context_menu_handler(self, pos):
-        """Handle context menu on tree widget"""
-        from PySide6.QtWidgets import QMenu
-        
-        item = self.tree_widget.itemAt(pos)
+    def _get_local_tree_menu_config(self):
+        prefs = get_preferences()
+        items = prefs.get('context_menu_items', {}).get('local_tree')
+        if not items:
+            from sftp_preferences import DEFAULT_PREFERENCES
+            items = DEFAULT_PREFERENCES.get('context_menu_items', {}).get('local_tree', [])
+        return items
+
+    def populate_tree_context_menu(self, menu, pos, item):
+        """Populate the local tree context menu."""
+        items = self._get_local_tree_menu_config()
+
         if not item:
+            refresh_action = menu.addAction("🔄 Refresh Tree")
+            refresh_action.triggered.connect(self.populate_tree_view)
             return
-        
+
         data = item.data(0, Qt.UserRole)
         if not data:
             return
-        
+
         path = data.get('path')
         is_root = data.get('is_root', False)
-        
-        menu = QMenu()
-        
+
         if not is_root:
-            open_action = menu.addAction("📂 Open")
-        refresh_action = menu.addAction("🔄 Refresh")
+            if is_visible(items, 'open'):
+                open_action = menu.addAction("📂 Open")
+                open_action.triggered.connect(lambda: self.tree_open_handler(path, item))
+
+        if is_visible(items, 'refresh'):
+            refresh_action = menu.addAction("🔄 Refresh")
+            refresh_action.triggered.connect(self.populate_tree_view)
+
         if not is_root:
             menu.addSeparator()
-            upload_action = menu.addAction("⬆️ Upload Directory")
-        
-        action = menu.exec(self.tree_widget.mapToGlobal(pos))
-        
-        if action == open_action:
-            if os.path.isdir(path):
-                set_credentials(self.session_id, 'current_local_directory', path)
-                os.chdir(path)
-                self.model.get_files()
-                self.notify_observers()
-                self.message_signal.emit(f"Changed to: {path}")
-                self._tree_current_path = path
-                self._mark_current_item(item)
+            if is_visible(items, 'upload_directory'):
+                upload_action = menu.addAction("⬆️ Upload Directory")
+                upload_action.triggered.connect(self.tree_download_selected)
+
+            if is_visible(items, 'delete'):
+                delete_action = menu.addAction("🗑️ Delete")
+                delete_action.triggered.connect(lambda: self.tree_delete_selected())
+
+        self.add_custom_tree_context_menu_actions(menu, pos, item)
+
+    def tree_open_handler(self, path, item):
+        """Handle opening a directory from the tree."""
+        if os.path.isdir(path):
+            set_credentials(self.session_id, 'current_local_directory', path)
+            os.chdir(path)
+            self.model.get_files()
+            self.notify_observers()
+            self.message_signal.emit(f"Changed to: {path}")
+            self._tree_current_path = path
+            self._mark_current_item(item)
             self.tree_path_input.setText(path)
-        elif action == refresh_action:
-            self.populate_tree_view()
-        elif action == upload_action:
-            self.tree_download_selected()

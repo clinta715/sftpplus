@@ -343,7 +343,7 @@ class TraversalSignals(QObject):
     job_added = Signal(str)
     prompt_overwrite = Signal(str)
     finished = Signal()
-    finished_with_files = Signal(list)  # Emits list of (source_path, dest_path, command) when done
+    finished_with_files = Signal(list)  # Emits list of (source_path, dest_path, command, file_size) when done
     error = Signal(str)
     # Discovery progress: (files_found_so_far, directories_scanned_so_far)
     discovery_progress = Signal(int, int)
@@ -380,7 +380,11 @@ class TraversalWorker(QRunnable):
         self.creds = get_credentials(session_id)
         
         # Collect files for batch transfer (instead of streaming)
-        self._collected_files = []  # List of (source_path, dest_path, command)
+        self._collected_files = []  # List of (source_path, dest_path, command, file_size)
+        
+        # Throttle discovery progress signals
+        self._last_discovery_emit_time = 0.0
+        self._last_discovery_emit_count = 0
         
         # SFTPOperations for listing - created lazily when needed (for remote directories)
         self.ops = None
@@ -415,6 +419,15 @@ class TraversalWorker(QRunnable):
         self.prompt_result = result
         self.prompt_cond.wakeAll()
         self.prompt_mutex.unlock()
+
+    def _maybe_emit_discovery(self):
+        """Throttle discovery progress signals to at most every 200ms or every 50 files"""
+        now = time.time()
+        delta_files = self._files_found - self._last_discovery_emit_count
+        if now - self._last_discovery_emit_time >= 0.2 or delta_files >= 50:
+            self._last_discovery_emit_time = now
+            self._last_discovery_emit_count = self._files_found
+            _safe_emit(self.signals.discovery_progress, self._files_found, self._dirs_scanned)
 
     def run(self):
         if self._cancelled: 
@@ -453,7 +466,7 @@ class TraversalWorker(QRunnable):
         follow_flag = '-L ' if self.follow_symlinks else ''
         find_cmd = (
             f"find {follow_flag}{shlex.quote(source_norm)}"
-            f" -printf '%y\\0%p\\0'"
+            f" -printf '%y\\0%p\\0%s\\0'"
         )
         
         _safe_emit(self.signals.status, f"Fast scanning: {source_dir}")
@@ -468,12 +481,13 @@ class TraversalWorker(QRunnable):
         
         entries = output.split('\0')
         
-        for i in range(0, len(entries) - 1, 2):
+        for i in range(0, len(entries) - 1, 3):
             if self._cancelled:
                 return True
             
             entry_type = entries[i].strip()
-            path = entries[i + 1].strip()
+            path = entries[i + 1].strip() if i + 1 < len(entries) else ''
+            size_str = entries[i + 2].strip() if i + 2 < len(entries) else '0'
             
             if not path or not entry_type:
                 continue
@@ -495,15 +509,19 @@ class TraversalWorker(QRunnable):
                     continue
             elif entry_type == 'd':
                 self._dirs_scanned += 1
-                _safe_emit(self.signals.discovery_progress, self._files_found, self._dirs_scanned)
+                self._maybe_emit_discovery()
                 continue
             elif entry_type != 'f':
                 continue
             
+            try:
+                file_size = int(size_str)
+            except ValueError:
+                file_size = 0
             command = "upload" if self.is_dest_remote else "download"
-            self._collected_files.append((path, dest_path, command))
+            self._collected_files.append((path, dest_path, command, file_size))
             self._files_found += 1
-            _safe_emit(self.signals.discovery_progress, self._files_found, self._dirs_scanned)
+            self._maybe_emit_discovery()
         
         _safe_emit(self.signals.status,
             f"Found {self._files_found} files in {self._dirs_scanned} directories"
@@ -573,13 +591,23 @@ class TraversalWorker(QRunnable):
             command = "upload" if self.is_dest_remote else "download"
             
             # Add to collected files (skip prompts during discovery)
-            # Conflict handling happens when transfers actually start
             command = "upload" if self.is_dest_remote else "download"
             
-            # Add to collected files (skip prompts during discovery)
-            self._collected_files.append((source_path, dest_path, command))
+            file_size = 0
+            if self.is_source_remote:
+                try:
+                    file_size = entry.get('st_size', 0) or 0
+                except (AttributeError, TypeError):
+                    file_size = 0
+            else:
+                try:
+                    file_size = os.path.getsize(source_path)
+                except (OSError, IOError):
+                    file_size = 0
+            
+            self._collected_files.append((source_path, dest_path, command, file_size))
             self._files_found += 1
-            _safe_emit(self.signals.discovery_progress, self._files_found, self._dirs_scanned)
+            self._maybe_emit_discovery()
 
 
 class DirectTransferWorker(QRunnable):
@@ -602,6 +630,7 @@ class DirectTransferWorker(QRunnable):
         error = Signal(str)
         conflict = Signal(str, str, str)  # (transfer_id, dest_path, dest_type)
         retrying = Signal(int, int, str)  # (attempt, max_attempts, error_msg)
+        disk_full = Signal(str)  # (error_message)
     
     def __init__(self, session_id, source_path, dest_path, 
                  is_source_remote, is_dest_remote, command):
@@ -705,6 +734,13 @@ class DirectTransferWorker(QRunnable):
                 self._do_transfer()
                 return
             except Exception as e:
+                if self._is_disk_full_error(e):
+                    logger.error(f"Disk full during transfer: {e}")
+                    msg = self._disk_full_message(e)
+                    _safe_emit(self.signals.disk_full, msg)
+                    _safe_emit(self.signals.error, msg)
+                    _safe_emit(self.signals.finished, 0, 1)
+                    return
                 is_transient = self._is_transient_error(e)
                 if is_transient and attempt < max_retries - 1:
                     delay = 2.0 * (2 ** attempt)
@@ -724,6 +760,8 @@ class DirectTransferWorker(QRunnable):
     
     def _is_transient_error(self, exc):
         """Check if an exception is likely transient and worth retrying."""
+        if self._is_disk_full_error(exc):
+            return False
         exc_str = str(exc).lower()
         transient_indicators = [
             'channel', 'open failed', 'connect failed',
@@ -732,6 +770,28 @@ class DirectTransferWorker(QRunnable):
             'session', 'not open', 'closed',
         ]
         return any(indicator in exc_str for indicator in transient_indicators)
+
+    @staticmethod
+    def _is_disk_full_error(exc):
+        exc_str = str(exc).lower()
+        disk_full_indicators = [
+            'no space left', 'disk full', 'enospc',
+            'cannot write', 'write error', 'not enough space',
+            'failed to write', 'i/o error',
+        ]
+        if 'errno 28' in exc_str or 'errno 122' in exc_str:
+            return True
+        if hasattr(exc, 'errno') and exc.errno in (28, 122):
+            return True
+        return any(indicator in exc_str for indicator in disk_full_indicators)
+
+    @staticmethod
+    def _disk_full_message(exc):
+        return (
+            "Disk full: The destination drive has run out of space.\n\n"
+            "All remaining transfers have been stopped.\n"
+            "Free up disk space and retry."
+        )
     
     def _do_transfer(self):
         """Perform the actual transfer. Raises on failure for retry logic."""
@@ -783,7 +843,11 @@ class DirectTransferWorker(QRunnable):
                 logger.debug("Transfer cancelled during conflict resolution")
                 return
             
-            if self.command == "upload":
+            command = self.command
+            if command == "resume":
+                command = "download" if self.is_source_remote else "upload"
+            
+            if command == "upload":
                 if not os.path.exists(self.source_path):
                     raise FileNotFoundError(f"Local file not found: {self.source_path}")
                 
@@ -816,7 +880,7 @@ class DirectTransferWorker(QRunnable):
                 else:
                     sftp.put(self.source_path, self.dest_path, progress_callback)
                 
-            elif self.command == "download":
+            elif command == "download":
                 local_parent = os.path.dirname(self.dest_path)
                 if local_parent and not os.path.exists(local_parent):
                     os.makedirs(local_parent, exist_ok=True)
