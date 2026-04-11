@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QInputDialog, QMessageBox, QApplication
 from PySide6.QtCore import QObject, Signal, QRunnable, QThreadPool, QMutex, QWaitCondition
-from sftp_qt_compat import Qt
+from sftp_qt_compat import Qt, _remote_join
 from sftp_creds import get_credentials, create_random_integer, sanitize_error_message
 from sftp_downloadworkerclass import add_sftp_job
 from sftp_preferences import get_preferences
@@ -160,7 +160,7 @@ class DeletionWorker(QRunnable):
         for entry in files:
             if self._cancel_requested:
                 return
-            entry_path = os.path.join(remote_path, entry['filename'])
+            entry_path = _remote_join(remote_path, entry['filename'])
             try:
                 ops.remove(entry_path)
             except (PermissionError, OSError):
@@ -171,7 +171,7 @@ class DeletionWorker(QRunnable):
         for entry in dirs:
             if self._cancel_requested:
                 return
-            entry_path = os.path.join(remote_path, entry['filename'])
+            entry_path = _remote_join(remote_path, entry['filename'])
             try:
                 self._remove_remote_dir_recursive(ops, entry_path, _depth + 1)
             except Exception:

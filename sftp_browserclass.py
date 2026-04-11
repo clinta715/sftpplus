@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QTableView, QApplication, QWidget, QVBoxLayout, QLabel, QFileDialog, QMessageBox, QInputDialog, QMenu, QHeaderView, QProgressBar, QSizePolicy, QTreeWidget, QTreeWidgetItem, QPushButton, QHBoxLayout, QProgressDialog, QLineEdit, QToolButton, QCheckBox
 from PySide6.QtCore import Signal, QTimer, QEventLoop, QModelIndex, QThreadPool
-from sftp_qt_compat import Qt
+from sftp_qt_compat import Qt, _remote_join
 import stat
 import os
 import sys
@@ -1056,7 +1056,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                         except OSError as e:
                             self.message_signal.emit(f"Rename failed: {e}")
                     else:
-                        remote_path = os.path.join(creds.get('current_remote_directory'), selected_item)
+                        remote_path = _remote_join(creds.get('current_remote_directory'), selected_item)
                         self.sftp_rename(remote_path, new_name)
                 elif ok and new_name == selected_item:
                     QMessageBox.information(None, "Rename", "New name is the same as current name.")

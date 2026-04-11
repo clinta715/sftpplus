@@ -19,7 +19,7 @@ from sftp_local_terminal_widget import LocalTerminalWidget
 from sftp_filebrowserclass import FileBrowser
 from sftp_creds import get_credentials, set_credentials, del_credentials, create_random_integer, clear_all_credentials, get_home_directory
 from sftp_session import get_session_manager
-from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
+from sftp_qt_compat import Qt, _remote_join  # Use compatibility layer for Qt enums
 from PySide6.QtWidgets import QInputDialog, QFileDialog, QLabel, QToolButton, QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QTextEdit, QCompleter, QComboBox, QSpinBox, QTabWidget, QMessageBox, QCheckBox, QMenu, QSizePolicy, QProgressDialog
 from PySide6.QtCore import Signal, QObject, QCoreApplication, QTimer, QEvent, QMutexLocker, QRunnable, QThreadPool, QEventLoop
 from PySide6.QtGui import QKeySequence, QShortcut
@@ -1310,7 +1310,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
                         creds = get_credentials(browser.session_id)
                         
                         if browser.is_remote_browser():
-                            remote_path = os.path.join(creds.get('current_remote_directory', '.'), selected_item)
+                            remote_path = _remote_join(creds.get('current_remote_directory', '.'), selected_item)
                             browser.sftp_rename(remote_path, new_name)
                         else:
                             local_path = os.path.join(creds.get('current_local_directory', '.'), selected_item)

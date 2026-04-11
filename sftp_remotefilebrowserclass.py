@@ -6,7 +6,7 @@ import stat
 import time
 
 from sftp_remotefiletablemodel import RemoteFileTableModel
-from sftp_qt_compat import Qt
+from sftp_qt_compat import Qt, _remote_join
 from sftp_transfer_handler import TreePopulateWorker, TraversalWorker, DeletionWorker
 from sftp_creds import get_credentials
 from sftp_sortfiltermodel import DirectoryFirstSortProxyModel
@@ -16,13 +16,6 @@ from sftp_downloadworkerclass import add_sftp_job
 from sftp_preferences import get_preferences
 from sftp_context_menu_customizer import is_visible
 
-
-def _remote_join(base, name):
-    """Join remote path components using forward slashes (SFTP-safe on all platforms)."""
-    base = base.rstrip('/')
-    if not base:
-        return '/' + name
-    return base + '/' + name
 
 # SECURITY: Debug logging to /tmp is DISABLED to prevent sensitive information leakage
 # The /tmp directory is world-readable and could expose file paths and operations

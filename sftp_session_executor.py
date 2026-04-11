@@ -24,6 +24,7 @@ from sftp_commands import (
     ChDirCommand, GetCwdCommand, CommandType, RenameCommand
 )
 from sftp_connection_pool import get_connection_pool
+from sftp_qt_compat import _remote_join
 from sftp_downloadworkerclass import (
     create_response_queue, delete_response_queue, 
     ResponseQueueContext, put_response
@@ -346,7 +347,7 @@ class CommandExecutor(QObject):
 
     def _execute_rename(self, ssh, sftp, command, job_id: str):
         """Execute rename command"""
-        new_path = os.path.join(os.path.dirname(command.remote_path), command.new_name)
+        new_path = _remote_join(os.path.dirname(command.remote_path), command.new_name)
         try:
             sftp.rename(command.remote_path, new_path)
             put_response(job_id, "success", new_path)
