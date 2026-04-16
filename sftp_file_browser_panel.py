@@ -238,7 +238,7 @@ class FileBrowserPanel(QWidget):
         
         self.preview_widget.preview_file(
             file_path, file_size, modified, permissions,
-            sftp_api=self.right_browser.session_api
+            session_id=self.right_browser.session_id
         )
     
     def _get_credentials(self, session_id):

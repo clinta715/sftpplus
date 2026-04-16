@@ -72,10 +72,16 @@ class ConnectionTestWorker(QRunnable):
         self.signals = ConnectionTestSignals()
         self._prompt_event = threading.Event()
         self._prompt_result = None
+        self._cancelled = False
         self.setAutoDelete(True)
 
     def resolve_prompt(self, accepted):
         self._prompt_result = accepted
+        self._prompt_event.set()
+
+    def cancel(self):
+        self._cancelled = True
+        self._prompt_result = False
         self._prompt_event.set()
 
     def _wait_for_prompt(self, timeout=120):
@@ -134,6 +140,9 @@ class ConnectionTestWorker(QRunnable):
 
     def run(self):
         for _attempt in range(self.MAX_RETRIES):
+            if self._cancelled:
+                self.signals.error.emit("Connection cancelled")
+                return
             try:
                 home_dir = self._do_connect()
                 self.signals.success.emit(home_dir)
@@ -152,6 +161,9 @@ class ConnectionTestWorker(QRunnable):
                     f"Host key verification failed for {e.hostname}")
                 return
             except Exception as e:
+                if self._cancelled:
+                    self.signals.error.emit("Connection cancelled")
+                    return
                 if self._is_transient_error(e) and _attempt < self.MAX_RETRIES - 1:
                     import time as _time
                     _time.sleep(1)
@@ -283,6 +295,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.sessions = []
         self.observers = []
         self._notifying = False
+        self._connecting = False
 
         self.worker_signals = WorkerSignals()
         self.worker_signals.error.connect(self._display_error)
@@ -1500,120 +1513,108 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         return None
 
     def connect(self, hostname="localhost", username="guest", password="guest", port="22", key=None):
-        self.temp_hostname = self.hostname_combo.currentText() if hostname == "localhost" and self.hostname_combo.currentText() else hostname
-        
-        # Print to the global output console
-        self.message_signal.emit(f"Attempting to connect to {self.temp_hostname}...")
-        
+        if self._connecting:
+            self.message_signal.emit("A connection is already in progress. Please wait.")
+            return None
+        self._connecting = True
         try:
-            self.session_id = create_random_integer()
-            self.message_signal.emit(f"Created session ID: {self.session_id}")
-
-            # Hostname, username, password, and port handling
             self.temp_hostname = self.hostname_combo.currentText() if hostname == "localhost" and self.hostname_combo.currentText() else hostname
-            self.temp_username = self.username.text() if username == "guest" and self.username.text() else username
-            self.temp_password = self.password.text() if password == "guest" and self.password.text() else password
-            self.temp_port = self.port_selector.text() or port or "22"
-
-            # Handle key selection properly
-            current_key_data = self.key_combo.currentData()
-            if current_key_data:
-                self.temp_key = current_key_data
-                # ic(self.temp_key)
-            else:
-                self.temp_key = None
-                # ic("No key selected")
-
-            self.message_signal.emit(f"Using hostname: {self.temp_hostname}, username: {self.temp_username}, port: {self.temp_port}, key: {self.temp_key}")
-
-            if not self.temp_hostname:
-                raise ValueError("Hostname is required")
-            if not self.temp_username:
-                raise ValueError("Username is required")
-            if not self.temp_password and not self.temp_key:
-                raise ValueError("Either password or SSH key is required")
-            try:
-                self.temp_port = int(self.temp_port)  # Validate port is a number
-                # Validate port range (1-65535)
-                if not (1 <= self.temp_port <= 65535):
-                    raise ValueError(f"Port must be between 1 and 65535, got {self.temp_port}")
-            except ValueError as e:
-                if "between 1 and 65535" in str(e):
-                    raise
-                raise ValueError("Port must be a valid number")
-
-            # Set credentials synchronously
-            self.message_signal.emit("Setting credentials...")
-            self.set_credentials_async()
-
-            # Configure connection pool limits
-            from sftp_connection_pool import get_connection_pool
-            from sftp_preferences import get_preferences
-            pool = get_connection_pool()
-            prefs = get_preferences()
-            site_limit = getattr(self, '_pending_max_connections', 0) or 0
-            max_conns = site_limit if site_limit > 0 else prefs.get("max_ssh_connections_per_host", 8)
-            pool.set_max_connections(self.temp_hostname, self.temp_port, self.temp_username, max_conns)
-            self._pending_max_connections = 0
-
-            # Pre-load SSH key on UI thread (may show passphrase dialog)
-            pkey = None
-            if self.temp_key:
-                self.message_signal.emit("Loading SSH key...")
-                pkey = self._load_private_key(self.temp_key)
-                if pkey is None:
-                    raise ValueError("Failed to load SSH key")
-
-            # Test connection in background with progress dialog
-            self.message_signal.emit("Testing SFTP connection...")
-            known_hosts_path = get_known_hosts_path()
-            home_dir = self._test_connection_with_progress(
-                self.temp_hostname, self.temp_port,
-                self.temp_username, self.temp_password,
-                pkey, known_hosts_path
-            )
-            if home_dir is None:
-                return None
-            self.message_signal.emit("Connection test passed!")
-
-            self.message_signal.emit(f"Successfully connected to {self.temp_hostname}")
-
-            # Set the home directory from test_connection to avoid another SSH connection
-            # This must be done BEFORE prepare_container_widget() calls initialize_model()
-            set_credentials(self.session_id, 'current_remote_directory', home_dir)
-            self.message_signal.emit(f"Remote home directory: {home_dir}")
-
-            # Check for and navigate to initial directories AFTER setting home directory
-            # This ensures the credentials are set correctly before initialize_model() runs
-            self.navigate_to_initial_directories()
-
-            # Create a new QWidget as a container for both the file table and the output console
-            self.container_widget = self.prepare_container_widget()
-
-            # Add tab synchronously
-            self.add_tab(self.session_id, self.container_widget)
-
-            # NOW initialize the remote browser - connection is fully ready
-            self.file_browser_panel.initialize()
             
-            # Notify transfer queue of new session
-            if hasattr(self, 'transfer_queue_widget') and self.transfer_queue_widget:
-                self.transfer_queue_widget.register_active_session(self.temp_hostname, self.session_id)
+            self.message_signal.emit(f"Attempting to connect to {self.temp_hostname}...")
+            
+            try:
+                self.session_id = create_random_integer()
+                self.message_signal.emit(f"Created session ID: {self.session_id}")
 
-            # Save connection data synchronously
-            self.message_signal.emit("Saving connection data...")
-            self.save_connection_data_async()
+                self.temp_hostname = self.hostname_combo.currentText() if hostname == "localhost" and self.hostname_combo.currentText() else hostname
+                self.temp_username = self.username.text() if username == "guest" and self.username.text() else username
+                self.temp_password = self.password.text() if password == "guest" and self.password.text() else password
+                self.temp_port = self.port_selector.text() or port or "22"
 
-            return self.session_id
-        except ValueError as ve:
-            error_message = str(ve)
-            QMessageBox.critical(self, "Connection Error", error_message)
-            self.message_signal.emit(f"Connection failed: {error_message}")
-        except Exception as e:
-            error_message = f"Unexpected error: {str(e)}"
-            QMessageBox.critical(self, "Connection Error", error_message)
-            self.message_signal.emit(f"Connection failed: {error_message}")
-        return None
+                current_key_data = self.key_combo.currentData()
+                if current_key_data:
+                    self.temp_key = current_key_data
+                else:
+                    self.temp_key = None
+
+                self.message_signal.emit(f"Using hostname: {self.temp_hostname}, username: {self.temp_username}, port: {self.temp_port}, key: {self.temp_key}")
+
+                if not self.temp_hostname:
+                    raise ValueError("Hostname is required")
+                if not self.temp_username:
+                    raise ValueError("Username is required")
+                if not self.temp_password and not self.temp_key:
+                    raise ValueError("Either password or SSH key is required")
+                try:
+                    self.temp_port = int(self.temp_port)
+                    if not (1 <= self.temp_port <= 65535):
+                        raise ValueError(f"Port must be between 1 and 65535, got {self.temp_port}")
+                except ValueError as e:
+                    if "between 1 and 65535" in str(e):
+                        raise
+                    raise ValueError("Port must be a valid number")
+
+                self.message_signal.emit("Setting credentials...")
+                self.set_credentials_async()
+
+                from sftp_connection_pool import get_connection_pool
+                from sftp_preferences import get_preferences
+                pool = get_connection_pool()
+                prefs = get_preferences()
+                site_limit = getattr(self, '_pending_max_connections', 0) or 0
+                max_conns = site_limit if site_limit > 0 else prefs.get("max_ssh_connections_per_host", 8)
+                pool.set_max_connections(self.temp_hostname, self.temp_port, self.temp_username, max_conns)
+                self._pending_max_connections = 0
+
+                pkey = None
+                if self.temp_key:
+                    self.message_signal.emit("Loading SSH key...")
+                    pkey = self._load_private_key(self.temp_key)
+                    if pkey is None:
+                        raise ValueError("Failed to load SSH key")
+
+                self.message_signal.emit("Testing SFTP connection...")
+                known_hosts_path = get_known_hosts_path()
+                home_dir = self._test_connection_with_progress(
+                    self.temp_hostname, self.temp_port,
+                    self.temp_username, self.temp_password,
+                    pkey, known_hosts_path
+                )
+                if home_dir is None:
+                    return None
+                self.message_signal.emit("Connection test passed!")
+
+                self.message_signal.emit(f"Successfully connected to {self.temp_hostname}")
+
+                set_credentials(self.session_id, 'current_remote_directory', home_dir)
+                self.message_signal.emit(f"Remote home directory: {home_dir}")
+
+                self.navigate_to_initial_directories()
+
+                self.container_widget = self.prepare_container_widget()
+
+                self.add_tab(self.session_id, self.container_widget)
+
+                self.file_browser_panel.initialize()
+                
+                if hasattr(self, 'transfer_queue_widget') and self.transfer_queue_widget:
+                    self.transfer_queue_widget.register_active_session(self.temp_hostname, self.session_id)
+
+                self.message_signal.emit("Saving connection data...")
+                self.save_connection_data_async()
+
+                return self.session_id
+            except ValueError as ve:
+                error_message = str(ve)
+                QMessageBox.critical(self, "Connection Error", error_message)
+                self.message_signal.emit(f"Connection failed: {error_message}")
+            except Exception as e:
+                error_message = f"Unexpected error: {str(e)}"
+                QMessageBox.critical(self, "Connection Error", error_message)
+                self.message_signal.emit(f"Connection failed: {error_message}")
+            return None
+        finally:
+            self._connecting = False
 
     def _setup_host_key_policy(self, ssh):
         """
@@ -1796,11 +1797,10 @@ Do you want to update the host key and continue connecting?"""
     def _test_connection_with_progress(self, hostname, port, username,
                                        password, pkey, known_hosts_path):
         progress = QProgressDialog(
-            f"Connecting to {hostname}:{port}...", None, 0, 0, self)
+            f"Connecting to {hostname}:{port}...", "Cancel", 0, 0, self)
         progress.setWindowTitle("Connecting")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
-        progress.setCancelButton(None)
         progress.setAutoClose(False)
         progress.setAutoReset(False)
         progress.setMinimumWidth(380)
@@ -1813,6 +1813,7 @@ Do you want to update the host key and continue connecting?"""
         result = {'home_dir': None, 'error': None}
         cancelled = [False]
         loop = QEventLoop(self)
+        self._connection_event_loop = loop
 
         def on_step(msg):
             progress.setLabelText(msg)
@@ -1850,8 +1851,15 @@ Do you want to update the host key and continue connecting?"""
                 Qt.MsgBtn_Yes | Qt.MsgBtn_No, Qt.MsgBtn_No)
             worker.resolve_prompt(reply == Qt.MsgBtn_Yes)
 
-        def on_rejected():
+        def on_cancel():
             cancelled[0] = True
+            worker.cancel()
+            loop.quit()
+
+        def on_timeout():
+            cancelled[0] = True
+            worker.cancel()
+            result['error'] = "Connection timed out."
             loop.quit()
 
         worker.signals.step.connect(on_step)
@@ -1859,25 +1867,38 @@ Do you want to update the host key and continue connecting?"""
         worker.signals.error.connect(on_error)
         worker.signals.prompt_unknown_host.connect(on_prompt_unknown_host)
         worker.signals.prompt_bad_host_key.connect(on_prompt_bad_host_key)
-        progress.rejected.connect(on_rejected)
+        progress.canceled.connect(on_cancel)
+
+        timeout_timer = QTimer(self)
+        timeout_timer.setSingleShot(True)
+        timeout_timer.timeout.connect(on_timeout)
+        timeout_timer.start(90000)
 
         QThreadPool.globalInstance().start(worker)
         loop.exec()
 
+        timeout_timer.stop()
+        del self._connection_event_loop
+
+        home_dir = result['home_dir']
+        error_msg = result['error']
+        was_cancelled = cancelled[0]
+
+        progress.canceled.disconnect(on_cancel)
         progress.close()
 
-        if cancelled[0]:
+        if was_cancelled and home_dir is None:
             self.message_signal.emit("Connection cancelled")
             return None
 
-        if result['error']:
+        if error_msg:
             self.message_signal.emit(
-                f"Connection test failed: {result['error']}")
+                f"Connection test failed: {error_msg}")
             QMessageBox.critical(
-                self, "Connection Error", result['error'])
+                self, "Connection Error", error_msg)
             return None
 
-        return result['home_dir']
+        return home_dir
 
     def set_credentials_async(self):
             set_credentials(self.session_id, 'hostname', self.temp_hostname)
@@ -2007,6 +2028,9 @@ Do you want to update the host key and continue connecting?"""
     def closeEvent(self, event):
         """Handle application close"""
         try:
+            if hasattr(self, '_connection_event_loop'):
+                self._connection_event_loop.quit()
+
             prefs = get_preferences()
             if not prefs.get_bool("confirm_exit", True):
                 event.accept()

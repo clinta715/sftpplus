@@ -1427,3 +1427,61 @@ Replaced with `QColor(169, 169, 169)` constant.
 - `sftp_toolbar_customizer.py` — QColor fix for setForeground
 - `sftp_terminal_widget.py` — Known hosts path and directory creation
 - `sftp_context_menu_customizer.py` — New file: context menu customization dialog
+
+### Connection Guard & Local Browser Performance (2026-04-16)
+
+Three fixes: connection dialog auto-cancel, concurrent connection re-entrancy, and local file listing performance.
+
+#### Bug 1: `progress.close()` triggers `canceled()` signal (CRITICAL)
+
+**Bug:** `QProgressDialog.close()` emits the `canceled()` signal when a cancel button is present. After a successful connection, `close()` triggered `on_cancel()` which set `cancelled[0] = True`, causing `_test_connection_with_progress()` to return `None` — silently failing every connection.
+
+**Root Cause:** The previous commit added a "Cancel" button to the connection progress dialog (replacing `None`). `QProgressDialog.close()` internally calls `cancel()` which emits `canceled()`. The check `if cancelled[0]: return None` ran after `close()`, treating successful connections as cancelled.
+
+**Fix:** Save result values before closing, disconnect the `canceled` signal before `close()`, and only treat as cancelled if `home_dir is None`:
+```python
+home_dir = result['home_dir']
+was_cancelled = cancelled[0]
+progress.canceled.disconnect(on_cancel)
+progress.close()
+if was_cancelled and home_dir is None:
+    return None
+```
+
+#### Bug 2: Concurrent connection re-entrancy (CRITICAL)
+
+**Bug:** While a slow connection's progress dialog was showing (UI responsive via `QEventLoop`), clicking another site re-entered `connect()`, clobbering shared instance variables (`self.session_id`, `self.temp_hostname`, etc.). Result: duplicate tabs with mixed credentials.
+
+**Root Cause:** No guard against concurrent `connect()` calls. The `QEventLoop` inside `_test_connection_with_progress()` processes UI events, allowing the user to trigger another connection. All connection state (`self.session_id`, `self.temp_hostname`, `self.container_widget`) are instance-level and get overwritten.
+
+**Fix:** Added `self._connecting = False` flag. `connect()` checks the flag at entry and wraps the body in `try/finally`:
+```python
+def connect(self, ...):
+    if self._connecting:
+        self.message_signal.emit("A connection is already in progress. Please wait.")
+        return None
+    self._connecting = True
+    try:
+        # ... existing body ...
+    finally:
+        self._connecting = False
+```
+
+#### Fix 3: Local file listing performance
+
+**Problem:** `FileTableModel.get_files()` was synchronous — stating every file in the local directory on the UI thread. For directories with thousands of files, this caused multi-second freezes during connection initialization. Additionally, `data()` called `os.path.isdir()` (fresh stat) for every cell render despite already caching `is_dir` in `file_info[4]`.
+
+**Fix — Async listing:**
+- `FileTableModel.__init__()` no longer calls `get_files()` — model starts empty
+- `get_files()` now spawns `FileListWorker` (already existed for remote listings) in `QThreadPool`, returns immediately
+- Results populate via `beginResetModel()`/`endResetModel()` callback with generation counter to discard stale results
+- Mirrors the pattern `RemoteFileTableModel` already uses
+
+**Fix — Cached is_dir in `data()`:**
+- `ForegroundRole` and `FontRole` now read `file_info[4]` / `file_info[5]` instead of calling `os.path.isdir()` / `os.path.islink()`
+- Eliminates ~80k redundant stat syscalls during initial render of a 10k-file directory
+
+**Files Modified:**
+- `sftp.py` — Connection guard (`_connecting` flag), progress dialog `canceled` signal disconnect
+- `sftp_filetablemodel.py` — Async `get_files()` with `FileListWorker`, cached `is_dir`/`is_link` in `data()`, removed `processEvents()` and `RemoteFileTableModel` import
+- `sftp_filebrowserclass.py` — Added `self.model.get_files()` call after model construction

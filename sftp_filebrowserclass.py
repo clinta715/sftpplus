@@ -62,6 +62,8 @@ class FileBrowser(Browser):
         self.tree_download_all_btn.setText("⬆️⬆️ Upload All")
         self.tree_download_all_btn.setToolTip("Upload all visible directories to remote")
 
+        self.model.get_files()
+
         if getattr(self, '_pending_tree_populate', False):
             self._pending_tree_populate = False
             from PySide6.QtCore import QTimer
