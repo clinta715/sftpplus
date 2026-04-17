@@ -66,15 +66,18 @@ class RemoteFileBrowser(FileBrowser):
 
         # Column layout: name stretches to fill, size/perms/date are fixed
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, Qt.HeaderView_Stretch)
+        header.setSectionResizeMode(0, Qt.HeaderView_Interactive)
         header.setSectionResizeMode(1, Qt.HeaderView_Interactive)
         header.setSectionResizeMode(2, Qt.HeaderView_Interactive)
         header.setSectionResizeMode(3, Qt.HeaderView_Interactive)
         header.setMinimumSectionSize(60)
-        self.table.setColumnWidth(1, 90)   # Size
-        self.table.setColumnWidth(2, 100)  # Permissions
-        self.table.setColumnWidth(3, 150)  # Modified
+        saved_widths = prefs.get("remote_column_widths", [300, 90, 100, 150])
+        for i, w in enumerate(saved_widths):
+            if i < 4:
+                self.table.setColumnWidth(i, w)
         header.hideSection(2)  # Hide Permissions by default
+
+        header.sectionResized.connect(self._on_remote_column_resized)
 
         # Add these lines to enable full row selection
         self.table.setSelectionBehavior(Qt.TableView_SelectRows)
@@ -136,11 +139,12 @@ class RemoteFileBrowser(FileBrowser):
         # Update UI without making another connection
         self.message_signal.emit(f"{current_dir}")
 
-        # Defer column resizing to avoid blocking UI during initialization
-        QTimer.singleShot(100, self.table.resizeColumnsToContents)
-
     def is_remote_browser(self):
         return True
+
+    def _on_remote_column_resized(self, logical_index, old_size, new_size):
+        widths = [self.table.columnWidth(i) for i in range(4)]
+        get_preferences().set("remote_column_widths", widths)
 
     def prompt_and_create_directory(self):
         # Prompt the user for a new directory name
@@ -152,17 +156,11 @@ class RemoteFileBrowser(FileBrowser):
 
         if ok and directory_name:
             try:
-                # Get current remote directory and construct full path
                 creds = get_credentials(self.session_id)
                 current_dir = creds.get('current_remote_directory', '.')
                 full_path = self.get_normalized_remote_path(current_dir, directory_name)
-                
-                # Create the directory with full path
                 self.sftp_mkdir(full_path)
                 self.message_signal.emit(f"'{full_path}' created successfully.")
-                # Force refresh to show new directory
-                self.model.get_files(force_refresh=True)
-                self.notify_observers()
             except (OSError, IOError, RuntimeError) as e:
                 self.message_signal.emit(f"Error creating directory: {e}")
 
@@ -473,7 +471,7 @@ class RemoteFileBrowser(FileBrowser):
 
             self.model.get_files(force_refresh=True)
             self.notify_observers()
-        
+            self.populate_tree_view()
         worker.signals.progress.connect(on_progress)
         worker.signals.finished.connect(on_finished)
 
@@ -794,64 +792,6 @@ class RemoteFileBrowser(FileBrowser):
 
         # Note: Don't refresh here - transfers are async and will trigger refresh on completion
         # via transfer_queue_widget.notify_observees() -> model.get_files(force_refresh=True)
-
-    def download_directory(self,
-                        source_directory: str,
-                        destination_directory: str,
-                        skip_all: bool = False,
-                        overwrite_all: bool = False, 
-                        resume_all: bool = False,
-                        follow_symlinks: bool = False) -> tuple:
-        """
-        Download a directory and its contents from the remote server.
-        Uses QThreadPool for thread-safe background execution with proper prompt handling.
-        """
-        from sftp_transfer_handler import TraversalWorker
-        from PySide6.QtCore import QThreadPool
-        from sftp_qt_compat import Qt
-        
-        worker = TraversalWorker(
-            self.session_id, source_directory, destination_directory,
-            is_source_remote=True, is_dest_remote=False,
-            skip_all=skip_all, overwrite_all=overwrite_all, resume_all=resume_all,
-            follow_symlinks=follow_symlinks
-        )
-        
-        worker.signals.status.connect(
-            lambda msg: self.message_signal.emit(msg),
-            type=Qt.QueuedConnection
-        )
-        worker.signals.discovery_progress.connect(
-            lambda files, dirs: self.transfer_queue_widget.on_discovery_progress(files, dirs)
-            if hasattr(self, 'transfer_queue_widget') and self.transfer_queue_widget else None,
-            type=Qt.QueuedConnection
-        )
-        worker.signals.finished_with_files.connect(
-            lambda file_list: self._add_files_to_queue(file_list, worker),
-            type=Qt.QueuedConnection
-        )
-        worker.signals.job_added.connect(
-            lambda jid: self.transfer_started.emit(jid) if self.transfer_started else None,
-            type=Qt.QueuedConnection
-        )
-        worker.signals.prompt_overwrite.connect(
-            lambda path: self._handle_worker_prompt(worker, path),
-            type=Qt.QueuedConnection
-        )
-        worker.signals.error.connect(
-            lambda err: self.message_signal.emit(f"Download error: {err}"),
-            type=Qt.QueuedConnection
-        )
-        worker.signals.finished.connect(
-            lambda: self.message_signal.emit("Download finished"),
-            type=Qt.QueuedConnection
-        )
-        
-        self._current_traversal_worker = worker
-        
-        QThreadPool.globalInstance().start(worker)
-        self.message_signal.emit(f"Started download of {source_directory}")
-        return skip_all, overwrite_all, resume_all
 
     def _add_files_to_queue(self, file_list, worker):
         if not hasattr(self, 'transfer_queue_widget') or not self.transfer_queue_widget:
@@ -1239,17 +1179,9 @@ class RemoteFileBrowser(FileBrowser):
             return
 
         try:
-            # Remove the remote directory using existing method
-            self.remove_directory_with_prompt(path, always=1)  # always=1 to skip confirmation dialog
+            self.remove_directory_with_prompt(path, always=1)
             self.message_signal.emit(f"🗑️ Deleted remote: {path}")
             self.tree_status_label.setText(f"✅ Deleted: {os.path.basename(path)}")
-
-            # Refresh tree view
-            self.populate_tree_view()
-
-            # Refresh file table
-            self.model.get_files()
-            self.notify_observers()
         except (OSError, IOError, RuntimeError) as e:
             self.tree_status_label.setText(f"❌ Error deleting: {str(e)[:50]}")
             QMessageBox.critical(self, "Error", f"Failed to delete remote directory:\n{str(e)}")
@@ -1343,7 +1275,7 @@ class RemoteFileBrowser(FileBrowser):
             self.remove_directory_with_prompt(remote_path=path)
         else:
             self.sftp_remove(path)
-        self.populate_tree_view()
+            self.populate_tree_view()
 
     def tree_download_handler(self, path):
         """Handle downloading a directory from the tree."""

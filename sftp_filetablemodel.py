@@ -121,6 +121,8 @@ class FileTableModel(QAbstractTableModel):
             if column == 0:
                 return file_info[0]
             elif column == 1:
+                if file_info[4]:
+                    return ""
                 return str(file_info[1])
             elif column == 2:
                 return file_info[2]

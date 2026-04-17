@@ -23,7 +23,7 @@ from sftp_session_executor import SFTPSessionAPI, create_session_api
 from sftp_preferences import get_preferences
 from sftp_session import SFTPCredentials, get_session_manager
 from sftp_browser_mixins import TreeViewMixin, BookmarkMixin, FileOpsMixin
-from sftp_drag_drop import start_drag, can_accept_drop, DragDropInfo
+from sftp_drag_drop import BrowserTableView
 from sftp_context_menu_customizer import is_visible
 
 logger = logging.getLogger('sftp.browser')
@@ -183,7 +183,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         
         self._create_tree_container()
         
-        self.table = QTableView()
+        self.table = BrowserTableView(browser=self)
         # self.active_table = self.table
 
         self.table.setSizePolicy(Qt.SizePolicy_Expanding, Qt.SizePolicy_Expanding)
@@ -1864,6 +1864,139 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             action = result
         worker.set_prompt_result(action)
 
+    def download_directory(self, source_directory, destination_directory,
+                           skip_all=False, overwrite_all=False, resume_all=False,
+                           follow_symlinks=False):
+        from sftp_transfer_handler import TraversalWorker
+        from PySide6.QtCore import QThreadPool
+        from sftp_qt_compat import Qt
+
+        worker = TraversalWorker(
+            self.session_id, source_directory, destination_directory,
+            is_source_remote=True, is_dest_remote=False,
+            skip_all=skip_all, overwrite_all=overwrite_all, resume_all=resume_all,
+            follow_symlinks=follow_symlinks
+        )
+
+        worker.signals.status.connect(
+            lambda msg: self.message_signal.emit(msg),
+            type=Qt.QueuedConnection
+        )
+        worker.signals.discovery_progress.connect(
+            lambda files, dirs: self.transfer_queue_widget.on_discovery_progress(files, dirs)
+            if hasattr(self, 'transfer_queue_widget') and self.transfer_queue_widget else None,
+            type=Qt.QueuedConnection
+        )
+        worker.signals.finished_with_files.connect(
+            lambda file_list: self._add_files_to_queue(file_list, worker),
+            type=Qt.QueuedConnection
+        )
+        worker.signals.job_added.connect(
+            lambda jid: self.transfer_started.emit(jid) if self.transfer_started else None,
+            type=Qt.QueuedConnection
+        )
+        worker.signals.prompt_overwrite.connect(
+            lambda path: self._handle_worker_prompt(worker, path),
+            type=Qt.QueuedConnection
+        )
+        worker.signals.error.connect(
+            lambda err: self.message_signal.emit(f"Download error: {err}"),
+            type=Qt.QueuedConnection
+        )
+        worker.signals.finished.connect(
+            lambda: self.message_signal.emit("Download finished"),
+            type=Qt.QueuedConnection
+        )
+
+        self._current_traversal_worker = worker
+
+        QThreadPool.globalInstance().start(worker)
+        self.message_signal.emit(f"Started download of {source_directory}")
+        return skip_all, overwrite_all, resume_all
+
+    def handle_drop(self, drag_info):
+        from sftp_drag_drop import DragDropInfo
+        creds = get_credentials(self.session_id)
+        is_remote = self.is_remote_browser()
+
+        if is_remote:
+            dest_dir = creds.get('current_remote_directory', '.')
+            self._handle_upload_drop(drag_info.source_paths, dest_dir, creds)
+        else:
+            dest_dir = creds.get('current_local_directory', os.path.expanduser('~'))
+            self._handle_download_drop(drag_info.source_paths, dest_dir, creds)
+
+    def _handle_upload_drop(self, source_paths, dest_dir, creds):
+        hostname = creds.get('hostname', '')
+        port = creds.get('port', 22)
+        username = creds.get('username', '')
+        password = creds.get('password', '')
+        key = creds.get('key', '')
+
+        for source_path in source_paths:
+            basename = os.path.basename(source_path)
+            remote_path = _remote_join(dest_dir, basename)
+
+            if os.path.isdir(source_path):
+                self.upload_directory(source_path, remote_path)
+            elif os.path.isfile(source_path):
+                transfer_id = f"dnd_upload_{int(time.time() * 1000)}"
+                self.transfer_queue_widget.add_transfer_display(
+                    transfer_id=transfer_id,
+                    source_path=source_path,
+                    dest_path=remote_path,
+                    is_source_remote=False,
+                    is_destination_remote=True,
+                    hostname=hostname,
+                    port=port,
+                    username=username,
+                    password=password,
+                    command="upload",
+                    key=key,
+                    session_id=self.session_id
+                )
+            else:
+                self.message_signal.emit(f"Skipping: {basename} (not found)")
+
+        self.message_signal.emit(f"Dropping {len(source_paths)} item(s) to upload")
+
+    def _handle_download_drop(self, source_paths, dest_dir, creds):
+        hostname = creds.get('hostname', '')
+        port = creds.get('port', 22)
+        username = creds.get('username', '')
+        password = creds.get('password', '')
+        key = creds.get('key', '')
+
+        for source_path in source_paths:
+            basename = os.path.basename(source_path.rstrip('/'))
+            local_path = os.path.join(dest_dir, basename)
+
+            try:
+                is_dir = self.is_remote_directory(source_path)
+            except (OSError, IOError, RuntimeError):
+                is_dir = False
+
+            if is_dir:
+                self.download_directory(source_path, local_path)
+            else:
+                transfer_id = f"dnd_download_{int(time.time() * 1000)}"
+                self.transfer_queue_widget.add_transfer_display(
+                    transfer_id=transfer_id,
+                    source_path=source_path,
+                    dest_path=local_path,
+                    is_source_remote=True,
+                    is_destination_remote=False,
+                    hostname=hostname,
+                    port=port,
+                    username=username,
+                    password=password,
+                    command="download",
+                    key=key,
+                    session_id=self.session_id
+                )
+
+        self.message_signal.emit(f"Dropping {len(source_paths)} item(s) to download")
+
     def cancel_current_transfer(self):
         """Cancel the current directory transfer"""
         if hasattr(self, '_current_traversal_worker') and self._current_traversal_worker:
@@ -2008,6 +2141,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                         session_api=self.session_api
                     )
                     self.viewer.setWindowTitle(f"View: {remote_path}")
+                    self.viewer.file_saved.connect(self.refresh_files)
                     self.viewer.show()
                     self.message_signal.emit(f"Opened: {selected_item_text}")
 
@@ -2041,6 +2175,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
 
                     self.viewer = TextViewerWindow(file_path=local_path)
                     self.viewer.setWindowTitle(f"View: {local_path}")
+                    self.viewer.file_saved.connect(self.refresh_files)
                     self.viewer.show()
                     self.message_signal.emit(f"Opened: {selected_item_text}")
             else:

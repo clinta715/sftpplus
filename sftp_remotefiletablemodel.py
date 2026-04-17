@@ -122,6 +122,8 @@ class RemoteFileTableModel(QAbstractTableModel):
             if column == 0:
                 return _safe_decode(name)
             elif column == 1:
+                if is_directory:
+                    return ""
                 return str(size)
             elif column == 2:
                 return oct(mode)[-4:] if name != ".." else ""

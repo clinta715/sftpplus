@@ -1073,37 +1073,47 @@ class TransferQueueWidget(QWidget):
             if observee in self._observees:
                 self._observees.remove(observee)
 
-    def notify_observees(self):
+    def notify_observees(self, is_upload=None):
         """Notify all observers that transfers completed. Thread-safe.
-        Uses debouncing to prevent excessive refreshing during bulk transfers."""
-        # Cancel any pending refresh
+        Uses debouncing to prevent excessive refreshing during bulk transfers.
+        
+        Args:
+            is_upload: True=only refresh remote, False=only refresh local,
+                       None=refresh all (backward compat)
+        """
         if self._refresh_debounce_timer is not None:
             self._refresh_debounce_timer.stop()
         
-        # Schedule a refresh after a short delay to batch multiple rapid updates
         from PySide6.QtCore import QTimer
         self._refresh_debounce_timer = QTimer()
         self._refresh_debounce_timer.setSingleShot(True)
-        self._refresh_debounce_timer.timeout.connect(self._do_notify_observees)
-        self._refresh_debounce_timer.start(500)  # 500ms debounce
+        self._refresh_debounce_timer.timeout.connect(
+            lambda: self._do_notify_observees(is_upload))
+        self._refresh_debounce_timer.start(500)
     
-    def _do_notify_observees(self):
+    def _do_notify_observees(self, is_upload=None):
         """Actually notify observers - called after debounce delay"""
         self._refresh_debounce_timer = None
         
-        # Copy list under lock to avoid holding lock during callbacks
         with QMutexLocker(self._observees_lock):
             observees_copy = list(self._observees)
         
         for observee in observees_copy:
             try:
-                # Use Qt QueuedConnection to ensure refresh happens on main thread
-                QTimer.singleShot(0, lambda o=observee: self._do_refresh(o))
+                QTimer.singleShot(
+                    0, lambda o=observee, d=is_upload: self._do_refresh(o, d))
             except (AttributeError, RuntimeError):
                 pass
 
-    def _do_refresh(self, observee):
+    def _do_refresh(self, observee, is_upload=None):
         """Actually perform the refresh - called on main thread"""
+        if is_upload is not None:
+            is_remote = (hasattr(observee, 'is_remote_browser')
+                         and observee.is_remote_browser())
+            if is_upload and not is_remote:
+                return
+            if not is_upload and is_remote:
+                return
         try:
             if hasattr(observee, 'model') and hasattr(observee.model, 'get_files'):
                 import inspect
@@ -2011,6 +2021,8 @@ class TransferQueueWidget(QWidget):
         if prefs.get_bool("clear_completed_on_complete", False):
             QTimer.singleShot(500, self.clear_completed)
         
+        self.notify_observees(
+            is_upload=not display.get('is_source_remote', True))
         self._check_and_start_queued()
 
     def mark_transfer_failed(self, transfer_id, error_message):
@@ -2048,7 +2060,10 @@ class TransferQueueWidget(QWidget):
         if prefs.get_bool("clear_completed_on_complete", False):
             QTimer.singleShot(500, self.clear_completed)
         
+        self.notify_observees(
+            is_upload=not display.get('is_source_remote', True))
         self._check_and_start_queued()
+    
     def remove_transfer_display(self, transfer_id):
         """Remove a transfer display"""
         if transfer_id in self._transfer_displays:

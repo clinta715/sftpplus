@@ -1485,3 +1485,80 @@ def connect(self, ...):
 - `sftp.py` — Connection guard (`_connecting` flag), progress dialog `canceled` signal disconnect
 - `sftp_filetablemodel.py` — Async `get_files()` with `FileListWorker`, cached `is_dir`/`is_link` in `data()`, removed `processEvents()` and `RemoteFileTableModel` import
 - `sftp_filebrowserclass.py` — Added `self.model.get_files()` call after model construction
+
+### Session Restore, UI Polish & Smart Browser Refresh (2026-04-17)
+
+Four features: session persistence across restarts, column width persistence, directory size display, and direction-aware browser refresh.
+
+#### Session Restore on Close/Startup
+
+**Feature:** When closing the app with open SFTP browser tabs, the user is prompted to save sessions for restoration on next launch.
+
+**New preference:** `session_restore` — `"ask"` (default), `"always"`, `"never"`
+- `"ask"` — Shows combined exit dialog with session checkbox
+- `"always"` — Auto-saves sessions silently, auto-reconnects on startup
+- `"never"` — Skips session save/restore entirely
+
+**Session state file:** `~/.sftp_client_sessions.json` (or `%APPDATA%/sftp_client/sessions.json` on Windows)
+- Passwords encrypted with existing Fernet key from `sftp_hostdataeditor`
+- Stores per-tab: hostname, username, password (encrypted), port, key, current_remote_directory, current_local_directory, tab_title
+- SSH Terminal tabs are NOT saved (only SFTP Browser tabs)
+
+**Combined exit dialog (`closeEvent`):**
+- When both transfers and sessions exist: single dialog with transfer radio buttons + session checkbox
+- When only sessions exist: dialog with restore checkbox
+- When only transfers exist: original 3-button dialog unchanged
+- `"always"` mode auto-saves sessions and only shows transfer dialog if needed
+
+**Startup restore:**
+- `"always"` mode: auto-reconnects all sessions with progress indicators
+- `"ask"` mode: shows picker dialog (checkable list) for user to select which sessions to restore
+- Session file deleted after restore (like transfer queue)
+- Failed connections log errors but don't block remaining sessions
+
+**Directory restore:** `navigate_to_initial_directories()` checks for `_restore_remote_dir`/`_restore_local_dir` overrides. Session restore sets these before calling `connect()`, so the restored directories take precedence over the site's configured initial directories.
+
+**Toolbar UI:** "Sessions:" `QComboBox` with "Ask on close" / "Always restore" / "Never restore" options.
+
+**Files Modified:**
+- `sftp_platform.py` — Added `get_sessions_path()`
+- `sftp_preferences.py` — Added `"session_restore": "ask"` default
+- `sftp.py` — `save_open_sessions()`, `_load_sessions_file()`, `restore_sessions()`, `_show_restore_dialog()`, `_restore_single_session()`, combined `closeEvent()`, `navigate_to_initial_directories()` overrides, Sessions combobox, startup `QTimer.singleShot(500, restore_sessions)`
+
+#### Column Width Persistence
+
+**Problem:** File browser column widths reset to hardcoded defaults (300, 90, 100, 150) on every launch. Remote browser also called `resizeColumnsToContents()` on every directory change, overwriting user-set widths.
+
+**Fix:**
+- Added `local_column_widths` and `remote_column_widths` preferences (default `[300, 90, 100, 150]`)
+- Both browsers restore widths from preferences on init
+- `header.sectionResized` signal saves current widths to preferences on every resize
+- Removed `QTimer.singleShot(100, self.table.resizeColumnsToContents)` from remote browser's `initialize_model()`
+
+**Files Modified:**
+- `sftp_preferences.py` — Added `local_column_widths` and `remote_column_widths` defaults
+- `sftp_filebrowserclass.py` — Restore widths from prefs, `_on_local_column_resized()` handler
+- `sftp_remotefilebrowserclass.py` — Restore widths from prefs, `_on_remote_column_resized()` handler, removed `resizeColumnsToContents()`
+
+#### Directory Size Display
+
+**Problem:** Directories showed "0" in the Size column. Files showed raw byte count without formatting.
+
+**Fix:** Both `FileTableModel` and `RemoteFileTableModel` now return empty string for the Size column when the entry is a directory.
+
+**Files Modified:**
+- `sftp_filetablemodel.py` — `DisplayRole` column 1 returns `""` for directories
+- `sftp_remotefiletablemodel.py` — `DisplayRole` column 1 returns `""` for directories
+
+#### Direction-Aware Browser Refresh
+
+**Problem:** Both local and remote browsers were refreshed after every transfer completion. Downloads don't change the remote filesystem, so refreshing the remote browser was an unnecessary SFTP connection.
+
+**Fix:** `notify_observees()` now accepts an `is_upload` parameter:
+- `is_upload=False` (download) → only refresh local browser
+- `is_upload=True` (upload) → only refresh remote browser
+- `is_upload=None` (default) → refresh both (backward compatible)
+- `mark_transfer_complete()` and `mark_transfer_failed()` derive direction from `display['is_source_remote']`
+
+**Files Modified:**
+- `sftp_transfer_queue_widget.py` — `notify_observees(is_upload)`, `_do_notify_observees(is_upload)`, `_do_refresh(observee, is_upload)`, updated `mark_transfer_complete()` and `mark_transfer_failed()`
