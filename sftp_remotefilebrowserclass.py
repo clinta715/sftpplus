@@ -8,11 +8,9 @@ import time
 from sftp_remotefiletablemodel import RemoteFileTableModel
 from sftp_qt_compat import Qt
 from sftp_transfer_handler import TreePopulateWorker, TraversalWorker, DeletionWorker
-from sftp_creds import get_credentials
 from sftp_sortfiltermodel import DirectoryFirstSortProxyModel
 from sftp_creds import (get_credentials, create_random_integer, set_credentials,
                         verify_credential_update, verify_directory_consistency)
-from sftp_downloadworkerclass import add_sftp_job
 from sftp_preferences import get_preferences
 from sftp_context_menu_customizer import is_visible
 
@@ -489,8 +487,6 @@ class RemoteFileBrowser(FileBrowser):
 
     def _delete_single_item(self, remote_path):
         """Delete a single item synchronously (for single-item deletes)"""
-        creds = get_credentials(self.session_id)
-
         try:
             if not self.sftp_exists(remote_path):
                 self.message_signal.emit("File not found.")
@@ -948,6 +944,8 @@ class RemoteFileBrowser(FileBrowser):
             return "skip"
         elif clicked == resume_all_btn:
             return "resume_all"
+        elif clicked == cancel_btn:
+            return "cancel"
         else:
             return "cancel"
 
@@ -1338,7 +1336,7 @@ class RemoteFileBrowser(FileBrowser):
         )
         if ok and new_name and new_name != folder_name:
             parent_dir = os.path.dirname(path.rstrip('/'))
-            new_path = os.path.join(parent_dir, new_name)
+            new_path = parent_dir + '/' + new_name
             self.sftp_rename(path, new_path)
             self.populate_tree_view()
 

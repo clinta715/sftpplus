@@ -147,7 +147,7 @@ def start_drag(table_view, source_type, session_id=None, hostname=None, username
         filename = _strip_prefix(filename)
         
         # Build full path
-        full_path = os.path.join(current_dir, filename) if current_dir else filename
+        full_path = current_dir.rstrip('/') + '/' + filename if current_dir else filename
         source_paths.append(full_path)
     
     if not source_paths:

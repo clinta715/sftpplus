@@ -30,7 +30,6 @@ set INCLUDE_OPTS=^
  --include-module=sftp_connection_pool^
  --include-module=sftp_connections_widget^
  --include-module=sftp_creds^
- --include-module=sftp_downloadworkerclass^
  --include-module=sftp_drag_drop^
  --include-module=sftp_file_browser_panel^
  --include-module=sftp_filebrowserclass^

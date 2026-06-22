@@ -186,3 +186,11 @@ def ensure_config_directory():
     config_dir = get_config_directory()
     create_secure_directory(config_dir)
     return config_dir
+
+
+def remote_join(base, name):
+    """Join remote SFTP path components using forward slashes (safe on all platforms)."""
+    base = base.rstrip('/')
+    if not base:
+        return '/' + name
+    return base + '/' + name

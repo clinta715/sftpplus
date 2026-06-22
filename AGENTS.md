@@ -272,7 +272,7 @@ from icecream import ic
 
 # 4. Local project modules
 from sftp_creds import get_credentials, set_credentials
-from sftp_downloadworkerclass import add_sftp_job, put_response
+from sftp_operations import SFTPOperations
 
 # 5. Compatibility layer (for Qt enums)
 from sftp_qt_compat import Qt
@@ -330,18 +330,12 @@ except:
 2. **Always clean up resources in finally blocks:**
 ```python
 # Use context managers for guaranteed cleanup
-from sftp_downloadworkerclass import ResponseQueueContext
+from sftp_operations import SFTPOperations
 
-with ResponseQueueContext(job_id) as queue:
-    # ... operations ...
-    pass  # Automatically cleaned up
-
-# Or manually with try/finally
-try:
-    queue = create_response_queue(job_id)
-    # ... operations ...
-finally:
-    delete_response_queue(job_id)
+with SFTPOperations(hostname, username, password) as ops:
+    ops.download('/remote/file.txt', '/local/file.txt')
+    ops.upload('/local/other.txt', '/remote/other.txt')
+# Session automatically closed on exit
 ```
 
 3. **Use efficient blocking instead of busy-polling:**
@@ -413,7 +407,6 @@ The pool enforces `_max_channels_per_ssh` (default 8). Never destroy an SSH conn
 __init__.py                   # Package structure and public API exports
 sftp.py                       # Main application entry point
 sftp_creds.py                 # Thread-safe credential management
-sftp_downloadworkerclass.py   # Background transfer workers
 sftp_transfer_handler.py      # Directory traversal workers (TraversalWorker, DirectoryTransferTask)
 sftp_backgroundthreadwindow.py # Transfer queue UI
 sftp_hostdataeditor.py        # Connection data storage/encryption (functions only)
@@ -683,7 +676,7 @@ def _safe_emit(signal, *args):
 `sftp_connection_pool.py` now checks `total_channels >= _max_channels_per_ssh` *before* attempting to open a new channel. Connections at capacity are kept alive (not destroyed) and a new SSH connection is created instead.
 
 **Files Modified:**
-- `sftp_downloadworkerclass.py` — `_safe_emit()` added; all 15 signal emissions protected
+- `sftp_downloadworkerclass.py` — `_safe_emit()` added; all 15 signal emissions protected (file since removed in P4)
 - `sftp_transfer_handler.py` — `_safe_emit()` module function; all 20+ emissions protected across 5 worker classes
 - `sftp_transfer_queue_widget.py` — `_running_workers` set added
 - `sftp_connection_pool.py` — Channel limit enforced; cascading failure prevented
@@ -1427,3 +1420,59 @@ Replaced with `QColor(169, 169, 169)` constant.
 - `sftp_toolbar_customizer.py` — QColor fix for setForeground
 - `sftp_terminal_widget.py` — Known hosts path and directory creation
 - `sftp_context_menu_customizer.py` — New file: context menu customization dialog
+
+### P4 Cleanup & Comprehensive Bug Fix (2026-06-22)
+
+P4 (kill `sftp_downloadworkerclass.py`) completion and systematic bugfix from a 6-agent comprehensive audit.
+
+#### Major Changes
+
+1. **`sftp_downloadworkerclass.py` deleted** — All 15 production files, build configs, build scripts, and docs updated to remove references.
+2. **`sftp_transfer_queue_widget.py` indentation bug fixed** — Lines 253–275 were accidentally nested inside `_max_concurrent_transfers` setter instead of `__init__`. `init_ui()` was never called during construction — all widgets remained uncreated. Hidden since 2026-04-01 when the dead `spinBox` (which used to trigger the setter as a side effect) was removed.
+3. **`QMutexLocker` replaced** — `sftp_transfer_model.py` and `sftp_transfer_queue_widget.py` switched to `threading.Lock` (PySide6 doesn't expose `QMutexLocker`).
+4. **Qt font warning suppressed** — Explicit 10pt application font set in `sftp.py`.
+
+#### Critical Bugs Fixed
+
+| ID | Bug | Root Cause | Fix |
+|----|-----|-----------|-----|
+| C1 | `cleanup_all()` deadlock | `cleanup_all()` held non-reentrant `Lock` while calling `remove_session()` which re-acquires the same lock | Inlined cleanup: `pop()` + `session.cleanup()` under single lock hold |
+| C2 | Failed transfers shown as "Complete" | `finished` lambda ignored `failure_count` param; `mark_transfer_failed` didn't reset progress bar | Lambda checks `f == 0`; `mark_transfer_failed` sets progress bar format/color |
+| C3 | `st_mode=None` crashes traversal | Some SFTP servers return `None` for symlink `st_mode`; `stat.S_ISLNK(None)` raises `TypeError` | `entry.get('st_mode') or 0` guard |
+| C4 | Remote paths get backslashes | `os.path.join()` used for remote SFTP paths at 10 call sites across 6 files — produces `\` on Windows, breaking SFTP | Replaced with `base.rstrip('/') + '/' + name` inline. Files: `sftp_transfer_handler.py`, `sftp_browserclass.py`, `sftp_remotefilebrowserclass.py`, `sftp_session_executor.py`, `sftp_browser_mixins.py`, `sftp_drag_drop.py` |
+| C5 | "Cancel All" leaves transfer stuck | `_do_transfer()` returned silently on `action == "cancel"` without emitting `finished` signal | Added `_safe_emit(self.signals.finished, 0, 0)` before all cancel returns (4 sites) |
+
+#### LOW Items Fixed
+
+- **L1**: Duplicate `command = "upload" if self.is_dest_remote else "download"` removed
+- **L2**: Double `sftp.stat()` call in resume path — now single call with try/except
+- **L3–L9**: 7 unused variables removed or wired up (`dont_follow_btn`, `job_id`, `overwrite`, `value`, `conn_key`, `creds`, 2× `cancel_btn`)
+
+#### Path Safety for Windows
+
+All `os.path.join()` for remote paths replaced across the codebase with forward-slash concatenation:
+
+- `sftp_transfer_handler.py` — 4 sites in `_remove_remote_dir_recursive()` and `_traverse()`
+- `sftp_browserclass.py` — 2 sites in `rename_file()` and `prompt_rename()`
+- `sftp_remotefilebrowserclass.py` — 1 site in `tree_rename_handler()`
+- `sftp_session_executor.py` — 1 site in `_execute_rename()`
+- `sftp_browser_mixins.py` — 1 site in `_initiate_upload()`
+- `sftp_drag_drop.py` — 1 site in `start_drag()`
+- `sftp_platform.py` — Added `remote_join()` utility function
+- `sftp_remotefilebrowserclass.py` — Removed duplicate `get_credentials` import
+
+**Files Modified:**
+- `sftp_downloadworkerclass.py` — **Deleted**
+- `sftp_transfer_queue_widget.py` — Indentation fix, `finished` lambda fix, `mark_transfer_failed` progress bar fix, `QMutexLocker`→`threading.Lock`
+- `sftp_transfer_handler.py` — Duplicate `command` removal, double `sftp.stat()` fix, `st_mode` guard, cancel `finished` emissions, remote path fixes
+- `sftp_session.py` — `cleanup_all()` inlined
+- `sftp_connection_pool.py` — Removed unused `conn_key`
+- `sftp_browserclass.py` — Unused variables removed, remote path fixes
+- `sftp_remotefilebrowserclass.py` — Unused `creds`/`cancel_btn`, remote path fix, duplicate import removed
+- `sftp_session_executor.py` — Remote path fix
+- `sftp_browser_mixins.py` — Remote path fix
+- `sftp_drag_drop.py` — Remote path fix
+- `sftp_platform.py` — Added `remote_join()`
+- `sftp.py` — Explicit application font set
+- `sftp_transfer_model.py` — `QMutex`→`threading.Lock`
+- `__init__.py` — Version bump, new exports (`TransferModel`, `TransferPersistence`)

@@ -127,7 +127,6 @@ pip install PyQt6 paramiko cryptography humanize
 | `sftp_browserclass.py` | Base browser (uses mixins for modular functionality) |
 | `sftp_browser_mixins.py` | Browser mixins: TreeViewMixin, BookmarkMixin, FileOpsMixin |
 | `sftp_remotefilebrowserclass.py` | Remote SFTP browser implementation |
-| `sftp_downloadworkerclass.py` | Background transfer worker threads |
 | `sftp_creds.py` | Session credential management |
 | `sftp_hostdataeditor.py` | Connection data storage/encryption (functions only) |
 | `sftp_preferences.py` | Persistent user preferences |

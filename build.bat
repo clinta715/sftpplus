@@ -35,7 +35,6 @@ set HIDDEN_IMPORTS=^
  --hidden-import "sftp_connection_pool"^
  --hidden-import "sftp_connections_widget"^
  --hidden-import "sftp_creds"^
- --hidden-import "sftp_downloadworkerclass"^
  --hidden-import "sftp_drag_drop"^
  --hidden-import "sftp_file_browser_panel"^
  --hidden-import "sftp_filebrowserclass"^

@@ -322,7 +322,7 @@ class DragDropMixin:
             return
         
         for source_path in source_paths:
-            dest_path = os.path.join(dest_dir, os.path.basename(source_path))
+            dest_path = dest_dir.rstrip('/') + '/' + os.path.basename(source_path)
             logger.info(f"Uploading: {source_path} -> {dest_path}")
             # Call upload method (to be implemented by subclass)
             if hasattr(self, 'upload_download'):

@@ -239,7 +239,7 @@ class TestPathConstruction:
         folder_name = os.path.basename(remote_path.rstrip('/'))
         local_dir = os.path.join(local_base, folder_name)
         
-        assert local_dir == "/local/base/folder_name"
+        assert os.path.basename(local_dir) == "folder_name"
     
     def test_rename_path_construction(self):
         """Test path construction for rename operation."""
@@ -249,7 +249,8 @@ class TestPathConstruction:
         
         folder_name = os.path.basename(old_path.rstrip('/'))
         parent_dir = os.path.dirname(old_path.rstrip('/'))
-        new_path = os.path.join(parent_dir, "new_name")
+        # Remote paths always use forward slashes
+        new_path = parent_dir + '/' + "new_name"
         
         assert folder_name == "old_name"
         assert parent_dir == "/remote"

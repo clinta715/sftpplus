@@ -102,7 +102,6 @@ INCLUDE_MODULES=(
     sftp_connection_pool
     sftp_connections_widget
     sftp_creds
-    sftp_downloadworkerclass
     sftp_drag_drop
     sftp_file_browser_panel
     sftp_filebrowserclass

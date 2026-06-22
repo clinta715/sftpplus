@@ -2,7 +2,6 @@ from PySide6.QtWidgets import QInputDialog, QMessageBox, QApplication
 from PySide6.QtCore import QObject, Signal, QRunnable, QThreadPool, QMutex, QWaitCondition
 from sftp_qt_compat import Qt
 from sftp_creds import get_credentials, create_random_integer, sanitize_error_message
-from sftp_downloadworkerclass import add_sftp_job
 from sftp_preferences import get_preferences
 from sftp_connection_pool import get_connection_pool
 from sftp_session import get_session_manager
@@ -160,7 +159,7 @@ class DeletionWorker(QRunnable):
         for entry in files:
             if self._cancel_requested:
                 return
-            entry_path = os.path.join(remote_path, entry['filename'])
+            entry_path = remote_path.rstrip('/') + '/' + entry['filename']
             try:
                 ops.remove(entry_path)
             except (PermissionError, OSError):
@@ -171,7 +170,7 @@ class DeletionWorker(QRunnable):
         for entry in dirs:
             if self._cancel_requested:
                 return
-            entry_path = os.path.join(remote_path, entry['filename'])
+            entry_path = remote_path.rstrip('/') + '/' + entry['filename']
             try:
                 self._remove_remote_dir_recursive(ops, entry_path, _depth + 1)
             except Exception:
@@ -565,9 +564,10 @@ class TraversalWorker(QRunnable):
                 filename = entry['filename']
                 if filename in ['.', '..']: continue
                 # Skip symlinks unless follow_symlinks is enabled
-                if not self.follow_symlinks and stat.S_ISLNK(entry['st_mode']):
+                st_mode = entry.get('st_mode') or 0
+                if not self.follow_symlinks and stat.S_ISLNK(st_mode):
                     continue
-                is_dir = stat.S_ISDIR(entry['st_mode'])
+                is_dir = stat.S_ISDIR(st_mode)
             else:
                 filename = entry
                 if filename in ['.', '..']: continue
@@ -577,8 +577,8 @@ class TraversalWorker(QRunnable):
                     continue
                 is_dir = os.path.isdir(full_path)
                 
-            source_path = os.path.join(source_dir, filename)
-            dest_path = os.path.join(dest_dir, filename)
+            source_path = source_dir.rstrip('/') + '/' + filename
+            dest_path = dest_dir.rstrip('/') + '/' + filename
             
             if is_dir:
                 if self._cancelled:
@@ -586,11 +586,6 @@ class TraversalWorker(QRunnable):
                 self._traverse(source_path, dest_path, _depth + 1)
                 continue
             
-            # Just collect the file - no conflict checking during discovery
-            # Conflict handling happens when transfers actually start
-            command = "upload" if self.is_dest_remote else "download"
-            
-            # Add to collected files (skip prompts during discovery)
             command = "upload" if self.is_dest_remote else "download"
             
             file_size = 0
@@ -728,6 +723,7 @@ class DirectTransferWorker(QRunnable):
         for attempt in range(max_retries):
             if self._cancel_requested:
                 logger.debug("Worker cancelled before attempt")
+                _safe_emit(self.signals.finished, 0, 0)
                 return
             
             try:
@@ -841,6 +837,7 @@ class DirectTransferWorker(QRunnable):
                 resume = True
             elif action == "cancel":
                 logger.debug("Transfer cancelled during conflict resolution")
+                _safe_emit(self.signals.finished, 0, 0)
                 return
             
             command = self.command
@@ -857,7 +854,10 @@ class DirectTransferWorker(QRunnable):
                 file_size = os.path.getsize(self.source_path)
                 
                 if resume:
-                    existing_size = sftp.stat(self.dest_path).st_size if sftp.stat(self.dest_path) else 0
+                    try:
+                        existing_size = sftp.stat(self.dest_path).st_size
+                    except (IOError, OSError):
+                        existing_size = 0
                     if existing_size >= file_size:
                         _safe_emit(self.signals.progress, file_size, file_size, 0, 0)
                         _safe_emit(self.signals.finished, 1, 0)
@@ -871,6 +871,7 @@ class DirectTransferWorker(QRunnable):
                             while bytes_uploaded < file_size:
                                 if self._cancel_requested:
                                     logger.debug("Upload cancelled by flag")
+                                    _safe_emit(self.signals.finished, 0, 0)
                                     return
                                 chunk = local_file.read(chunk_size)
                                 if not chunk: break
@@ -903,6 +904,7 @@ class DirectTransferWorker(QRunnable):
                             while bytes_downloaded < file_size:
                                 if self._cancel_requested:
                                     logger.debug("Download cancelled by flag")
+                                    _safe_emit(self.signals.finished, 0, 0)
                                     return
                                 chunk = remote_file.read(chunk_size)
                                 if not chunk: break

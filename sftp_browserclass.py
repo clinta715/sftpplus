@@ -16,9 +16,7 @@ import threading
 DEBUG = os.environ.get('SFTP_DEBUG', '').lower() in ('1', 'true', 'yes')
 
 from sftp_creds import get_credentials, create_random_integer, set_credentials
-from sftp_downloadworkerclass import (create_response_queue, delete_response_queue,
-                                       check_response_queue, wait_for_response, QueueItem, ResponseQueueContext,
-                                       add_sftp_job)
+
 from sftp_session_executor import SFTPSessionAPI, create_session_api
 from sftp_preferences import get_preferences
 from sftp_session import SFTPCredentials, get_session_manager
@@ -537,8 +535,9 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         new_name, ok = QInputDialog.getText(self, "Rename", f"Enter new name for '{selected_item}':")
         if ok and new_name and new_name != selected_item:
             creds = get_credentials(self.session_id)
-            current_dir = creds.get('current_remote_directory' if hasattr(self, 'is_remote_browser') and self.is_remote_browser() else 'current_local_directory', '.')
-            remote_path = os.path.join(current_dir, selected_item)
+            is_remote = hasattr(self, 'is_remote_browser') and self.is_remote_browser()
+            current_dir = creds.get('current_remote_directory' if is_remote else 'current_local_directory', '.')
+            remote_path = current_dir.rstrip('/') + '/' + selected_item if is_remote else os.path.join(current_dir, selected_item)
             if hasattr(self, 'sftp_rename'):
                 self.sftp_rename(remote_path, new_name)
             else:
@@ -704,24 +703,6 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
 
         return head, tail
 
-    def _wait_for_response(self, queue, timeout=30):
-        """
-        Wait for a response using blocking queue with timeout.
-        More efficient than busy-polling.
-        
-        Args:
-            queue: The response queue to wait on
-            timeout: Maximum time to wait in seconds
-            
-        Returns:
-            Response item or None if timeout
-        """
-        try:
-            # Use blocking get with timeout - much more efficient than polling
-            return queue.get(timeout=timeout)
-        except queue.Empty:
-            return None
-    
     def sftp_mkdir(self, remote_path):
         """Create a remote directory with guaranteed resource cleanup"""
         if self.session_api is None:
@@ -954,34 +935,6 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         except (OSError, IOError, paramiko.SSHException) as e:
             return False
 
-    def waitjob(self, job_id, timeout=30):
-        # Reset cancel flag at start of each job
-        self.reset_cancel_flag()
-        self.progressBar.setRange(0, 100)
-        self.progressBar.setValue(0)
-        
-        try:
-            # Use blocking wait instead of busy-polling
-            success, response = wait_for_response(job_id, timeout=timeout)
-            
-            if not success:
-                raise TimeoutError("Job timed out")
-            
-            # Check for user cancellation (thread-safe)
-            if self.is_canceled():
-                raise KeyboardInterrupt("User canceled the transfer")
-
-        except (TimeoutError, KeyboardInterrupt) as e:
-            self.message_signal.emit(f"Job interrupted: {str(e)}")
-            # Ensure we clean up the job even when canceled
-            delete_response_queue(job_id)
-            return False
-        finally:
-            self.progressBar.setValue(100)
-            self.progressBar.setRange(0, 100)
-
-        return True
-
     def cancel_current_operation(self):
         """Set the user_canceled flag to True to cancel current operation"""
         with self._cancel_lock:
@@ -1056,7 +1009,7 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                         except OSError as e:
                             self.message_signal.emit(f"Rename failed: {e}")
                     else:
-                        remote_path = os.path.join(creds.get('current_remote_directory'), selected_item)
+                        remote_path = creds.get('current_remote_directory', '').rstrip('/') + '/' + selected_item
                         self.sftp_rename(remote_path, new_name)
                 elif ok and new_name == selected_item:
                     QMessageBox.information(None, "Rename", "New name is the same as current name.")
@@ -1376,6 +1329,8 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                                     continue
                                 elif msg_box.clickedButton() == follow_btn:
                                     follow_symlinks = True
+                                elif msg_box.clickedButton() == dont_follow_btn:
+                                    follow_symlinks = False
                             
                             # Pass the global flags to directory upload
                             skip_all, overwrite_all, resume_all = self.upload_directory(
@@ -1424,13 +1379,10 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
                             # Execute the upload if not skipping
                             if not skip_all:
                                 self.message_signal.emit(f"Uploading file: {selected_path}")
-                                job_id = create_random_integer()
-                                queue_item = QueueItem(os.path.basename(selected_path), job_id)
                                 
                                 # Handle overwrite, resume, or upload
                                 action_result = action if 'action' in dir() else ''
                                 resume = (action_result == "resume")
-                                overwrite = (action_result == "overwrite")
                                 command = "resume" if resume else "upload"
                                 
                                 # Generate transfer_id
@@ -1464,10 +1416,6 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
             
             except (OSError, IOError, RuntimeError) as e:
                 self.message_signal.emit(f"upload_download() error: {e}")
-            finally:
-                # Clean up any remaining job resources
-                if job_id is not None:
-                    delete_response_queue(job_id)
         else:
             self.message_signal.emit("Invalid item or empty path.")
 
@@ -1878,20 +1826,14 @@ class Browser(TreeViewMixin, BookmarkMixin, FileOpsMixin, QWidget):
         
         logger.debug(f"_handle_direct_transfer_progress: {transfer_id}, {bytes_done}/{bytes_total}, speed={speed}")
         
-        # Calculate percentage
-        if bytes_total > 0:
-            value = int((bytes_done / bytes_total) * 100)
-        else:
-            value = 0
-        
-        self.transfer_queue_widget.update_progress(transfer_id, value, speed, eta, bytes_done, bytes_total)
+        self.transfer_queue_widget.update_transfer_progress(transfer_id, bytes_done, bytes_total, speed)
     
     def _handle_direct_transfer_finished(self, transfer_id):
         """Handle transfer finished from DirectTransferWorker"""
         if not hasattr(self, 'transfer_queue_widget') or not self.transfer_queue_widget:
             return
         
-        self.transfer_queue_widget.transfer_finished(transfer_id)
+        self.transfer_queue_widget.mark_transfer_complete(transfer_id)
     
     def prompt_overwrite(self, item_path, include_symlink_option=False):
         """Prompt user for overwrite action"""

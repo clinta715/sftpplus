@@ -218,8 +218,6 @@ class ConnectionPool:
         Returns:
             Tuple of (ssh_client, sftp_client) or (None, None) if no channels available
         """
-        conn_key = self.get_connection_key(hostname, port, username)
-        
         with self._pool_lock:
             if self._discovery_channels_used >= self._max_discovery_channels:
                 return (None, None)

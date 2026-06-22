@@ -170,11 +170,14 @@ class TestLocalTerminalArchitecture:
     def test_pipe_compatible_shell_not_fish(self):
         """Test that _get_pipe_compatible_shell returns a non-fish shell."""
         from sftp_local_terminal_widget import _get_pipe_compatible_shell
+        from sftp_platform import is_windows
         shell = _get_pipe_compatible_shell()
         assert 'fish' not in shell
-        # Should be bash, zsh, or sh
         shell_name = os.path.basename(shell)
-        assert shell_name in ('bash', 'zsh', 'sh')
+        if is_windows():
+            assert shell_name in ('cmd.exe', 'powershell.exe', 'pwsh.exe')
+        else:
+            assert shell_name in ('bash', 'zsh', 'sh')
 
 
 class TestLocalTerminalImports:

@@ -102,7 +102,9 @@ class SessionManager:
         """Cleanup all sessions"""
         with self._lock:
             for session_id in list(self._sessions.keys()):
-                self.remove_session(session_id)
+                session = self._sessions.pop(session_id, None)
+                if session:
+                    session.cleanup()
     
     def _generate_session_id(self) -> str:
         """Generate a unique session ID"""

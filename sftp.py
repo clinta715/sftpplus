@@ -1,27 +1,22 @@
 import sys
 import os
 import argparse
-import platform
-import time
 import threading
 import logging
-from sftp_downloadworkerclass import transferSignals, add_sftp_job, clear_sftp_queue
 from sftp_transfer_queue_widget import TransferQueueWidget
 from sftp_hostdataeditor import (
-    save_connection_data, load_connection_data,
-    update_connection_data, get_site_names, get_site_data, get_setting
+    update_connection_data, get_site_names, get_site_data
 )
 from sftp_theme import BUTTON_STYLE_DARK
 from sftp_connections_widget import ConnectionsWidget
 from sftp_file_browser_panel import FileBrowserPanel
 from sftp_terminal_widget import SSHTerminalWidget
 from sftp_local_terminal_widget import LocalTerminalWidget
-from sftp_filebrowserclass import FileBrowser
 from sftp_creds import get_credentials, set_credentials, del_credentials, create_random_integer, clear_all_credentials, get_home_directory
 from sftp_session import get_session_manager
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
-from PySide6.QtWidgets import QInputDialog, QFileDialog, QLabel, QToolButton, QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QTextEdit, QCompleter, QComboBox, QSpinBox, QTabWidget, QMessageBox, QCheckBox, QMenu, QSizePolicy, QProgressDialog
-from PySide6.QtCore import Signal, QObject, QCoreApplication, QTimer, QEvent, QMutexLocker, QRunnable, QThreadPool, QEventLoop
+from PySide6.QtWidgets import QInputDialog, QFileDialog, QLabel, QToolButton, QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QCompleter, QComboBox, QSpinBox, QTabWidget, QMessageBox, QCheckBox, QMenu, QSizePolicy, QProgressDialog
+from PySide6.QtCore import Signal, QObject, QCoreApplication, QTimer, QRunnable, QThreadPool, QEventLoop
 from PySide6.QtGui import QKeySequence, QShortcut
 import paramiko
 
@@ -29,7 +24,7 @@ from sftp_preferences import get_preferences
 from sftp_toolbar_customizer import customize_toolbar
 from sftp_context_menu_customizer import is_visible, customize_context_menus
 from sftp_about import show_about
-from sftp_logging import setup_logging, get_logger
+from sftp_logging import setup_logging
 from sftp_platform import get_known_hosts_path, create_secure_directory
 
 logger = logging.getLogger('sftp')
@@ -275,7 +270,6 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
 
     def __init__(self):
         super().__init__()
-        self.transfers_message = transferSignals()
         self.message_signal.connect(self.update_console)
 
         QCoreApplication.instance().aboutToQuit.connect(self.cleanup)
@@ -418,7 +412,6 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         return sep
 
     def _copy_current_path(self, event):
-        from PySide6.QtWidgets import QApplication
         current_widget = self.tab_widget.currentWidget()
         path = ""
         if hasattr(current_widget, 'right_browser') and current_widget.right_browser:
@@ -516,8 +509,6 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.terminal_button.setStyleSheet(BUTTON_STYLE_DARK)
         self.edit_button = QPushButton("Edit Host Data")
         self.edit_button.setStyleSheet(BUTTON_STYLE_DARK)
-        self.clear_queue_button = QPushButton("Clear Queue")
-        self.clear_queue_button.setStyleSheet(BUTTON_STYLE_DARK)
         self.about_button = QPushButton("ℹ About")
         self.about_button.setToolTip("About SFTP Client")
         self.about_button.setStyleSheet(BUTTON_STYLE_DARK)
@@ -528,8 +519,6 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.confirm_exit_checkbox.setChecked(prefs.get_bool("confirm_exit", True))
         self.confirm_exit_checkbox.stateChanged.connect(self._on_confirm_exit_changed)
         
-        self.transfers = {}  # Dictionary to store active transfers
-
         # Initialize hostname combo box
         self.hostname_combo = CustomComboBox(self)  # Pass self as parent
         self.hostname_combo.setEditable(True)
@@ -638,8 +627,6 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.transfer_queue_widget.signal_transfer_progress.connect(self._on_transfer_progress)
         self.transfer_queue_widget.signal_overall_progress.connect(self._on_overall_progress)
         
-        QTimer.singleShot(500, self.transfer_queue_widget.load_pending_transfers)
-        
         # Create and add the connections widget as a tab
         self.connections_widget = ConnectionsWidget()
         self.connections_widget.connect_requested.connect(self.handle_connection_request)
@@ -713,7 +700,6 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         
         self.button_layout.addWidget(self.connect_button)
         self.button_layout.addWidget(self.terminal_button)
-        self.button_layout.addWidget(self.clear_queue_button)
         self.button_layout.addWidget(self.confirm_exit_checkbox)
         self.button_layout.addWidget(self.edit_button)
         self.button_layout.addStretch()
@@ -726,7 +712,6 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.edit_button.clicked.connect(self._switch_to_connections_tab)
         self.connect_button.clicked.connect(self.connect_button_pressed)
         self.terminal_button.clicked.connect(self.terminal_button_pressed)
-        self.clear_queue_button.clicked.connect(clear_sftp_queue)
         self.about_button.clicked.connect(self.show_about_dialog)
     
     def show_about_dialog(self):
@@ -1014,16 +999,6 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
 
         self.log_connection_success()
 
-    def create_cancel_button(self, transfer_id):
-        cancel_button = QPushButton("Cancel")
-        cancel_button.clicked.connect(lambda: self.cancel_transfer(transfer_id))
-        return cancel_button
-
-    def cancel_transfer(self, transfer_id):
-        if transfer_id in self.transfers:
-            self.transfers[transfer_id].download_worker._stop_flag = True
-            self.message_signal.emit(f"Cancelling transfer {transfer_id}")
-
     def get_session_title(self, session_id):
         self.session_id = session_id
         creds = get_credentials(self.session_id)
@@ -1310,7 +1285,8 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
                         creds = get_credentials(browser.session_id)
                         
                         if browser.is_remote_browser():
-                            remote_path = os.path.join(creds.get('current_remote_directory', '.'), selected_item)
+                            base = creds.get('current_remote_directory', '.').rstrip('/')
+                            remote_path = (base + '/' + selected_item) if base else '/' + selected_item
                             browser.sftp_rename(remote_path, new_name)
                         else:
                             local_path = os.path.join(creds.get('current_local_directory', '.'), selected_item)
@@ -1387,19 +1363,14 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         else:
             self.connect(hostname=hostname, username=username, password=password, port=port, key=key)
 
-    # Alias for backward compatibility
-    on_site_manager_connect = handle_connection_request
-
     def connect_button_pressed(self):
         try:
             session_id = self.connect()
             if session_id is None:
-                # Connection failed, error has already been displayed
                 return
-            # If needed, add any post-connection logic here
         except (ConnectionError, OSError, ValueError) as e:
             error_message = f"Connection failed: {str(e)}"
-            self.display_error(error_message)
+            QMessageBox.critical(self, "Connection Error", error_message)
             self.update_console(error_message)
 
     def terminal_button_pressed(self):
@@ -1578,7 +1549,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
 
             self.message_signal.emit(f"Successfully connected to {self.temp_hostname}")
 
-            # Set the home directory from test_connection to avoid another SSH connection
+            # Set the home directory from the connection test to avoid another SSH connection
             # This must be done BEFORE prepare_container_widget() calls initialize_model()
             set_credentials(self.session_id, 'current_remote_directory', home_dir)
             self.message_signal.emit(f"Remote home directory: {home_dir}")
@@ -1614,184 +1585,6 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             QMessageBox.critical(self, "Connection Error", error_message)
             self.message_signal.emit(f"Connection failed: {error_message}")
         return None
-
-    def _setup_host_key_policy(self, ssh):
-        """
-        Setup SSH host key verification policy.
-        Loads known_hosts and prompts user for unknown hosts.
-        """
-        known_hosts_path = get_known_hosts_path()
-        
-        # Try to load existing known_hosts
-        if os.path.exists(known_hosts_path):
-            try:
-                ssh.load_host_keys(known_hosts_path)
-                self.message_signal.emit(f"Loaded known hosts from {known_hosts_path}")
-            except (OSError, IOError, RuntimeError) as e:
-                self.message_signal.emit(f"Warning: Could not load known_hosts: {e}")
-        
-        # Set up policy to warn about unknown hosts
-        class InteractivePolicy(paramiko.MissingHostKeyPolicy):
-            def __init__(self, parent):
-                self.parent = parent
-                self.known_hosts_path = known_hosts_path
-                
-            def missing_host_key(self, client, hostname, key):
-                # Check if this is a new host
-                key_type = key.get_name()
-                fingerprint = key.get_fingerprint().hex()
-                
-                msg = f"""Unknown host: {hostname}
-
-Key type: {key_type}
-Fingerprint: {fingerprint}
-
-Do you want to trust this host and add it to known_hosts?"""
-                
-                reply = QMessageBox.question(
-                    self.parent,
-                    "Unknown Host Key",
-                    msg,
-                    Qt.MsgBtn_Yes | Qt.MsgBtn_No,
-                    Qt.MsgBtn_No
-                )
-                
-                if reply == Qt.MsgBtn_Yes:
-                    try:
-                        # Ensure the directory exists
-                        dir_path = os.path.dirname(self.known_hosts_path)
-                        if dir_path:
-                            create_secure_directory(dir_path)
-                        
-                        client.get_host_keys().add(hostname, key.get_name(), key)
-                        client.save_host_keys(self.known_hosts_path)
-                        return
-                    except (OSError, IOError, RuntimeError) as e:
-                        self.parent.message_signal.emit(f"Warning: Could not save host key: {e}")
-                        return
-                else:
-                    raise paramiko.SSHException(f"Host key verification failed for {hostname}")
-        
-        ssh.set_missing_host_key_policy(InteractivePolicy(self))
-
-    def test_connection(self):
-        """Test SSH/SFTP connection with guaranteed cleanup. Returns home directory path."""
-        import paramiko
-        ssh = paramiko.SSHClient()
-        sftp = None
-        home_dir = '/'
-
-        # Setup proper host key verification
-        self._setup_host_key_policy(ssh)
-
-        try:
-            self.message_signal.emit(f"Attempting SSH connection to {self.temp_hostname}:{self.temp_port}...")
-
-            # Attempt connection with appropriate authentication method
-            connect_kwargs = {
-                'hostname': self.temp_hostname,
-                'port': self.temp_port,
-                'username': self.temp_username,
-                'timeout': 60
-            }
-
-            # Handle SSH key authentication
-            if self.temp_key:
-                self.message_signal.emit(f"Using SSH key authentication with: {os.path.basename(self.temp_key)}")
-                ssh.connect(**connect_kwargs, pkey=self._load_private_key(self.temp_key))
-            else:
-                # Password-based authentication
-                if not self.temp_password:
-                    raise ValueError("Password is required when not using SSH key authentication")
-                connect_kwargs['password'] = self.temp_password
-                self.message_signal.emit("Using password authentication")
-                ssh.connect(**connect_kwargs)
-
-            self.message_signal.emit("SSH connection successful")
-
-            # Test SFTP functionality by opening SFTP session and listing current directory
-            sftp = ssh.open_sftp()
-            sftp.listdir('.')  # Test with simple directory listing
-            self.message_signal.emit("SFTP connection test successful")
-
-            # Get the actual home directory to avoid relative path issues
-            try:
-                stdin, stdout, stderr = ssh.exec_command('pwd')
-                output = stdout.read().decode().strip()
-                error = stderr.read().decode().strip()
-                if output and not error:
-                    home_dir = output
-                    self.message_signal.emit(f"Remote home directory: {home_dir}")
-            except (OSError, IOError, RuntimeError) as e:
-                pass
-
-            return home_dir
-
-        except paramiko.BadHostKeyException as e:
-            # Host key changed - ask user what to do
-            msg = f"""Host key mismatch for {e.hostname}
-
-The server's host key has changed. This could indicate:
-- The server was rebuilt or updated
-- A man-in-the-middle attack
-- The known_hosts file was corrupted
-
-Old key: {e.key.get_fingerprint().hex() if e.key else 'unknown'}
-
-Do you want to update the host key and continue connecting?"""
-            
-            reply = QMessageBox.question(
-                self,
-                "Host Key Changed",
-                msg,
-                Qt.MsgBtn_Yes | Qt.MsgBtn_No,
-                Qt.MsgBtn_No
-            )
-            
-            if reply == Qt.MsgBtn_Yes:
-                # Remove old key and retry
-                known_hosts_path = get_known_hosts_path()
-                if os.path.exists(known_hosts_path):
-                    try:
-                        ssh.load_host_keys(known_hosts_path)
-                        # Remove the old key
-                        host_keys = ssh.get_host_keys()
-                        if e.hostname in host_keys:
-                            try:
-                                if hasattr(host_keys, 'pop'):
-                                    host_keys.pop(e.hostname)
-                                elif hasattr(host_keys, '_keys'):
-                                    host_keys._keys.pop(e.hostname, None)
-                                else:
-                                    del host_keys[e.hostname]
-                            except (TypeError, KeyError, AttributeError):
-                                pass
-                        ssh.save_host_keys(known_hosts_path)
-                    except Exception as ex:
-                        logger.error(f"Error updating known_hosts: {ex}")
-                
-                # Retry connection
-                return self.test_connection()
-            else:
-                self.message_signal.emit("Connection aborted due to host key mismatch")
-                raise RuntimeError(f"Host key verification failed for {e.hostname}")
-        
-        except Exception as e:
-            self.message_signal.emit(f"SSH connection failed: {str(e)}")
-            raise RuntimeError(f"Failed to connect: {str(e)}")
-        finally:
-            # Ensure SFTP session is closed
-            if sftp:
-                try:
-                    sftp.close()
-                except (OSError, IOError, RuntimeError) as e:
-                    pass
-
-            # Ensure SSH connection is closed
-            try:
-                ssh.close()
-            except (OSError, IOError, RuntimeError) as e:
-                pass
 
     def _test_connection_with_progress(self, hostname, port, username,
                                        password, pkey, known_hosts_path):
@@ -1923,13 +1716,7 @@ Do you want to update the host key and continue connecting?"""
             
             if initial_local:
                 self.message_signal.emit(f"Navigating to initial local directory: {initial_local}")
-                # Use set_credentials for thread-safe update
                 set_credentials(self.session_id, 'current_local_directory', initial_local)
-                # Also change the actual working directory
-                try:
-                    os.chdir(initial_local)
-                except (OSError, IOError, RuntimeError) as e:
-                    self.message_signal.emit(f"Warning: Could not change to local directory {initial_local}: {e}")
         except (OSError, IOError, RuntimeError) as e:
             self.message_signal.emit(f"Warning: Could not navigate to initial directories: {e}")
 
@@ -1941,12 +1728,6 @@ Do you want to update the host key and continue connecting?"""
         try:
             if hasattr(self, 'transfer_queue_widget'):
                 self.transfer_queue_widget.cleanup()
-
-            self.stop_background_thread()
-
-            from sftp_downloadworkerclass import clear_sftp_queue
-            clear_sftp_queue()
-
             self.close_sftp_connections()
         except (OSError, RuntimeError) as e:
             pass
@@ -1973,32 +1754,6 @@ Do you want to update the host key and continue connecting?"""
             except (OSError, IOError, RuntimeError) as e:
                 pass
 
-    def stop_background_thread(self):
-        """Stop the transfer queue processing"""
-        try:
-            if hasattr(self, 'transfer_queue_widget'):
-                # Stop the timer first to prevent new transfers from starting
-                if hasattr(self.transfer_queue_widget, 'check_queue_timer'):
-                    self.transfer_queue_widget.check_queue_timer.stop()
-
-                # Cancel all active transfers
-                for transfer in self.transfer_queue_widget.transfers[:]:
-                    try:
-                        if transfer.active and hasattr(transfer, 'download_worker'):
-                            transfer.download_worker._stop_flag = True
-                    except (OSError, IOError, RuntimeError):
-                        pass
-
-                # Wait for thread pool to finish (up to 2 seconds)
-                if hasattr(self.transfer_queue_widget, 'thread_pool'):
-                    self.transfer_queue_widget.thread_pool.waitForDone(2000)
-
-                # Force clear the queue
-                from sftp_downloadworkerclass import clear_sftp_queue
-                clear_sftp_queue()
-        except (OSError, IOError, RuntimeError) as e:
-            logger.debug(f"Error stopping background thread: {e}")
-
     def _on_confirm_exit_changed(self, state):
         """Handle confirm exit checkbox change"""
         prefs = get_preferences()
@@ -2013,17 +1768,12 @@ Do you want to update the host key and continue connecting?"""
                 return
 
             active_count = 0
-            queued_count = 0
             if hasattr(self, 'transfer_queue_widget'):
                 tw = self.transfer_queue_widget
                 active_count = tw.get_active_transfer_count()
-                tw.active_transfers = active_count
-                from sftp_downloadworkerclass import sftp_queue
-                queued_count = sftp_queue.qsize()
 
-            if active_count > 0 or queued_count > 0:
-                total = active_count + queued_count
-                msg = f'There are {total} pending file transfers ({active_count} active, {queued_count} queued).\n\n'
+            if active_count > 0:
+                msg = f'There are {active_count} active file transfers.\n\n'
                 msg += 'Unfinished transfers will be saved and resumed on next launch.\n\n'
                 msg += 'What would you like to do?'
                 reply = QMessageBox(self)
@@ -2035,13 +1785,11 @@ Do you want to update the host key and continue connecting?"""
                 reply.setDefaultButton(save_button)
                 reply.exec()
                 
-                if reply.clickedButton() == cancel_button or reply.clickedButton() == cancel_button:
+                if reply.clickedButton() == cancel_button:
                     event.ignore()
                     return
                 elif reply.clickedButton() == discard_button:
-                    self.transfer_queue_widget.clear_all_transfers()
-                    from sftp_downloadworkerclass import clear_sftp_queue
-                    clear_sftp_queue()
+                    self.transfer_queue_widget.stop_all_transfers()
                     self.message_signal.emit("Transfers discarded")
 
             event.accept()
@@ -2076,30 +1824,14 @@ def main():
 
     app = QApplication(sys.argv)
 
-    show_manager_on_startup = get_setting("show_manager_on_startup", True)
+    font = app.font()
+    font.setPointSize(10)
+    app.setFont(font)
 
-    startup_connection = [None]
-
-    if show_manager_on_startup and not args.hostname:
-        pass
-    
-    # create the main window of the application
     main_window = MainWindow()
-    
-    # Handle startup connection from site manager
-    if startup_connection[0] and not args.hostname:
-        main_window.message_signal.emit(f"Connecting to {startup_connection[0]['hostname']} from Site Manager...")
-        # Use QTimer to ensure UI is ready before connecting
-        QTimer.singleShot(100, lambda: main_window.on_site_manager_connect(startup_connection[0]))
     main_window.setWindowTitle("FTP/SFTP Client")
     main_window.resize(800, 600)
     main_window.show()
-
-    # No longer needed - transfers are now in a tab
-    # main_window.transfers_message.showhide.connect(hide_transfers_window)
-
-    # No longer needed - no separate background window
-    # main_window.position_background_window()
 
     # If command line arguments are provided, initiate the connection
     if args.hostname:

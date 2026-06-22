@@ -3,17 +3,14 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                             QLabel, QListWidgetItem, QScrollArea, QFrame, QCheckBox,
                             QMessageBox, QMenu, QSpinBox)
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
-from PySide6.QtCore import QThreadPool, QTimer, QMutex, QMutexLocker, Signal, Slot
+from PySide6.QtCore import QThreadPool, QTimer, Signal, Slot
 import inspect
 import os
 import json
 DEBUG = os.environ.get('SFTP_DEBUG', '').lower() in ('1', 'true', 'yes')
-import queue
 import time
 import logging
 import sys
-
-from sftp_downloadworkerclass import Transfer, DownloadWorker, SFTPJob, sftp_queue, clear_sftp_queue, response_queues, response_queues_lock
 from sftp_theme import (BUTTON_STYLE_DARK, LIST_WIDGET_STYLE_DARK, PROGRESS_BAR_STYLE_DARK,
                         TEXT_EDIT_STYLE_DARK, DARK_THEME)
 from sftp_preferences import get_preferences
@@ -21,6 +18,8 @@ from sftp_context_menu_customizer import is_visible
 import sftp_hostdataeditor
 from sftp_transfer_history import log_transfer
 from sftp_platform import get_transfer_queue_path, create_secure_directory, secure_file_permissions, is_windows
+from sftp_transfer_model import TransferModel
+from sftp_transfer_persistence import TransferPersistence
 
 logger = logging.getLogger('sftp.transfer_queue')
 
@@ -144,45 +143,13 @@ class TransferQueueWidget(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.queue_items = []
-        self.active_transfers = 0
-        self.transfers = []
+        
+        # Model and persistence layer
+        self.model = TransferModel(self)
+        self.persistence = TransferPersistence()
         
         # New display-only transfer tracking (for DirectTransferWorker)
         self._transfer_displays = {}  # transfer_id -> {widget, progress_bar, status_label, speed_label, eta_label, source, dest}
-        self._active_workers = {}  # transfer_id -> worker (for cancellation)
-        
-        self._observees = []
-        self._observees_lock = QMutex()  # THREAD SAFETY: Lock for observee list
-        self.total_queue_items = 0
-        
-        # Directory transfer discovery tracking
-        self._discovery_active = False  # True when a traversal is discovering files
-        self._discovery_files_found = 0  # Files found during discovery
-        self._discovery_dirs_scanned = 0  # Directories scanned during discovery
-        self._discovery_total_files = None  # Will be set when discovery completes
-        
-        # Per-group conflict resolution flags
-        self._group_overwrite_all = set()  # group_ids with overwrite_all set
-        self._group_skip_all = set()       # group_ids with skip_all set
-        self._group_resume_all = set()     # group_ids with resume_all set
-        self._group_cancel_all = set()     # group_ids with cancel_all set
-        
-        # Serialize conflict dialogs so only one shows at a time
-        self._conflict_queue = []          # Pending (transfer_id, dest_path, dest_type)
-        self._conflict_dialog_active = False
-        
-        # Transfer groups - track batch progress for directory transfers
-        self._transfer_groups = {}  # group_id -> {"total_files": int, "completed_files": int, "total_bytes": int, "completed_bytes": int}
-        self._current_group_id = None  # Group being actively transferred
-        
-        # Thread safety locks
-        self._transfer_lock = QMutex()
-        self._released_transfers = set()
-        self._active_transfers_lock = QMutex()
-        
-        # Keep strong references to running workers to prevent GC of signal objects
-        self._running_workers = set()
         
         # Debounce timer for refresh - prevents excessive refreshing during bulk transfers
         self._refresh_debounce_timer = None
@@ -191,14 +158,30 @@ class TransferQueueWidget(QWidget):
         self._panel_collapsed = False
         self._console_collapsed = False
         
-        # Concurrent queue system
-        self._pending_display_transfers = []  # List of transfer_info dicts waiting to start
-        self._max_concurrent_transfers = 8   # From preferences
-        self._paused = False                  # Pause state
-        self._paused_by_user = False         # User-initiated pause (vs system)
-        self._session_waiters = {}            # transfer_id -> hostname waiting for session
-        self._queue_save_timer = None         # Debounce timer for saves
-        self._batch_add_active = False        # True during batch add to defer UI updates
+        # Debounce timer for queue saves
+        self._queue_save_timer = None
+
+        # ================================================================
+        # Alias mutable model state onto self for backward compatibility.
+        # Single-value attributes (bool, int, str) use properties to
+        # delegate through self.model.
+        # ================================================================
+        self._pending_display_transfers = self.model._pending_display_transfers
+        self._session_waiters = self.model._session_waiters
+        self._transfer_groups = self.model._transfer_groups
+        self._active_workers = self.model._active_workers
+        self._running_workers = self.model._running_workers
+        self._group_overwrite_all = self.model._group_overwrite_all
+        self._group_skip_all = self.model._group_skip_all
+        self._group_resume_all = self.model._group_resume_all
+        self._group_cancel_all = self.model._group_cancel_all
+        self._conflict_queue = self.model._conflict_queue
+        self._observees = self.model._observees
+        self._observees_lock = self.model._observees_lock
+        self._released_transfers = self.model._released_transfers
+        self._pending_group_assignments = self.model._pending_group_assignments
+        
+        self._batch_add_active = False
         
         # Status colors for UI
         self._status_colors = {
@@ -217,41 +200,98 @@ class TransferQueueWidget(QWidget):
             type=Qt.QueuedConnection
         )
         
-        # Load persisted queue
-        self._load_pending_queue()
-        
         self.init_ui()
+        
+        # Load persisted queue (must be after init_ui, needs text_console)
+        self._load_pending_queue()
+
+    @property
+    def _paused(self):
+        return self.model._paused
+    @_paused.setter
+    def _paused(self, val):
+        self.model._paused = val
+
+    @property
+    def _paused_by_user(self):
+        return self.model._paused_by_user
+    @_paused_by_user.setter
+    def _paused_by_user(self, val):
+        self.model._paused_by_user = val
+
+    @property
+    def _batch_add_active(self):
+        return self.model._batch_add_active
+    @_batch_add_active.setter
+    def _batch_add_active(self, val):
+        self.model._batch_add_active = val
+
+    @property
+    def _conflict_dialog_active(self):
+        return self.model._conflict_dialog_active
+    @_conflict_dialog_active.setter
+    def _conflict_dialog_active(self, val):
+        self.model._conflict_dialog_active = val
+
+    @property
+    def _discovery_active(self):
+        return self.model._discovery_active
+    @_discovery_active.setter
+    def _discovery_active(self, val):
+        self.model._discovery_active = val
+
+    @property
+    def _discovery_files_found(self):
+        return self.model._discovery_files_found
+    @_discovery_files_found.setter
+    def _discovery_files_found(self, val):
+        self.model._discovery_files_found = val
+
+    @property
+    def _discovery_dirs_scanned(self):
+        return self.model._discovery_dirs_scanned
+    @_discovery_dirs_scanned.setter
+    def _discovery_dirs_scanned(self, val):
+        self.model._discovery_dirs_scanned = val
+
+    @property
+    def _discovery_total_files(self):
+        return self.model._discovery_total_files
+    @_discovery_total_files.setter
+    def _discovery_total_files(self, val):
+        self.model._discovery_total_files = val
+
+    @property
+    def _current_group_id(self):
+        return self.model._current_group_id
+    @_current_group_id.setter
+    def _current_group_id(self, val):
+        self.model._current_group_id = val
+
+    @property
+    def _max_concurrent_transfers(self):
+        return self.model._max_concurrent_transfers
+    @_max_concurrent_transfers.setter
+    def _max_concurrent_transfers(self, val):
+        self.model._max_concurrent_transfers = val
 
     def _insert_pending_by_priority(self, transfer_info):
-        """Insert transfer into queue. During batch mode, append to end for O(1)."""
-        if self._batch_add_active:
-            self._pending_display_transfers.append(transfer_info)
-            return
-        priority = transfer_info['priority']
-        added_time = transfer_info['added_time']
-        
-        insert_pos = len(self._pending_display_transfers)
-        for i, existing in enumerate(self._pending_display_transfers):
-            if existing['priority'] < priority:
-                insert_pos = i
-                break
-            elif existing['priority'] == priority and existing['added_time'] > added_time:
-                insert_pos = i
-                break
-        
-        self._pending_display_transfers.insert(insert_pos, transfer_info)
+        """Insert transfer into queue. Delegates to model."""
+        self.model.insert_pending_by_priority(transfer_info)
 
     def begin_batch_add(self):
         """Start batch add mode - defers UI updates and uses O(1) insertion"""
-        self._batch_add_active = True
-        self.transfer_list.setUpdatesEnabled(False)
+        self.model.set_batch_active(True)
+        if hasattr(self, 'transfer_list'):
+            self.transfer_list.setUpdatesEnabled(False)
 
     def end_batch_add(self):
         """End batch add mode - re-enables UI and starts queued transfers"""
-        self._batch_add_active = False
-        self.transfer_list.setUpdatesEnabled(True)
+        self.model.set_batch_active(False)
+        if hasattr(self, 'transfer_list'):
+            self.transfer_list.setUpdatesEnabled(True)
         self._schedule_queue_save()
-        if not self._paused:
+        if not self.model.is_paused():
             self._check_and_start_queued()
     
     @staticmethod
@@ -384,7 +424,7 @@ class TransferQueueWidget(QWidget):
                 type=Qt.QueuedConnection
             )
             worker.signals.finished.connect(
-                lambda s, f, tid=transfer_id: self.mark_transfer_complete(tid),
+                lambda s, f, tid=transfer_id: self.mark_transfer_complete(tid) if f == 0 else None,
                 type=Qt.QueuedConnection
             )
             worker.signals.error.connect(
@@ -506,9 +546,6 @@ class TransferQueueWidget(QWidget):
 
         self._pending_display_transfers.clear()
 
-        with QMutexLocker(self._active_transfers_lock):
-            self.active_transfers = 0
-
         self._current_group_id = None
 
         if stopped > 0:
@@ -549,65 +586,14 @@ class TransferQueueWidget(QWidget):
             self.header.set_status_text(text)
     
     def _encrypt_for_queue(self, password):
-        """Encrypt password for queue storage using existing cipher"""
-        if not password:
-            return ''
-        if sftp_hostdataeditor.cipher_suite:
-            try:
-                return sftp_hostdataeditor.cipher_suite.encrypt(password.encode()).decode()
-            except Exception:
-                pass
-        return password
-    
+        return self.persistence.encrypt_password(password)
+
     def _decrypt_for_queue(self, encrypted_password):
-        """Decrypt password from queue storage"""
-        if not encrypted_password:
-            return ''
-        if sftp_hostdataeditor.cipher_suite:
-            try:
-                return sftp_hostdataeditor.cipher_suite.decrypt(encrypted_password.encode()).decode()
-            except Exception:
-                pass
-        return encrypted_password
+        return self.persistence.decrypt_password(encrypted_password)
     
     def _save_pending_queue(self):
         """Save pending transfers to disk for restoration"""
-        if not self._pending_display_transfers:
-            if os.path.exists(QUEUE_FILE_PATH):
-                try:
-                    os.remove(QUEUE_FILE_PATH)
-                except Exception:
-                    pass
-            return
-        
-        data = []
-        for t in self._pending_display_transfers:
-            if t['status'] in ('queued', 'waiting_session'):
-                data.append({
-                    'transfer_id': t['transfer_id'],
-                    'hostname': t['hostname'],
-                    'port': t['port'],
-                    'username': t['username'],
-                    'password': self._encrypt_for_queue(t.get('password', '')),
-                    'key': self._encrypt_for_queue(t.get('key', '')),
-                    'source_path': t['source_path'],
-                    'dest_path': t['dest_path'],
-                    'is_source_remote': t['is_source_remote'],
-                    'is_destination_remote': t['is_destination_remote'],
-                    'command': t['command'],
-                    'group_id': t.get('group_id'),
-                    'priority': t['priority'],
-                    'status': t['status'],
-                    'added_time': t['added_time'],
-                })
-        
-        try:
-            json_str = json.dumps(data)
-            with open(QUEUE_FILE_PATH, 'w') as f:
-                f.write(json_str)
-            secure_file_permissions(QUEUE_FILE_PATH)
-        except Exception as e:
-            logger.error(f"Error saving queue: {e}")
+        self.persistence.save_pending_queue(self.model._pending_display_transfers)
     
     def _schedule_queue_save(self):
         """Debounced save - wait 1 second after last change"""
@@ -621,48 +607,33 @@ class TransferQueueWidget(QWidget):
     
     def _load_pending_queue(self):
         """Load pending transfers on startup"""
-        if not os.path.exists(QUEUE_FILE_PATH):
+        data = self.persistence.load_pending_queue()
+        if not data:
             return 0
-        
-        try:
-            with open(QUEUE_FILE_PATH, 'r') as f:
-                data = json.loads(f.read())
-            
-            restored = 0
-            for item in data:
-                item['password'] = self._decrypt_for_queue(item.get('password', ''))
-                item['key'] = self._decrypt_for_queue(item.get('key', ''))
-                item['status'] = 'waiting_session'  # Start in waiting state
-                item['added_time'] = item.get('added_time', time.time())
-                item['session_id'] = None
-                
-                self._pending_display_transfers.append(item)
-                
-                # Track waiters
-                self._session_waiters[item['transfer_id']] = item['hostname']
-                restored += 1
-            
-            if restored > 0:
-                self.text_console.append(f"Restored {restored} transfers to queue")
-            
-            return restored
-        except Exception as e:
-            logger.error(f"Error loading queue: {e}")
-            return 0
+
+        restored = 0
+        for item in data:
+            self.model._pending_display_transfers.append(item)
+            self.model.add_session_waiter(item['transfer_id'], item['hostname'])
+            restored += 1
+
+        if restored > 0:
+            self.text_console.append(f"Restored {restored} transfers to queue")
+
+        return restored
     
     def register_active_session(self, hostname, session_id):
         """Called when user connects to a host - check for waiting transfers"""
-        if hostname in self._session_waiters.values():
-            waiting = [t for t in self._pending_display_transfers 
-                       if t.get('hostname') == hostname and t.get('status') == 'waiting_session']
-            
-            for t in waiting:
-                t['session_id'] = session_id
-                t['status'] = 'queued'
-                del self._session_waiters[t['transfer_id']]
-            
-            # Try to start
-            self._check_and_start_queued()
+        if not self.model.has_waiters_for_host(hostname):
+            return
+
+        waiting = self.model.get_waiting_transfers(hostname)
+        for t in waiting:
+            t['session_id'] = session_id
+            t['status'] = 'queued'
+            self.model.remove_session_waiter(t['transfer_id'])
+
+        self._check_and_start_queued()
 
     def init_ui(self):
         """Initialize the UI layout"""
@@ -753,8 +724,8 @@ class TransferQueueWidget(QWidget):
         # Transfer control buttons
         self.pause_button = QPushButton("⏸ Pause")
         self.pause_button.setStyleSheet(BUTTON_STYLE_DARK)
-        self.pause_button.setToolTip("Pause all transfers")
-        self.pause_button.clicked.connect(self.pause_all_transfers)
+        self.pause_button.setToolTip("Pause all transfers (disabled)")
+        self.pause_button.setEnabled(False)
         self.pause_button.setCheckable(True)
         
         self.stop_button = QPushButton("⏹ Stop")
@@ -886,8 +857,7 @@ class TransferQueueWidget(QWidget):
         if self.thread_pool.maxThreadCount() < 20:
             self.thread_pool.setMaxThreadCount(20)
 
-        # Setup timers
-        self._setup_timers()
+        # (legacy timer setup removed)
         
     def _add_transfer_display_slot(self, args_tuple):
         """Slot for thread-safe transfer display addition (called via signal from background threads)"""
@@ -980,28 +950,6 @@ class TransferQueueWidget(QWidget):
         prefs = get_preferences()
         prefs.set_bool("follow_symlinks", bool(state))
 
-    def _setup_timers(self):
-        """Setup timers for queue processing"""
-        # Timer to periodically check the queue
-        self.check_queue_timer = QTimer(self)
-        self.check_queue_timer.timeout.connect(self.check_and_start_transfers)
-        self.check_queue_timer.start(100)  # Check every 100 ms
-        self._timer_tick_count = 0
-
-    def add_queue_item(self, item, transfer_id):
-        """Add item to queue with transfer_id as unique identifier"""
-        queue_item = {'path': item, 'transfer_id': transfer_id}
-        self.queue_items.append(queue_item)
-        self.total_queue_items = len(self.queue_items)
-        self.update_overall_progress()
-
-    def remove_queue_item(self, transfer_id):
-        """Remove item by transfer_id"""
-        self.queue_items = [item for item in self.queue_items 
-                           if item['transfer_id'] != transfer_id]
-        self.total_queue_items = len(self.queue_items)
-        self.update_overall_progress()
-
     def on_discovery_progress(self, files_found, dirs_scanned):
         """Handle discovery progress from TraversalWorker"""
         self._discovery_files_found = files_found
@@ -1032,15 +980,6 @@ class TransferQueueWidget(QWidget):
         """Add a transfer to a group"""
         if group_id in self._transfer_groups:
             self._transfer_groups[group_id]["total_bytes"] += file_size
-        # Store group_id on the transfer for tracking
-        with QMutexLocker(self._transfer_lock):
-            for t in self.transfers:
-                if t.transfer_id == transfer_id:
-                    t.group_id = group_id
-                    return
-        # Transfer not created yet - queue it for assignment when start_transfer runs
-        if not hasattr(self, '_pending_group_assignments'):
-            self._pending_group_assignments = {}
         self._pending_group_assignments[transfer_id] = group_id
 
     def set_group_conflict_action(self, group_id, action):
@@ -1055,13 +994,13 @@ class TransferQueueWidget(QWidget):
 
     def add_observee(self, observee):
         """Add an observer to be notified when transfers complete. Thread-safe."""
-        with QMutexLocker(self._observees_lock):
+        with self._observees_lock:
             if observee not in self._observees:
                 self._observees.append(observee)
 
     def remove_observee(self, observee):
         """Remove an observer. Thread-safe."""
-        with QMutexLocker(self._observees_lock):
+        with self._observees_lock:
             if observee in self._observees:
                 self._observees.remove(observee)
 
@@ -1084,7 +1023,7 @@ class TransferQueueWidget(QWidget):
         self._refresh_debounce_timer = None
         
         # Copy list under lock to avoid holding lock during callbacks
-        with QMutexLocker(self._observees_lock):
+        with self._observees_lock:
             observees_copy = list(self._observees)
         
         for observee in observees_copy:
@@ -1117,26 +1056,17 @@ class TransferQueueWidget(QWidget):
         except (AttributeError, RuntimeError) as e:
             pass
     def get_active_transfer_count(self):
-        """Get total number of active transfers (both legacy and display-only)"""
+        """Get total number of active transfers"""
         count = 0
-        
-        # Count legacy transfers
-        with QMutexLocker(self._transfer_lock):
-            count += len([t for t in self.transfers if t.active])
-        
-        # Count display-only transfers
         for tid, display in self._transfer_displays.items():
             if display.get('is_active', False):
                 count += 1
-                
         return count
 
     def update_overall_progress(self):
-        """Update the overall progress bar based on all active transfers.
-
-        Aggregates both legacy Transfer objects and DirectTransferWorker
-        _transfer_displays entries.
-        """
+        """Update the overall progress bar based on all active transfers."""
+        if not hasattr(self, 'overall_progress_widget'):
+            return
         try:
             if self._discovery_active:
                 self.overall_progress_widget.setVisible(True)
@@ -1149,11 +1079,9 @@ class TransferQueueWidget(QWidget):
                 self.signal_overall_progress.emit(0, 0.0, 0.0, 0, 0)
                 return
 
-            active_legacy = [t for t in self.transfers if t.active]
-            active_display_count = sum(
+            active_count = sum(
                 1 for d in self._transfer_displays.values() if d.get('is_active', False)
             )
-            active_count = len(active_legacy) + active_display_count
 
             if active_count == 0:
                 self.overall_progress_bar.setRange(0, 100)
@@ -1186,8 +1114,6 @@ class TransferQueueWidget(QWidget):
 
                 self.overall_progress_bar.setValue(overall_percent)
                 total_speed = 0.0
-                for transfer in active_legacy:
-                    total_speed += getattr(transfer, 'speed_bps', 0.0) or 0.0
                 for display in self._transfer_displays.values():
                     if display.get('is_active', False):
                         total_speed += display.get('speed_bps', 0) or 0
@@ -1209,11 +1135,6 @@ class TransferQueueWidget(QWidget):
             total_bytes_done = 0
             total_bytes = 0
             total_speed = 0.0
-
-            for transfer in active_legacy:
-                total_bytes_done += getattr(transfer, 'bytes_done', 0) or 0
-                total_bytes += getattr(transfer, 'bytes_total', 0) or 0
-                total_speed += getattr(transfer, 'speed_bps', 0.0) or 0.0
 
             for display in self._transfer_displays.values():
                 if display.get('is_active', False):
@@ -1268,268 +1189,6 @@ class TransferQueueWidget(QWidget):
         else:
             return f"{int(eta_seconds / 3600)}h remaining"
 
-    def check_and_start_transfers(self):
-        """Check for new transfers in queue and start them"""
-        try:
-            self._timer_tick_count = getattr(self, '_timer_tick_count', 0) + 1
-            
-            # Fix active transfers counter
-            with QMutexLocker(self._transfer_lock):
-                actual_active = len([t for t in self.transfers if t.active])
-                if self.active_transfers != actual_active:
-                    self.active_transfers = actual_active
-            
-            # Check if queue has items
-            queue_size = sftp_queue.qsize()
-            if queue_size == 0:
-                return
-            # Get job from queue with timeout (thread-safe, avoids race condition)
-            try:
-                job = sftp_queue.get_nowait()
-            except Exception as e:
-                return  # Queue is empty or error
-            
-            if not job:
-                return
-            
-            # Debug: log job details
-            # Validate job
-            if not hasattr(job, "job_id"):
-                self.text_console.append(f"Invalid job structure: {job}")
-                return
-
-            # Handle end command
-            if hasattr(job, "command") and job.command == "end":
-                self.text_console.append("Received end command")
-                with QMutexLocker(self._active_transfers_lock):
-                    self.active_transfers = 0
-                return
-
-            # Validate required attributes
-            required_attrs = ["job_id", "source_path", "destination_path", 
-                            "is_source_remote", "is_destination_remote", 
-                            "hostname", "port", "username", "password", "command"]
-            
-            missing_attrs = [attr for attr in required_attrs if not hasattr(job, attr)]
-            if missing_attrs:
-                self.text_console.append(f"Error: Job missing attributes: {missing_attrs}")
-                return
-
-            # Start the transfer
-            self.start_transfer(
-                job.job_id, job.source_path, job.destination_path,
-                job.is_source_remote, job.is_destination_remote,
-                job.hostname, job.port, job.username, job.password, 
-                job.command, getattr(job, 'key', None)
-            )
-
-        except (OSError, IOError, RuntimeError) as e:
-            self.text_console.append(f"Error starting transfer: {e}")
-
-    def start_transfer(self, transfer_id, job_source, job_destination, 
-                       is_source_remote, is_destination_remote, hostname, 
-                       port, username, password, command, key):
-        """Start a new transfer"""
-        import logging
-        logger = logging.getLogger('sftp.queue')
-        
-        logger.debug(f"start_transfer called: {transfer_id}, {job_source}")
-        
-        try:
-            if not transfer_id:
-                logger.debug("start_transfer: empty transfer_id, returning")
-                return
-            
-            # Check if transfer already exists
-            if not hasattr(self, 'transfers'):
-                logger.debug("start_transfer: self.transfers doesn't exist!")
-                self.transfers = []
-            
-            existing = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
-            if existing:
-                return
-            
-            # Create list item
-            item = QListWidgetItem()
-            item.setData(Qt.UserRole, transfer_id)
-            
-            # Create widget for the item - COMPACT DESIGN
-            widget = QWidget()
-            widget.setFixedHeight(60)  # Slightly taller for details
-            layout = QVBoxLayout()
-            layout.setContentsMargins(8, 4, 8, 4)
-            layout.setSpacing(2)
-            
-            # Top row: Filename and action buttons
-            top_row = QHBoxLayout()
-            top_row.setSpacing(8)
-            
-            # Direction arrow + filename
-            file_name = os.path.basename(job_source)
-            direction = "⬆️" if is_source_remote and not is_destination_remote else "⬇️" if not is_source_remote and is_destination_remote else "🔄"
-            file_label = QLabel(f"{direction} {file_name}")
-            file_label.setStyleSheet(f"font-weight: 600; font-size: 12px; color: {DARK_THEME['text_primary']};")
-            file_label.setSizePolicy(Qt.SizePolicy_Expanding, Qt.SizePolicy_Fixed)
-            file_label.setToolTip(f"Source: {job_source}\nDestination: {job_destination}")  # Full paths on hover
-            top_row.addWidget(file_label, stretch=3)
-            
-            # Status label
-            status_label = QLabel("Queued")
-            status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['text_secondary']}; font-weight: 500;")
-            status_label.setAlignment(Qt.AlignRight)
-            top_row.addWidget(status_label)
-            
-            # Cancel button
-            cancel_button = QPushButton("✕")
-            cancel_button.setFixedWidth(24)
-            cancel_button.setFixedHeight(24)
-            cancel_button.setToolTip("Cancel")
-            cancel_button.setStyleSheet(f"""
-                QPushButton {{
-                    border: none;
-                    border-radius: 4px;
-                    background-color: transparent;
-                    color: {DARK_THEME['text_secondary']};
-                    font-size: 12px;
-                    font-weight: bold;
-                }}
-                QPushButton:hover {{
-                    background-color: {DARK_THEME['error']};
-                    color: white;
-                }}
-            """)
-            cancel_button.clicked.connect(lambda checked, tid=transfer_id: self.cancel_transfer(tid))
-            top_row.addWidget(cancel_button)
-            
-            layout.addLayout(top_row)
-            
-            # Middle row: Source -> Destination paths
-            path_row = QHBoxLayout()
-            path_row.setSpacing(4)
-            
-            source_display = job_source if len(job_source) < 40 else "..." + job_source[-37:]
-            dest_display = job_destination if len(job_destination) < 40 else "..." + job_destination[-37:]
-            
-            path_label = QLabel(f"<span style='color: {DARK_THEME['text_secondary']};'>{source_display}</span> → <span style='color: {DARK_THEME['text_secondary']};'>{dest_display}</span>")
-            path_label.setStyleSheet(f"font-size: 9px;")
-            path_label.setSizePolicy(Qt.SizePolicy_Expanding, Qt.SizePolicy_Fixed)
-            path_row.addWidget(path_label, stretch=1)
-            
-            layout.addLayout(path_row)
-            
-            # Bottom row: Slim progress bar + speed/eta
-            bottom_row = QHBoxLayout()
-            bottom_row.setSpacing(8)
-            
-            # Progress bar - much thinner
-            progress_bar = QProgressBar()
-            progress_bar.setRange(0, 100)
-            progress_bar.setValue(0)
-            progress_bar.setFixedHeight(6)  # Much thinner
-            progress_bar.setSizePolicy(Qt.SizePolicy_Expanding, Qt.SizePolicy_Fixed)
-            progress_bar.setTextVisible(False)  # Hide text, just show bar
-            progress_bar.setStyleSheet(f"""
-                QProgressBar {{
-                    border: none;
-                    border-radius: 3px;
-                    background-color: {DARK_THEME['border']};
-                }}
-                QProgressBar::chunk {{
-                    background-color: {DARK_THEME['accent_green']};
-                    border-radius: 3px;
-                }}
-            """)
-            bottom_row.addWidget(progress_bar, stretch=4)  # Takes most space
-            
-            # Speed/ETA labels
-            speed_label = QLabel("-")
-            speed_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['text_primary']}; font-weight: 500;")
-            speed_label.setAlignment(Qt.AlignRight)
-            speed_label.setFixedWidth(70)
-            bottom_row.addWidget(speed_label)
-            
-            eta_label = QLabel("-")
-            eta_label.setStyleSheet(f"font-size: 9px; color: {DARK_THEME['text_secondary']};")
-            eta_label.setAlignment(Qt.AlignRight)
-            eta_label.setFixedWidth(50)
-            bottom_row.addWidget(eta_label)
-            
-            layout.addLayout(bottom_row)
-            
-            widget.setLayout(layout)
-            
-            # Set size hint for consistent row height
-            item.setSizeHint(widget.sizeHint())
-            
-            # Add to list (top)
-            self.transfer_list.addItem(item)
-            self.transfer_list.setItemWidget(item, widget)
-            
-            # Create download worker
-            download_worker = DownloadWorker(
-                transfer_id, job_source, job_destination, 
-                is_source_remote, is_destination_remote,
-                hostname, port, username, password, command, key
-            )
-            
-            pause_button = None  # Placeholder for pause functionality
-            
-            # Store transfer details
-            new_transfer = Transfer(
-                transfer_id=transfer_id,
-                download_worker=download_worker,
-                active=True,
-                progress_bar=progress_bar,
-                cancel_button=cancel_button,
-                speed_label=speed_label,
-                eta_label=eta_label,
-                status_label=status_label,
-                pause_button=None,
-                list_item=item,
-                hostname=hostname
-            )
-
-            # Connect signals
-            if hasattr(download_worker, 'signals'):
-                download_worker.signals.progress.connect(
-                    lambda tid, val, speed, eta, bdone, btotal: self.update_progress(tid, val, speed, eta, bdone, btotal),
-                    Qt.QueuedConnection
-                )
-                download_worker.signals.finished.connect(
-                    lambda tid: self.transfer_finished(tid),
-                    Qt.QueuedConnection
-                )
-                download_worker.signals.message.connect(
-                    lambda tid, msg: self._handle_worker_message(tid, msg),
-                    Qt.QueuedConnection
-                )
-                download_worker.signals.conflict.connect(
-                    lambda tid, dest, dtype: self._handle_conflict(tid, dest, dtype),
-                    Qt.QueuedConnection
-                )
-            
-            # Add to transfers list
-            with QMutexLocker(self._transfer_lock):
-                self.transfers.append(new_transfer)
-            
-            # Apply pending group assignment if any
-            if hasattr(self, '_pending_group_assignments') and transfer_id in self._pending_group_assignments:
-                new_transfer.group_id = self._pending_group_assignments.pop(transfer_id)
-            
-            # Start the worker
-            self._running_workers.add(new_transfer.download_worker)
-            self.thread_pool.start(new_transfer.download_worker)
-            
-            # Emit transfer started signal
-            self.signal_transfer_started.emit(1, f"Transfer started: {job_source}")
-            
-            with QMutexLocker(self._active_transfers_lock):
-                self.active_transfers += 1
-            self.update_overall_progress()
-            
-        except (OSError, IOError, RuntimeError) as e:
-            self.text_console.append(f"Failed to start transfer: {e}")
-    
     # ===== Display-only methods for DirectTransferWorker =====
     
     def add_transfer_display(self, transfer_id, source_path, dest_path, 
@@ -1976,10 +1635,7 @@ class TransferQueueWidget(QWidget):
         file_name = os.path.basename(display['source'])
         self.text_console.append(f"Transfer complete: {file_name}")
 
-        self.signal_transfer_completed.emit(1, f"Transfer complete: {file_name}")
-
-        with QMutexLocker(self._active_transfers_lock):
-            self.active_transfers = max(0, self.active_transfers - 1)
+        self.signal_transfer_completed.emit(0, f"Transfer complete: {file_name}")
 
         group_id = display.get('group_id')
         if group_id and group_id in self._transfer_groups:
@@ -2009,14 +1665,13 @@ class TransferQueueWidget(QWidget):
         display['error_message'] = error_message
         display['status_label'].setText("Failed")
         display['status_label'].setStyleSheet(f"font-size: 10px; color: {DARK_THEME['error']}; font-weight: 500;")
+        display['progress_bar'].setFormat("Failed")
+        display['progress_bar'].setStyleSheet(f"QProgressBar::chunk {{ background-color: {DARK_THEME['error']}; }}")
 
         file_name = os.path.basename(display['source'])
         self.text_console.append(f"Transfer failed: {file_name} - {error_message}")
 
-        with QMutexLocker(self._active_transfers_lock):
-            self.active_transfers = max(0, self.active_transfers - 1)
-
-        self.signal_transfer_error.emit(self.active_transfers, error_message)
+        self.signal_transfer_error.emit(0, error_message)
 
         group_id = display.get('group_id')
         if group_id and group_id in self._transfer_groups:
@@ -2066,330 +1721,14 @@ class TransferQueueWidget(QWidget):
         
         self.text_console.append("All transfers stopped")
 
-    def cancel_transfer(self, transfer_id):
-        """Cancel a transfer"""
-        try:
-            if not transfer_id:
-                return
-                
-            transfer = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
-            if not transfer:
-                return
-            
-            # Stop the worker
-            if transfer.download_worker:
-                try:
-                    transfer.download_worker.stop_transfer()
-                except (AttributeError, RuntimeError):
-                    pass
-            
-            # Disconnect signals
-            if hasattr(transfer.download_worker, 'signals'):
-                try:
-                    transfer.download_worker.signals.progress.disconnect()
-                    transfer.download_worker.signals.finished.disconnect()
-                    transfer.download_worker.signals.message.disconnect()
-                except (RuntimeError, TypeError):
-                    pass
-            
-            # Mark as inactive
-            transfer.active = False
-            
-            # Update UI
-            try:
-                if transfer.status_label:
-                    transfer.status_label.setText("Cancelled")
-                if transfer.progress_bar:
-                    transfer.progress_bar.setStyleSheet(f"""
-                        QProgressBar::chunk {{
-                            background-color: {DARK_THEME['error']};
-                        }}
-                    """)
-            except RuntimeError:
-                pass
-
-            # Release resources
-            self._release_transfer(transfer_id)
-            
-            # Try to start another transfer
-            QTimer.singleShot(100, self.check_and_start_transfers)
-            
-        except (OSError, IOError, RuntimeError) as e:
-            self.text_console.append(f"Error cancelling transfer: {e}")
-
-    def cleanup_transfer(self, transfer_id):
-        """Clean up transfer UI elements"""
-        try:
-            if not transfer_id:
-                return
-                
-            transfer = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
-            if not transfer:
-                return
-                
-            # Remove from UI
-            try:
-                if transfer.list_item:
-                    row = self.transfer_list.row(transfer.list_item)
-                    if row >= 0:
-                        self.transfer_list.takeItem(row)
-            except (RuntimeError, ValueError):
-                pass
-
-            # Clean up references
-            if hasattr(transfer, 'download_worker'):
-                self._running_workers.discard(transfer.download_worker)
-            self.transfers = [t for t in self.transfers if t.transfer_id != transfer_id]
-            
-        except (OSError, IOError, RuntimeError):
-            pass
-
-    def _release_transfer(self, transfer_id):
-        """Release transfer resources"""
-        try:
-            with QMutexLocker(self._transfer_lock):
-                if transfer_id in self._released_transfers:
-                    return
-                self._released_transfers.add(transfer_id)
-
-            with QMutexLocker(self._active_transfers_lock):
-                old_count = self.active_transfers
-                self.active_transfers = max(self.active_transfers - 1, 0)
-            self.remove_queue_item(transfer_id)
-            self.update_overall_progress()
-            
-        except (OSError, IOError, RuntimeError) as e:
-            logger.debug(f"Error releasing transfer {transfer_id}: {e}")
-
-    def transfer_finished(self, transfer_id):
-        """Handle transfer completion"""
-        try:
-            if not transfer_id:
-                return
-                
-            transfer = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
-            if not transfer:
-                return
-
-            transfer.active = False
-            
-            # Update group progress if this transfer is part of a group
-            if hasattr(transfer, 'group_id') and transfer.group_id:
-                group_id = transfer.group_id
-                if group_id in self._transfer_groups:
-                    self._transfer_groups[group_id]["completed_files"] += 1
-            
-            # Check if cancelled or errored
-            is_cancelled = False
-            is_error = False
-            
-            with response_queues_lock:
-                if transfer_id in response_queues:
-                    try:
-                        while True:
-                            msg = response_queues[transfer_id].get_nowait()
-                            if msg == "cancelled":
-                                is_cancelled = True
-                            elif msg == "error":
-                                is_error = True
-                    except queue.Empty:
-                        pass
-            
-            try:
-                if is_cancelled:
-                    if transfer.status_label:
-                        transfer.status_label.setText("✗ Cancelled")
-                        transfer.status_label.setStyleSheet("font-size: 10px; color: #FFA500; font-weight: bold;")
-                    if transfer.progress_bar:
-                        transfer.progress_bar.setValue(0)
-                elif is_error:
-                    if transfer.status_label:
-                        transfer.status_label.setText("✗ Error")
-                        transfer.status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['error']}; font-weight: bold;")
-                    if transfer.progress_bar:
-                        transfer.progress_bar.setStyleSheet(f"""
-                            QProgressBar {{
-                                border: none;
-                                border-radius: 3px;
-                                background-color: {DARK_THEME['border']};
-                            }}
-                            QProgressBar::chunk {{
-                                background-color: {DARK_THEME['error']};
-                                border-radius: 3px;
-                            }}
-                        """)
-                else:
-                    if transfer.status_label:
-                        transfer.status_label.setText("✓ Done")
-                        transfer.status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['success']}; font-weight: bold;")
-                    if transfer.progress_bar:
-                        transfer.progress_bar.setValue(100)
-                        transfer.progress_bar.setStyleSheet(f"""
-                            QProgressBar {{
-                                border: none;
-                                border-radius: 3px;
-                                background-color: {DARK_THEME['border']};
-                            }}
-                            QProgressBar::chunk {{
-                                background-color: {DARK_THEME['success']};
-                                border-radius: 3px;
-                            }}
-                        """)
-            except RuntimeError:
-                pass
-
-            # Notify observers
-            try:
-                if hasattr(transfer.download_worker, 'command') and \
-                   transfer.download_worker.command in ["upload", "download", "resume"]:
-                    self.notify_observees()
-            except (OSError, IOError, RuntimeError):
-                pass
-
-            # Log to transfer history
-            try:
-                if hasattr(transfer.download_worker, 'command') and \
-                   transfer.download_worker.command in ["upload", "download", "resume"]:
-                    worker = transfer.download_worker
-                    direction = 'upload' if worker.command == 'upload' else 'download'
-                    if worker.command == 'resume':
-                        direction = 'download' if worker.is_source_remote else 'upload'
-                    
-                    status = 'success'
-                    error_msg = None
-                    if is_cancelled:
-                        status = 'failed'
-                        error_msg = 'Cancelled by user'
-                    elif is_error:
-                        status = 'failed'
-                        error_msg = 'Transfer error'
-                    
-                    log_transfer(
-                        source_path=getattr(worker, 'job_source', ''),
-                        destination_path=getattr(worker, 'job_destination', ''),
-                        direction=direction,
-                        hostname=getattr(worker, 'hostname', None),
-                        username=getattr(worker, 'username', None),
-                        file_size=getattr(worker, 'file_size', None),
-                        status=status,
-                        error_message=error_msg
-                    )
-            except Exception:
-                pass  # Don't fail transfer if logging fails
-
-            # Release resources but DON'T cleanup - keep visible
-            self._release_transfer(transfer_id)
-            
-            # Emit transfer completed signal
-            self.signal_transfer_completed.emit(1, "Transfer completed")
-            
-            # Auto-clear if preference is enabled
-            prefs = get_preferences()
-            if prefs.get_bool("clear_completed_on_complete", False):
-                QTimer.singleShot(200, self.clear_completed)
-            
-            # Try to start another transfer
-            QTimer.singleShot(100, self.check_and_start_transfers)
-            
-        except (OSError, IOError, RuntimeError):
-            pass
-
-    def transfer_error(self, transfer_id, message):
-        """Handle transfer errors"""
-        try:
-            if not transfer_id:
-                return
-            
-            transfer = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
-            if not transfer:
-                return
-            
-            transfer.active = False
-            
-            try:
-                if transfer.status_label:
-                    transfer.status_label.setText("✗ Failed")
-                    transfer.status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['error']}; font-weight: bold;")
-                if transfer.progress_bar:
-                    transfer.progress_bar.setStyleSheet(f"""
-                        QProgressBar {{
-                            border: none;
-                            border-radius: 3px;
-                            background-color: {DARK_THEME['border']};
-                        }}
-                        QProgressBar::chunk {{
-                            background-color: {DARK_THEME['error']};
-                            border-radius: 3px;
-                        }}
-                    """)
-            except RuntimeError:
-                pass
-            
-            if hasattr(self, 'text_console'):
-                self.text_console.append(f"ERROR Transfer {transfer_id}: {message}")
-            
-            # Log to transfer history
-            try:
-                if hasattr(transfer, 'download_worker') and transfer.download_worker:
-                    worker = transfer.download_worker
-                    direction = 'upload' if getattr(worker, 'command', '') == 'upload' else 'download'
-                    
-                    log_transfer(
-                        source_path=getattr(worker, 'job_source', ''),
-                        destination_path=getattr(worker, 'job_destination', ''),
-                        direction=direction,
-                        hostname=getattr(worker, 'hostname', None),
-                        username=getattr(worker, 'username', None),
-                        file_size=getattr(worker, 'file_size', None),
-                        status='failed',
-                        error_message=str(message)[:500] if message else 'Unknown error'
-                    )
-            except Exception:
-                pass  # Don't fail if logging fails
-            
-            # Notify observers to refresh browsers (local file may have been created before error)
-            try:
-                if hasattr(transfer, 'download_worker') and transfer.download_worker and \
-                   hasattr(transfer.download_worker, 'command') and \
-                   transfer.download_worker.command in ["upload", "download", "resume"]:
-                    self.notify_observees()
-            except (OSError, IOError, RuntimeError):
-                pass
-            
-            # Emit transfer error signal
-            self.signal_transfer_error.emit(1, f"Transfer failed: {message}")
-            
-            self._release_transfer(transfer_id)
-            
-        except (OSError, IOError, RuntimeError) as e:
-            logger.debug(f"Error in transfer_error handler: {e}")
-
-    def _handle_worker_message(self, transfer_id, message):
-        """Handle messages from worker threads"""
-        try:
-            if any(keyword in message.lower() for keyword in ['error', 'failed', 'exception', 'timeout']):
-                self.transfer_error(transfer_id, message)
-            else:
-                if hasattr(self, 'text_console'):
-                    self.text_console.append(f"Transfer {transfer_id}: {message}")
-        except (OSError, IOError, RuntimeError) as e:
-            logger.debug(f"Error handling worker message: {e}")
-
     def _handle_conflict(self, transfer_id, dest_path, dest_type):
         """Handle file conflict - queue prompt so only one dialog shows at a time"""
         # Find the worker and group_id
         worker = None
         group_id = None
         
-        # Check transfers list (legacy)
-        transfer = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
-        if transfer:
-            worker = transfer.download_worker
-            if hasattr(transfer, 'group_id'):
-                group_id = transfer.group_id
-        
         # Check active workers (DirectTransferWorker)
-        if not worker and transfer_id in self._active_workers:
+        if transfer_id in self._active_workers:
             worker = self._active_workers[transfer_id]
             # Try to find group_id from display
             if transfer_id in self._transfer_displays:
@@ -2432,15 +1771,8 @@ class TransferQueueWidget(QWidget):
             worker = None
             group_id = None
             
-            # Check transfers list (legacy)
-            transfer = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
-            if transfer:
-                worker = transfer.download_worker
-                if hasattr(transfer, 'group_id'):
-                    group_id = transfer.group_id
-            
             # Check active workers (DirectTransferWorker)
-            if not worker and transfer_id in self._active_workers:
+            if transfer_id in self._active_workers:
                 worker = self._active_workers[transfer_id]
                 # Try to find group_id from display
                 if transfer_id in self._transfer_displays:
@@ -2521,170 +1853,14 @@ class TransferQueueWidget(QWidget):
         # Process next queued conflict
         self._process_next_conflict()
 
-    def update_progress(self, transfer_id, value, speed_bps=None, eta_sec=None, bytes_done=0, bytes_total=0):
-        """Update transfer progress with bytes tracking"""
-        import logging
-        logger = logging.getLogger('sftp.queue')
-        logger.debug(f"update_progress called: {transfer_id}, {value}%, {bytes_done}/{bytes_total}")
-        
-        try:
-            if not transfer_id:
-                return
-            
-            transfer = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
-            if not transfer or not transfer.active:
-                return
-
-            speed = speed_bps if speed_bps is not None else 0.0
-            eta = eta_sec if eta_sec is not None else 0.0
-            
-            # Update transfer object with progress data
-            transfer.bytes_done = bytes_done
-            transfer.bytes_total = bytes_total
-            transfer.speed_bps = speed
-            transfer.eta_seconds = eta
-            
-            self.signal_transfer_progress.emit(transfer_id, value, speed, eta, bytes_done, bytes_total)
-            
-            try:
-                if transfer.progress_bar:
-                    transfer.progress_bar.setValue(value)
-                    # Update progress bar text format
-                    if bytes_total > 0:
-                        bytes_str = self.format_bytes(bytes_done, bytes_total)
-                        transfer.progress_bar.setFormat(f"{value}% • {bytes_str}")
-                    
-                if transfer.speed_label and speed_bps is not None:
-                    transfer.speed_label.setText(self.format_speed(speed_bps))
-
-                if transfer.eta_label and eta_sec is not None:
-                    transfer.eta_label.setText(self.format_time(eta_sec))
-
-                if transfer.status_label:
-                    if value == 100:
-                        transfer.status_label.setText("✓ Done")
-                        transfer.status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['success']}; font-weight: bold;")
-                    elif getattr(transfer, 'paused', False):
-                        transfer.status_label.setText("⏸ Paused")
-                        transfer.status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['warning']}; font-weight: bold;")
-                    else:
-                        transfer.status_label.setText(f"{value}%")
-                        transfer.status_label.setStyleSheet(f"font-size: 10px; color: {DARK_THEME['text_secondary']};")
-            except RuntimeError:
-                pass
-            
-            # Update overall progress
-            self.update_overall_progress()
-
-        except (OSError, IOError, RuntimeError):
-            pass
-
-    def format_bytes(self, bytes_done, bytes_total):
-        """Format bytes done / bytes total"""
-        def humanize(b):
-            if b >= 1024**3:
-                return f"{b / 1024**3:.1f} GB"
-            elif b >= 1024**2:
-                return f"{b / 1024**2:.1f} MB"
-            elif b >= 1024:
-                return f"{b / 1024:.1f} KB"
-            else:
-                return f"{b} B"
-        
-        return f"{humanize(bytes_done)}/{humanize(bytes_total)}"
-
-    def format_speed(self, bytes_per_sec):
-        """Format transfer speed"""
-        try:
-            if bytes_per_sec >= 1024 * 1024:
-                return f"{bytes_per_sec / (1024 * 1024):.1f} MB/s"
-            elif bytes_per_sec >= 1024:
-                return f"{bytes_per_sec / 1024:.1f} KB/s"
-            return f"{bytes_per_sec} B/s"
-        except (TypeError, ValueError):
-            return "-"
-
-    def format_time(self, seconds):
-        """Format time"""
-        try:
-            if seconds < 60:
-                return f"{int(seconds)}s"
-            elif seconds < 3600:
-                return f"{int(seconds // 60)}m {int(seconds % 60)}s"
-            return f"{int(seconds // 3600)}h {int((seconds % 3600) // 60)}m"
-        except (TypeError, ValueError):
-            return "-"
-
-    def toggle_pause_transfer(self, transfer_id):
-        """Toggle pause for a transfer"""
-        try:
-            transfer = next((t for t in self.transfers if t.transfer_id == transfer_id), None)
-            if transfer and transfer.active:
-                transfer.paused = not getattr(transfer, 'paused', False)
-                if hasattr(transfer.download_worker, 'paused'):
-                    transfer.download_worker.paused = transfer.paused
-                if transfer.pause_button:
-                    transfer.pause_button.setText("Resume" if transfer.paused else "Pause")
-                if transfer.status_label:
-                    transfer.status_label.setText("Paused" if transfer.paused else "Resuming...")
-        except (OSError, IOError, RuntimeError):
-            pass
-
-    def toggle_pause_all(self):
-        """Toggle pause for all transfers"""
-        try:
-            active_transfers = [t for t in self.transfers if t.active]
-            if not active_transfers:
-                return
-                
-            any_paused = any(getattr(t, 'paused', False) for t in active_transfers)
-            for transfer in active_transfers:
-                transfer.paused = not any_paused
-                if hasattr(transfer.download_worker, 'paused'):
-                    transfer.download_worker.paused = transfer.paused
-                if transfer.pause_button:
-                    transfer.pause_button.setText("Resume" if transfer.paused else "Pause")
-                if transfer.status_label:
-                    transfer.status_label.setText("Paused" if transfer.paused else "Resuming...")
-            self.pause_button.setText("Resume All" if not any_paused else "Pause All")
-        except (OSError, IOError, RuntimeError):
-            pass
-
-    def pause_all_transfers(self):
-        """Pause or resume all active transfers"""
-        try:
-            any_paused = any(getattr(t, 'paused', False) for t in self.transfers if t.active)
-            
-            for transfer in self.transfers:
-                if transfer.active:
-                    transfer.paused = not any_paused
-                    if hasattr(transfer.download_worker, 'set_paused'):
-                        transfer.download_worker.set_paused(transfer.paused)
-            
-            self.pause_button.setText("Resume All" if any_paused else "⏸ Pause")
-            
-        except (OSError, IOError, RuntimeError) as e:
-            self.text_console.append(f"Error pausing transfers: {e}")
-    
     def stop_all_transfers(self):
         """Cancel all active transfers"""
         try:
-            # Clear the transfer queue to stop new transfers from starting
-            clear_sftp_queue()
-            
             # Stop all active display-based transfers (DirectTransferWorker)
             self.stop_all_display_transfers()
             
-            # Stop legacy download workers
-            for transfer in self.transfers:
-                if transfer.active:
-                    if hasattr(transfer.download_worker, '_stop_flag'):
-                        transfer.download_worker._stop_flag = True
-                    if hasattr(transfer.download_worker, 'stop_transfer'):
-                        transfer.download_worker.stop_transfer()
-            
             # Cancel any active traversal or deletion workers in browser observees
-            with QMutexLocker(self._observees_lock):
+            with self._observees_lock:
                 for observee in self._observees:
                     if hasattr(observee, '_current_traversal_worker') and observee._current_traversal_worker:
                         observee._current_traversal_worker.cancel()
@@ -2693,8 +1869,7 @@ class TransferQueueWidget(QWidget):
                         observee._deletion_worker.cancel()
             
             # Clear pending group assignments
-            if hasattr(self, '_pending_group_assignments'):
-                self._pending_group_assignments.clear()
+            self._pending_group_assignments.clear()
             
             self.text_console.append("All transfers stopped")
             
@@ -2706,14 +1881,6 @@ class TransferQueueWidget(QWidget):
         try:
             transfers_to_remove = []
             
-            # Check legacy transfers
-            for transfer in self.transfers[:]:
-                status_text = transfer.status_label.text() if transfer.status_label else ""
-                if (not transfer.active or 
-                    status_text in ["✓ Done", "Done", "✗ Cancelled", "✗ Error", "✗ Failed", "Failed"] or
-                    "Error:" in status_text):
-                    transfers_to_remove.append(transfer.transfer_id)
-            
             # Check display-only transfers
             for tid, display in list(self._transfer_displays.items()):
                 if not display.get('is_active', False):
@@ -2721,214 +1888,17 @@ class TransferQueueWidget(QWidget):
                     if status_text in ["Done", "Failed", "Stopped", "Cancelled"]:
                         transfers_to_remove.append(tid)
             
-            # Unique IDs
-            transfers_to_remove = list(set(transfers_to_remove))
-            
             for transfer_id in transfers_to_remove:
                 if transfer_id in self._transfer_displays:
                     self.remove_transfer_display(transfer_id)
-                else:
-                    self.cleanup_transfer(transfer_id)
                 
         except (OSError, IOError, RuntimeError) as e:
             self.text_console.append(f"Error clearing completed transfers: {e}")
     
-    def clear_all_transfers(self):
-        """Remove all transfers without saving"""
-        try:
-            for transfer in self.transfers[:]:
-                if transfer.active:
-                    if hasattr(transfer.download_worker, '_stop_flag'):
-                        transfer.download_worker._stop_flag = True
-                    if hasattr(transfer.download_worker, 'cancel'):
-                        transfer.download_worker.cancel()
-                self.cleanup_transfer(transfer.transfer_id)
-            self.transfer_list.clear()
-        except (OSError, IOError, RuntimeError) as e:
-            pass
     def cleanup(self):
         """Cleanup resources when widget is destroyed"""
         try:
-            self.save_pending_transfers()
-            
-            if hasattr(self, 'check_queue_timer'):
-                self.check_queue_timer.stop()
-
-            for transfer in self.transfers[:]:
-                try:
-                    if transfer.active and hasattr(transfer, 'download_worker'):
-                        transfer.download_worker._stop_flag = True
-                except (OSError, IOError, RuntimeError):
-                    pass
-
-            clear_sftp_queue()
-
             if hasattr(self, 'thread_pool'):
                 self.thread_pool.waitForDone(2000)
-
-            self.transfers.clear()
-            self.active_transfers = 0
-
         except (OSError, IOError, RuntimeError) as e:
             logger.debug(f"Error in cleanup: {e}")
-    
-    def save_pending_transfers(self):
-        """Save pending and paused transfers to disk for restoration on next launch"""
-        try:
-            pending_jobs = []
-            
-            while not sftp_queue.empty():
-                try:
-                    job = sftp_queue.get_nowait()
-                    if job and hasattr(job, 'job_id'):
-                        # Skip jobs with empty paths
-                        src = getattr(job, 'source_path', '') or ''
-                        dst = getattr(job, 'destination_path', '') or ''
-                        if not src or not dst:
-                            continue
-                        # Encrypt password for secure storage
-                        password = getattr(job, 'password', '') or ''
-                        if password and sftp_hostdataeditor.cipher_suite:
-                            try:
-                                encrypted_password = sftp_hostdataeditor.cipher_suite.encrypt(password.encode()).decode()
-                            except Exception:
-                                encrypted_password = ''
-                        else:
-                            encrypted_password = ''
-                        pending_jobs.append({
-                            'source_path': src,
-                            'is_source_remote': getattr(job, 'is_source_remote', False),
-                            'destination_path': dst,
-                            'is_destination_remote': getattr(job, 'is_destination_remote', False),
-                            'hostname': getattr(job, 'hostname', ''),
-                            'username': getattr(job, 'username', ''),
-                            'password': encrypted_password,
-                            'port': getattr(job, 'port', 22),
-                            'command': getattr(job, 'command', 'download'),
-                            'job_id': getattr(job, 'job_id'),
-                            'key': getattr(job, 'key'),
-                            'status': 'queued'
-                        })
-                except queue.Empty:
-                    break
-            
-            with QMutexLocker(self._transfer_lock):
-                for transfer in self.transfers:
-                    if transfer.active or (hasattr(transfer, 'paused') and transfer.paused):
-                        if hasattr(transfer, 'download_worker') and transfer.download_worker:
-                            worker = transfer.download_worker
-                            # Use job_source/job_destination (DownloadWorker attributes)
-                            src = getattr(worker, 'job_source', '') or ''
-                            dst = getattr(worker, 'job_destination', '') or ''
-                            # Skip transfers with empty paths
-                            if not src or not dst:
-                                continue
-                            # Encrypt password for secure storage
-                            password = getattr(worker, 'password', '') or ''
-                            if password and sftp_hostdataeditor.cipher_suite:
-                                try:
-                                    encrypted_password = sftp_hostdataeditor.cipher_suite.encrypt(password.encode()).decode()
-                                except Exception:
-                                    encrypted_password = ''
-                            else:
-                                encrypted_password = ''
-                            pending_jobs.append({
-                                'source_path': src,
-                                'is_source_remote': getattr(worker, 'is_source_remote', False),
-                                'destination_path': dst,
-                                'is_destination_remote': getattr(worker, 'is_destination_remote', False),
-                                'hostname': getattr(worker, 'hostname', ''),
-                                'username': getattr(worker, 'username', ''),
-                                'password': encrypted_password,
-                                'port': getattr(worker, 'port', 22),
-                                'command': getattr(worker, 'command', 'download'),
-                                'job_id': transfer.transfer_id,
-                                'key': getattr(worker, 'temp_key', None),
-                                'status': 'paused' if getattr(transfer, 'paused', False) else 'active'
-                            })
-            
-            if pending_jobs:
-                create_secure_directory(os.path.dirname(QUEUE_FILE_PATH))
-                if is_windows():
-                    with open(QUEUE_FILE_PATH, 'w') as f:
-                        json.dump(pending_jobs, f, indent=2)
-                else:
-                    old_umask = os.umask(0o077)
-                    try:
-                        with open(QUEUE_FILE_PATH, 'w') as f:
-                            json.dump(pending_jobs, f, indent=2)
-                        secure_file_permissions(QUEUE_FILE_PATH)
-                    finally:
-                        os.umask(old_umask)
-            else:
-                if os.path.exists(QUEUE_FILE_PATH):
-                    try:
-                        os.unlink(QUEUE_FILE_PATH)
-                    except OSError:
-                        pass
-            
-        except (OSError, IOError, json.JSONEncodeError) as e:
-            pass
-    def load_pending_transfers(self):
-        """Load pending transfers from disk and restore them to the queue"""
-        try:
-            if not os.path.exists(QUEUE_FILE_PATH):
-                return 0
-            
-            with open(QUEUE_FILE_PATH, 'r') as f:
-                saved_jobs = json.load(f)
-            
-            if not saved_jobs:
-                return 0
-            
-            restored_count = 0
-            for job_data in saved_jobs:
-                try:
-                    src = job_data.get('source_path', '')
-                    dst = job_data.get('destination_path', '')
-                    # Skip jobs with empty paths
-                    if not src or not dst:
-                        continue
-                    
-                    # Decrypt password from secure storage
-                    encrypted_password = job_data.get('password', '')
-                    if encrypted_password and sftp_hostdataeditor.cipher_suite:
-                        try:
-                            password = sftp_hostdataeditor.cipher_suite.decrypt(encrypted_password.encode()).decode()
-                        except Exception:
-                            logger.warning("Failed to decrypt saved password")
-                            password = ''
-                    else:
-                        password = ''
-                    
-                    job = SFTPJob(
-                        source_path=src,
-                        is_source_remote=job_data.get('is_source_remote', False),
-                        destination_path=dst,
-                        is_destination_remote=job_data.get('is_destination_remote', False),
-                        hostname=job_data.get('hostname', ''),
-                        username=job_data.get('username', ''),
-                        password=password,
-                        port=job_data.get('port', 22),
-                        command=job_data.get('command', 'download'),
-                        job_id=job_data.get('job_id'),
-                        key=job_data.get('key')
-                    )
-                    
-                    sftp_queue.put(job)
-                    restored_count += 1
-                    
-                except (KeyError, TypeError) as e:
-                    continue
-            
-            try:
-                os.unlink(QUEUE_FILE_PATH)
-            except OSError:
-                pass
-            
-            if restored_count > 0:
-                self.text_console.append(f"Restored {restored_count} pending transfer(s) from previous session")
-            return restored_count
-            
-        except (OSError, IOError, json.JSONDecodeError) as e:
-            return 0

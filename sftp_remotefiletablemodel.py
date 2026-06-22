@@ -8,7 +8,6 @@ import threading
 import time
 from PySide6.QtGui import QFont, QColor
 from sftp_creds import get_credentials, create_random_integer
-from sftp_downloadworkerclass import create_response_queue, delete_response_queue
 from sftp_operations import SFTPOperations
 from sftp_transfer_handler import FileListWorker
 import stat
