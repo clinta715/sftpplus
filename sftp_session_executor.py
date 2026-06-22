@@ -349,7 +349,10 @@ class CommandExecutor(QObject):
     def _resume_upload(self, ssh, sftp, local_path: str, remote_path: str):
         """Resume an upload from existing position"""
         local_size = os.path.getsize(local_path)
-        existing_size = sftp.stat(remote_path).st_size if sftp.stat(remote_path) else 0
+        try:
+            existing_size = sftp.stat(remote_path).st_size
+        except (IOError, OSError):
+            existing_size = 0
         
         if existing_size >= local_size:
             return remote_path

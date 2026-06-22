@@ -1,13 +1,15 @@
+import os
+import tempfile
+import atexit
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextBrowser,
     QToolButton, QScrollArea, QSizePolicy
 )
 from PySide6.QtCore import QSize, QThreadPool
 from PySide6.QtGui import QPixmap
+
 from sftp_qt_compat import Qt
-import os
-import tempfile
-import atexit
 from sftp_transfer_handler import FilePreviewWorker
 from sftp_platform import secure_file_permissions, is_windows
 
@@ -172,7 +174,6 @@ class FilePreviewWidget(QWidget):
         self.text_preview.setVisible(True)
 
     def _on_close(self):
-        from PySide6.QtWidgets import QWidget
         parent = self.parent()
         while parent:
             if hasattr(parent, 'toggle_preview'):
@@ -197,7 +198,7 @@ class FilePreviewWidget(QWidget):
             _unregister_temp_file(self._temp_file)
             self._temp_file = None
 
-    def preview_file(self, file_path, file_size, modified, permissions, sftp_api=None, session_id=None):
+    def preview_file(self, file_path, file_size, modified, permissions, session_id=None):
         if file_path == self._current_path:
             return
         
@@ -264,6 +265,8 @@ class FilePreviewWidget(QWidget):
         def on_finished(temp_path, original_path, _worker=None):
             if _worker:
                 self._active_workers.discard(_worker)
+            if file_path != self._current_path:
+                return
             try:
                 self._cleanup_temp_file()
                 self._temp_file = temp_path
@@ -276,12 +279,13 @@ class FilePreviewWidget(QWidget):
                 
                 self.text_preview.setPlainText(content)
             except Exception as e:
-                pass
                 self.text_preview.setPlainText(f"Error reading file:\n{str(e)}")
         
         def on_error(original_path, error_msg, _worker=None):
             if _worker:
                 self._active_workers.discard(_worker)
+            if file_path != self._current_path:
+                return
             self.text_preview.setPlainText(f"Error downloading file:\n{error_msg}")
         
         try:
@@ -297,7 +301,6 @@ class FilePreviewWidget(QWidget):
             QThreadPool.globalInstance().start(worker)
             
         except Exception as e:
-            pass
             self.text_preview.setPlainText(f"Error setting up preview:\n{str(e)}")
 
     def _preview_image(self, file_path, session_id=None):
@@ -315,6 +318,8 @@ class FilePreviewWidget(QWidget):
         def on_finished(temp_path, original_path, _worker=None):
             if _worker:
                 self._active_workers.discard(_worker)
+            if file_path != self._current_path:
+                return
             try:
                 self._cleanup_temp_file()
                 self._temp_file = temp_path
@@ -339,7 +344,6 @@ class FilePreviewWidget(QWidget):
                 self.content_area.setWidget(self.image_label)
                 
             except Exception as e:
-                pass
                 self.text_preview.setPlainText(f"Error loading image:\n{str(e)}")
                 self.text_preview.setVisible(True)
                 self.image_label.setVisible(False)
@@ -348,6 +352,8 @@ class FilePreviewWidget(QWidget):
         def on_error(original_path, error_msg, _worker=None):
             if _worker:
                 self._active_workers.discard(_worker)
+            if file_path != self._current_path:
+                return
             self.text_preview.setPlainText(f"Error downloading image:\n{error_msg}")
             self.text_preview.setVisible(True)
             self.image_label.setVisible(False)
@@ -366,8 +372,6 @@ class FilePreviewWidget(QWidget):
             QThreadPool.globalInstance().start(worker)
             
         except Exception as e:
-            pass
-            self.text_preview.setPlainText(f"Error setting up preview:\n{str(e)}")
             self.text_preview.setPlainText(f"Error previewing image:\n{str(e)}")
             self.text_preview.setVisible(True)
             self.image_label.setVisible(False)

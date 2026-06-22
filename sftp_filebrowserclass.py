@@ -39,18 +39,21 @@ class FileBrowser(Browser):
 
         # Column layout: name stretches to fill, size/date are fixed, permissions hidden
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, Qt.HeaderView_Stretch)
+        header.setSectionResizeMode(0, Qt.HeaderView_Interactive)
         header.setSectionResizeMode(1, Qt.HeaderView_Interactive)
         header.setSectionResizeMode(2, Qt.HeaderView_Interactive)
         header.setSectionResizeMode(3, Qt.HeaderView_Interactive)
         header.setMinimumSectionSize(60)
-        self.table.setColumnWidth(1, 90)   # Size
-        self.table.setColumnWidth(2, 100)  # Permissions
-        self.table.setColumnWidth(3, 150)  # Modified
+        saved_widths = prefs.get("local_column_widths", [300, 90, 100, 150])
+        for i, w in enumerate(saved_widths):
+            if i < 4:
+                self.table.setColumnWidth(i, w)
         header.hideSection(2)  # Hide Permissions by default
 
         # Hide permissions column by default
         self.table.setColumnHidden(2, True)
+
+        header.sectionResized.connect(self._on_local_column_resized)
         
         # Add these lines to enable full row selection
         self.table.setSelectionBehavior(Qt.TableView_SelectRows)
@@ -62,10 +65,16 @@ class FileBrowser(Browser):
         self.tree_download_all_btn.setText("⬆️⬆️ Upload All")
         self.tree_download_all_btn.setToolTip("Upload all visible directories to remote")
 
+        self.model.get_files()
+
         if getattr(self, '_pending_tree_populate', False):
             self._pending_tree_populate = False
             from PySide6.QtCore import QTimer
             QTimer.singleShot(0, self.populate_tree_view)
+
+    def _on_local_column_resized(self, logical_index, old_size, new_size):
+        widths = [self.table.columnWidth(i) for i in range(4)]
+        get_preferences().set("local_column_widths", widths)
 
     def remove_directory_with_prompt(self, local_path=None, always=0):
         self.always = always

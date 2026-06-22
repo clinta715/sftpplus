@@ -1476,3 +1476,138 @@ All `os.path.join()` for remote paths replaced across the codebase with forward-
 - `sftp.py` — Explicit application font set
 - `sftp_transfer_model.py` — `QMutex`→`threading.Lock`
 - `__init__.py` — Version bump, new exports (`TransferModel`, `TransferPersistence`)
+
+### Connection Guard & Local Browser Performance (2026-04-16)
+
+Three fixes: connection dialog auto-cancel, concurrent connection re-entrancy, and local file listing performance.
+
+#### Bug 1: `progress.close()` triggers `canceled()` signal (CRITICAL)
+
+**Bug:** `QProgressDialog.close()` emits the `canceled()` signal when a cancel button is present. After a successful connection, `close()` triggered `on_cancel()` which set `cancelled[0] = True`, causing `_test_connection_with_progress()` to return `None` — silently failing every connection.
+
+**Root Cause:** The previous commit added a "Cancel" button to the connection progress dialog (replacing `None`). `QProgressDialog.close()` internally calls `cancel()` which emits `canceled()`. The check `if cancelled[0]: return None` ran after `close()`, treating successful connections as cancelled.
+
+**Fix:** Save result values before closing, disconnect the `canceled` signal before `close()`, and only treat as cancelled if `home_dir is None`:
+```python
+home_dir = result['home_dir']
+was_cancelled = cancelled[0]
+progress.canceled.disconnect(on_cancel)
+progress.close()
+if was_cancelled and home_dir is None:
+    return None
+```
+
+#### Bug 2: Concurrent connection re-entrancy (CRITICAL)
+
+**Bug:** While a slow connection's progress dialog was showing (UI responsive via `QEventLoop`), clicking another site re-entered `connect()`, clobbering shared instance variables (`self.session_id`, `self.temp_hostname`, etc.). Result: duplicate tabs with mixed credentials.
+
+**Root Cause:** No guard against concurrent `connect()` calls. The `QEventLoop` inside `_test_connection_with_progress()` processes UI events, allowing the user to trigger another connection. All connection state (`self.session_id`, `self.temp_hostname`, `self.container_widget`) are instance-level and get overwritten.
+
+**Fix:** Added `self._connecting = False` flag. `connect()` checks the flag at entry and wraps the body in `try/finally`:
+```python
+def connect(self, ...):
+    if self._connecting:
+        self.message_signal.emit("A connection is already in progress. Please wait.")
+        return None
+    self._connecting = True
+    try:
+        # ... existing body ...
+    finally:
+        self._connecting = False
+```
+
+#### Fix 3: Local file listing performance
+
+**Problem:** `FileTableModel.get_files()` was synchronous — stating every file in the local directory on the UI thread. For directories with thousands of files, this caused multi-second freezes during connection initialization. Additionally, `data()` called `os.path.isdir()` (fresh stat) for every cell render despite already caching `is_dir` in `file_info[4]`.
+
+**Fix — Async listing:**
+- `FileTableModel.__init__()` no longer calls `get_files()` — model starts empty
+- `get_files()` now spawns `FileListWorker` (already existed for remote listings) in `QThreadPool`, returns immediately
+- Results populate via `beginResetModel()`/`endResetModel()` callback with generation counter to discard stale results
+- Mirrors the pattern `RemoteFileTableModel` already uses
+
+**Fix — Cached is_dir in `data()`:**
+- `ForegroundRole` and `FontRole` now read `file_info[4]` / `file_info[5]` instead of calling `os.path.isdir()` / `os.path.islink()`
+- Eliminates ~80k redundant stat syscalls during initial render of a 10k-file directory
+
+**Files Modified:**
+- `sftp.py` — Connection guard (`_connecting` flag), progress dialog `canceled` signal disconnect
+- `sftp_filetablemodel.py` — Async `get_files()` with `FileListWorker`, cached `is_dir`/`is_link` in `data()`, removed `processEvents()` and `RemoteFileTableModel` import
+- `sftp_filebrowserclass.py` — Added `self.model.get_files()` call after model construction
+
+### Session Restore, UI Polish & Smart Browser Refresh (2026-04-17)
+
+Four features: session persistence across restarts, column width persistence, directory size display, and direction-aware browser refresh.
+
+#### Session Restore on Close/Startup
+
+**Feature:** When closing the app with open SFTP browser tabs, the user is prompted to save sessions for restoration on next launch.
+
+**New preference:** `session_restore` — `"ask"` (default), `"always"`, `"never"`
+- `"ask"` — Shows combined exit dialog with session checkbox
+- `"always"` — Auto-saves sessions silently, auto-reconnects on startup
+- `"never"` — Skips session save/restore entirely
+
+**Session state file:** `~/.sftp_client_sessions.json` (or `%APPDATA%/sftp_client/sessions.json` on Windows)
+- Passwords encrypted with existing Fernet key from `sftp_hostdataeditor`
+- Stores per-tab: hostname, username, password (encrypted), port, key, current_remote_directory, current_local_directory, tab_title
+- SSH Terminal tabs are NOT saved (only SFTP Browser tabs)
+
+**Combined exit dialog (`closeEvent`):**
+- When both transfers and sessions exist: single dialog with transfer radio buttons + session checkbox
+- When only sessions exist: dialog with restore checkbox
+- When only transfers exist: original 3-button dialog unchanged
+- `"always"` mode auto-saves sessions and only shows transfer dialog if needed
+
+**Startup restore:**
+- `"always"` mode: auto-reconnects all sessions with progress indicators
+- `"ask"` mode: shows picker dialog (checkable list) for user to select which sessions to restore
+- Session file deleted after restore (like transfer queue)
+- Failed connections log errors but don't block remaining sessions
+
+**Directory restore:** `navigate_to_initial_directories()` checks for `_restore_remote_dir`/`_restore_local_dir` overrides. Session restore sets these before calling `connect()`, so the restored directories take precedence over the site's configured initial directories.
+
+**Toolbar UI:** "Sessions:" `QComboBox` with "Ask on close" / "Always restore" / "Never restore" options.
+
+**Files Modified:**
+- `sftp_platform.py` — Added `get_sessions_path()`
+- `sftp_preferences.py` — Added `"session_restore": "ask"` default
+- `sftp.py` — `save_open_sessions()`, `_load_sessions_file()`, `restore_sessions()`, `_show_restore_dialog()`, `_restore_single_session()`, combined `closeEvent()`, `navigate_to_initial_directories()` overrides, Sessions combobox, startup `QTimer.singleShot(500, restore_sessions)`
+
+#### Column Width Persistence
+
+**Problem:** File browser column widths reset to hardcoded defaults (300, 90, 100, 150) on every launch. Remote browser also called `resizeColumnsToContents()` on every directory change, overwriting user-set widths.
+
+**Fix:**
+- Added `local_column_widths` and `remote_column_widths` preferences (default `[300, 90, 100, 150]`)
+- Both browsers restore widths from preferences on init
+- `header.sectionResized` signal saves current widths to preferences on every resize
+- Removed `QTimer.singleShot(100, self.table.resizeColumnsToContents)` from remote browser's `initialize_model()`
+
+**Files Modified:**
+- `sftp_preferences.py` — Added `local_column_widths` and `remote_column_widths` defaults
+- `sftp_filebrowserclass.py` — Restore widths from prefs, `_on_local_column_resized()` handler
+- `sftp_remotefilebrowserclass.py` — Restore widths from prefs, `_on_remote_column_resized()` handler, removed `resizeColumnsToContents()`
+
+#### Directory Size Display
+
+**Problem:** Directories showed "0" in the Size column. Files showed raw byte count without formatting.
+
+**Fix:** Both `FileTableModel` and `RemoteFileTableModel` now return empty string for the Size column when the entry is a directory.
+
+**Files Modified:**
+- `sftp_filetablemodel.py` — `DisplayRole` column 1 returns `""` for directories
+- `sftp_remotefiletablemodel.py` — `DisplayRole` column 1 returns `""` for directories
+
+#### Direction-Aware Browser Refresh
+
+**Problem:** Both local and remote browsers were refreshed after every transfer completion. Downloads don't change the remote filesystem, so refreshing the remote browser was an unnecessary SFTP connection.
+
+**Fix:** `notify_observees()` now accepts an `is_upload` parameter:
+- `is_upload=False` (download) → only refresh local browser
+- `is_upload=True` (upload) → only refresh remote browser
+- `is_upload=None` (default) → refresh both (backward compatible)
+- `mark_transfer_complete()` and `mark_transfer_failed()` derive direction from `display['is_source_remote']`
+
+**Files Modified:**
+- `sftp_transfer_queue_widget.py` — `notify_observees(is_upload)`, `_do_notify_observees(is_upload)`, `_do_refresh(observee, is_upload)`, updated `mark_transfer_complete()` and `mark_transfer_failed()`

@@ -5,9 +5,12 @@ All notable changes to the SFTP Client application will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.5.0] - 2026-04-10
 
 ### Added
+- **Accurate Overall Progress**: Overhauled the transfer progress bar to aggregate stats from all active, completed, and queued transfers.
+- **Early Size Discovery**: The client now attempts to discover file sizes for local transfers as soon as they are added to the queue, providing a more reliable "total bytes" estimate.
+- **Cross-Platform Path Helper**: Added `_remote_join` utility to ensure SFTP paths always use forward slashes, regardless of the local operating system.
 - **Cross-Platform Support**: Application now runs on Windows, macOS, and Linux
   - Platform-specific config directories (`%APPDATA%/sftp_client` on Windows)
   - Local terminal now fully supported on all platforms (QProcess-based, no PTY dependency)
@@ -24,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tree View Context Menu**: Added Rename and Delete options to tree view right-click menu
 
 ### Fixed
+- **Remote Deletion on Windows**: Fixed a bug where remote folders were reported as deleted but remained on the server due to incorrect path separators (backslashes) being used for recursive deletion.
+- **Progress Bar Jumps**: Eliminated progress bar resets and "backwards jumps" when individual transfers in a batch complete.
+- **Legacy Progress Tracking**: Improved progress tracking for legacy transfer objects by ensuring they correctly report status and contribute to the overall aggregation.
 - **Delete Dialog Duplicate**: Fixed bug where delete completion dialog showed multiple times. Root cause was duplicate worker start in `sftp_remotefilebrowserclass.py` (lines 458 and 463 both called `QThreadPool.globalInstance().start(worker)`).
 - **View Refresh After Operations**: Fixed views not updating correctly after uploads/renames/deletes. Root cause was `get_files(force_refresh=True)` called immediately after queueing async transfers - now transfers trigger refresh via `notify_observees()` on completion. Also added missing `notify_observers()` call in remote delete callback so local browser refreshes too.
 - **Site Delete UI Bug**: Fixed bug where deleting a site left a "gap" row in the Connections table. Now blocks signals during table rebuild and clears selection after to prevent stale selection events.
@@ -44,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Toolbar Tooltips**: Now display keyboard shortcuts for each button
 - **Default Browser**: Remote browser is now default active browser instead of local
 - **Config Paths**: All config files now use platform-appropriate directories
+
+## [Unreleased]
+
+### Added
+
+### Fixed
+
+### Changed
 
 ## [2.0.1] - 2026-03-03
 
@@ -86,62 +100,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 - Dead code in `sftp_transfer_handler.py` (orphaned, never integrated)
-
-## [1.x.x] - Previous Versions
-
-### 1.0.0 - Initial Release
-- Multi-tabbed SFTP client
-- SSH Terminal support
-- File preview panel
-- Customizable toolbar
-- Bookmarks and tree view
-- Transfer queue with persistence
-- Enhanced security features
-
----
-
-## Migration Guide
-
-### Upgrading to 2.0.0
-
-The session-based API provides a cleaner interface:
-
-```python
-# Old API (deprecated but still works)
-add_sftp_job(source, True, dest, False, host, user, pass, port, "upload", job_id, key)
-
-# New API
-from sftp_operations import SFTPOperations
-
-ops = SFTPOperations(hostname=host, username=user, password=pass, port=port)
-ops.upload(source, dest, job_id=str(job_id))
-ops.close()
-```
-
-### Context Manager Usage
-
-```python
-from sftp_operations import SFTPOperations
-
-with SFTPOperations('example.com', 'user', 'password') as ops:
-    ops.download('/remote/file.txt', '/local/file.txt')
-    ops.upload('/local/other.txt', '/remote/other.txt')
-# Session automatically closed
-```
-
-### Available Operations
-
-| Method | Description |
-|--------|-------------|
-| `download(remote, local)` | Download file |
-| `upload(local, remote)` | Upload file |
-| `list(path)` | List directory |
-| `list_attr(path)` | List with attributes |
-| `stat(path)` | Get file info |
-| `mkdir(path)` | Create directory |
-| `rmdir(path)` | Remove directory |
-| `remove(path)` | Delete file |
-| `chdir(path)` | Change directory |
-| `exists(path)` | Check if path exists |
-| `is_directory(path)` | Check if directory |
-| `is_file(path)` | Check if file |

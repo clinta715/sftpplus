@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 import argparse
 import threading
 import logging
@@ -15,8 +16,8 @@ from sftp_local_terminal_widget import LocalTerminalWidget
 from sftp_creds import get_credentials, set_credentials, del_credentials, create_random_integer, clear_all_credentials, get_home_directory
 from sftp_session import get_session_manager
 from sftp_qt_compat import Qt  # Use compatibility layer for Qt enums
-from PySide6.QtWidgets import QInputDialog, QFileDialog, QLabel, QToolButton, QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QCompleter, QComboBox, QSpinBox, QTabWidget, QMessageBox, QCheckBox, QMenu, QSizePolicy, QProgressDialog
-from PySide6.QtCore import Signal, QObject, QCoreApplication, QTimer, QRunnable, QThreadPool, QEventLoop
+from PySide6.QtWidgets import QInputDialog, QFileDialog, QLabel, QToolButton, QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QTextEdit, QCompleter, QComboBox, QSpinBox, QTabWidget, QMessageBox, QCheckBox, QMenu, QSizePolicy, QProgressDialog, QDialog, QDialogButtonBox, QListWidget, QListWidgetItem, QRadioButton, QGroupBox
+from PySide6.QtCore import Signal, QObject, QCoreApplication, QTimer, QEvent, QRunnable, QThreadPool, QEventLoop
 from PySide6.QtGui import QKeySequence, QShortcut
 import paramiko
 
@@ -24,8 +25,8 @@ from sftp_preferences import get_preferences
 from sftp_toolbar_customizer import customize_toolbar
 from sftp_context_menu_customizer import is_visible, customize_context_menus
 from sftp_about import show_about
-from sftp_logging import setup_logging
-from sftp_platform import get_known_hosts_path, create_secure_directory
+from sftp_logging import setup_logging, get_logger
+from sftp_platform import get_known_hosts_path, create_secure_directory, get_sessions_path
 
 logger = logging.getLogger('sftp')
 
@@ -67,10 +68,16 @@ class ConnectionTestWorker(QRunnable):
         self.signals = ConnectionTestSignals()
         self._prompt_event = threading.Event()
         self._prompt_result = None
+        self._cancelled = False
         self.setAutoDelete(True)
 
     def resolve_prompt(self, accepted):
         self._prompt_result = accepted
+        self._prompt_event.set()
+
+    def cancel(self):
+        self._cancelled = True
+        self._prompt_result = False
         self._prompt_event.set()
 
     def _wait_for_prompt(self, timeout=120):
@@ -129,6 +136,9 @@ class ConnectionTestWorker(QRunnable):
 
     def run(self):
         for _attempt in range(self.MAX_RETRIES):
+            if self._cancelled:
+                self.signals.error.emit("Connection cancelled")
+                return
             try:
                 home_dir = self._do_connect()
                 self.signals.success.emit(home_dir)
@@ -147,6 +157,9 @@ class ConnectionTestWorker(QRunnable):
                     f"Host key verification failed for {e.hostname}")
                 return
             except Exception as e:
+                if self._cancelled:
+                    self.signals.error.emit("Connection cancelled")
+                    return
                 if self._is_transient_error(e) and _attempt < self.MAX_RETRIES - 1:
                     import time as _time
                     _time.sleep(1)
@@ -277,6 +290,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.sessions = []
         self.observers = []
         self._notifying = False
+        self._connecting = False
 
         self.worker_signals = WorkerSignals()
         self.worker_signals.error.connect(self._display_error)
@@ -519,6 +533,20 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.confirm_exit_checkbox.setChecked(prefs.get_bool("confirm_exit", True))
         self.confirm_exit_checkbox.stateChanged.connect(self._on_confirm_exit_changed)
         
+        self.session_restore_combo = QComboBox()
+        self.session_restore_combo.setToolTip("Session restore behavior on exit")
+        self.session_restore_combo.addItem("Ask on close")
+        self.session_restore_combo.addItem("Always restore")
+        self.session_restore_combo.addItem("Never restore")
+        session_restore_val = prefs.get("session_restore", "ask")
+        session_restore_map = {"ask": 0, "always": 1, "never": 2}
+        self.session_restore_combo.setCurrentIndex(
+            session_restore_map.get(session_restore_val, 0))
+        self.session_restore_combo.currentIndexChanged.connect(
+            self._on_session_restore_changed)
+        
+        self.transfers = {}  # Dictionary to store active transfers
+
         # Initialize hostname combo box
         self.hostname_combo = CustomComboBox(self)  # Pass self as parent
         self.hostname_combo.setEditable(True)
@@ -701,6 +729,8 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         self.button_layout.addWidget(self.connect_button)
         self.button_layout.addWidget(self.terminal_button)
         self.button_layout.addWidget(self.confirm_exit_checkbox)
+        self.button_layout.addWidget(QLabel("Sessions:"))
+        self.button_layout.addWidget(self.session_restore_combo)
         self.button_layout.addWidget(self.edit_button)
         self.button_layout.addStretch()
         self.button_layout.addWidget(self.about_button)
@@ -1471,17 +1501,13 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         return None
 
     def connect(self, hostname="localhost", username="guest", password="guest", port="22", key=None):
-        self.temp_hostname = self.hostname_combo.currentText() if hostname == "localhost" and self.hostname_combo.currentText() else hostname
-        
-        # Print to the global output console
-        self.message_signal.emit(f"Attempting to connect to {self.temp_hostname}...")
-        
+        if self._connecting:
+            self.message_signal.emit("A connection is already in progress. Please wait.")
+            return None
+        self._connecting = True
         try:
-            self.session_id = create_random_integer()
-            self.message_signal.emit(f"Created session ID: {self.session_id}")
-
-            # Hostname, username, password, and port handling
             self.temp_hostname = self.hostname_combo.currentText() if hostname == "localhost" and self.hostname_combo.currentText() else hostname
+
             self.temp_username = self.username.text() if username == "guest" and self.username.text() else username
             self.temp_password = self.password.text() if password == "guest" and self.password.text() else password
             self.temp_port = self.port_selector.text() or port or "22"
@@ -1566,12 +1592,10 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
 
             # NOW initialize the remote browser - connection is fully ready
             self.file_browser_panel.initialize()
-            
-            # Notify transfer queue of new session
+
             if hasattr(self, 'transfer_queue_widget') and self.transfer_queue_widget:
                 self.transfer_queue_widget.register_active_session(self.temp_hostname, self.session_id)
 
-            # Save connection data synchronously
             self.message_signal.emit("Saving connection data...")
             self.save_connection_data_async()
 
@@ -1584,16 +1608,17 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             error_message = f"Unexpected error: {str(e)}"
             QMessageBox.critical(self, "Connection Error", error_message)
             self.message_signal.emit(f"Connection failed: {error_message}")
+        finally:
+            self._connecting = False
         return None
 
     def _test_connection_with_progress(self, hostname, port, username,
                                        password, pkey, known_hosts_path):
         progress = QProgressDialog(
-            f"Connecting to {hostname}:{port}...", None, 0, 0, self)
+            f"Connecting to {hostname}:{port}...", "Cancel", 0, 0, self)
         progress.setWindowTitle("Connecting")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
-        progress.setCancelButton(None)
         progress.setAutoClose(False)
         progress.setAutoReset(False)
         progress.setMinimumWidth(380)
@@ -1606,6 +1631,7 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         result = {'home_dir': None, 'error': None}
         cancelled = [False]
         loop = QEventLoop(self)
+        self._connection_event_loop = loop
 
         def on_step(msg):
             progress.setLabelText(msg)
@@ -1643,8 +1669,15 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
                 Qt.MsgBtn_Yes | Qt.MsgBtn_No, Qt.MsgBtn_No)
             worker.resolve_prompt(reply == Qt.MsgBtn_Yes)
 
-        def on_rejected():
+        def on_cancel():
             cancelled[0] = True
+            worker.cancel()
+            loop.quit()
+
+        def on_timeout():
+            cancelled[0] = True
+            worker.cancel()
+            result['error'] = "Connection timed out."
             loop.quit()
 
         worker.signals.step.connect(on_step)
@@ -1652,25 +1685,38 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         worker.signals.error.connect(on_error)
         worker.signals.prompt_unknown_host.connect(on_prompt_unknown_host)
         worker.signals.prompt_bad_host_key.connect(on_prompt_bad_host_key)
-        progress.rejected.connect(on_rejected)
+        progress.canceled.connect(on_cancel)
+
+        timeout_timer = QTimer(self)
+        timeout_timer.setSingleShot(True)
+        timeout_timer.timeout.connect(on_timeout)
+        timeout_timer.start(90000)
 
         QThreadPool.globalInstance().start(worker)
         loop.exec()
 
+        timeout_timer.stop()
+        del self._connection_event_loop
+
+        home_dir = result['home_dir']
+        error_msg = result['error']
+        was_cancelled = cancelled[0]
+
+        progress.canceled.disconnect(on_cancel)
         progress.close()
 
-        if cancelled[0]:
+        if was_cancelled and home_dir is None:
             self.message_signal.emit("Connection cancelled")
             return None
 
-        if result['error']:
+        if error_msg:
             self.message_signal.emit(
-                f"Connection test failed: {result['error']}")
+                f"Connection test failed: {error_msg}")
             QMessageBox.critical(
-                self, "Connection Error", result['error'])
+                self, "Connection Error", error_msg)
             return None
 
-        return result['home_dir']
+        return home_dir
 
     def set_credentials_async(self):
             set_credentials(self.session_id, 'hostname', self.temp_hostname)
@@ -1703,6 +1749,24 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
     def navigate_to_initial_directories(self):
         """Navigate to initial directories if configured for the current hostname"""
         try:
+            restore_remote = getattr(self, '_restore_remote_dir', None)
+            restore_local = getattr(self, '_restore_local_dir', None)
+            self._restore_remote_dir = None
+            self._restore_local_dir = None
+
+            if restore_remote or restore_local:
+                if restore_remote:
+                    set_credentials(self.session_id, 'current_remote_directory', restore_remote)
+                    self.message_signal.emit(f"Restoring remote directory: {restore_remote}")
+                if restore_local:
+                    set_credentials(self.session_id, 'current_local_directory', restore_local)
+                    self.message_signal.emit(f"Restoring local directory: {restore_local}")
+                    try:
+                        os.chdir(restore_local)
+                    except (OSError, IOError, RuntimeError) as e:
+                        self.message_signal.emit(f"Warning: Could not change to local directory {restore_local}: {e}")
+                return
+
             site = get_site_data(self.temp_hostname)
             if not site:
                 return
@@ -1711,12 +1775,16 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
             
             if initial_remote:
                 self.message_signal.emit(f"Navigating to initial remote directory: {initial_remote}")
-                # Use set_credentials for thread-safe update (don't modify dict directly)
                 set_credentials(self.session_id, 'current_remote_directory', initial_remote)
             
             if initial_local:
                 self.message_signal.emit(f"Navigating to initial local directory: {initial_local}")
                 set_credentials(self.session_id, 'current_local_directory', initial_local)
+                set_credentials(self.session_id, 'current_local_directory', initial_local)
+                try:
+                    os.chdir(initial_local)
+                except (OSError, IOError, RuntimeError) as e:
+                    self.message_signal.emit(f"Warning: Could not change to local directory {initial_local}: {e}")
         except (OSError, IOError, RuntimeError) as e:
             self.message_signal.emit(f"Warning: Could not navigate to initial directories: {e}")
 
@@ -1759,9 +1827,244 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
         prefs = get_preferences()
         prefs.set_bool("confirm_exit", bool(state))
 
-    def closeEvent(self, event):
-        """Handle application close"""
+    def _on_session_restore_changed(self, index):
+        prefs = get_preferences()
+        values = ["ask", "always", "never"]
+        if 0 <= index < len(values):
+            prefs.set("session_restore", values[index])
+
+    def _get_open_sftp_sessions(self):
+        sessions = []
+        for i in range(2, self.tab_widget.count()):
+            widget = self.tab_widget.widget(i)
+            if not widget:
+                continue
+            if getattr(widget, 'is_terminal', False):
+                continue
+            session_id = getattr(widget, 'session_id', None)
+            if not session_id:
+                continue
+            creds = get_credentials(session_id)
+            if not creds or not creds.get('hostname'):
+                continue
+            tab_title = self.tab_widget.tabText(i)
+            sessions.append({
+                'hostname': creds.get('hostname', ''),
+                'username': creds.get('username', ''),
+                'password': creds.get('password', ''),
+                'port': creds.get('port', 22),
+                'key': creds.get('key', '') or '',
+                'current_remote_directory': creds.get('current_remote_directory', ''),
+                'current_local_directory': creds.get('current_local_directory', ''),
+                'tab_title': tab_title,
+            })
+        return sessions
+
+    def save_open_sessions(self, sessions):
+        if not sessions:
+            return
         try:
+            from sftp_hostdataeditor import cipher_suite
+            from sftp_platform import secure_file_permissions
+
+            sessions_to_save = []
+            for s in sessions:
+                entry = dict(s)
+                if entry.get('password') and cipher_suite:
+                    try:
+                        entry['password'] = cipher_suite.encrypt(
+                            entry['password'].encode()).decode()
+                    except Exception:
+                        entry['password'] = ''
+                sessions_to_save.append(entry)
+
+            filepath = get_sessions_path()
+            with open(filepath, 'w') as f:
+                json.dump({"sessions": sessions_to_save}, f, indent=2)
+            secure_file_permissions(filepath)
+            logger.info(f"Saved {len(sessions_to_save)} session(s) to {filepath}")
+        except Exception as e:
+            logger.error(f"Failed to save sessions: {e}")
+
+    @staticmethod
+    def _load_sessions_file():
+        try:
+            filepath = get_sessions_path()
+            if not os.path.exists(filepath):
+                return []
+            with open(filepath, 'r') as f:
+                data = json.load(f)
+            from sftp_hostdataeditor import cipher_suite
+            sessions = data.get("sessions", [])
+            for s in sessions:
+                if s.get('password') and cipher_suite:
+                    try:
+                        s['password'] = cipher_suite.decrypt(
+                            s['password'].encode()).decode()
+                    except Exception:
+                        s['password'] = ''
+            return sessions
+        except Exception as e:
+            logger.warning(f"Failed to load sessions: {e}")
+            return []
+
+    def _delete_sessions_file(self):
+        try:
+            filepath = get_sessions_path()
+            if os.path.exists(filepath):
+                os.remove(filepath)
+        except Exception as e:
+            logger.debug(f"Failed to delete sessions file: {e}")
+
+    def restore_sessions(self):
+        prefs = get_preferences()
+        mode = prefs.get("session_restore", "ask")
+
+        sessions = self._load_sessions_file()
+        if not sessions:
+            return
+
+        if mode == "never":
+            self._delete_sessions_file()
+            return
+
+        to_restore = sessions
+        if mode == "ask":
+            to_restore = self._show_restore_dialog(sessions)
+            if not to_restore:
+                self._delete_sessions_file()
+                return
+
+        self._delete_sessions_file()
+
+        restored = 0
+        for session in to_restore:
+            try:
+                self._restore_single_session(session)
+                restored += 1
+            except Exception as e:
+                logger.warning(
+                    f"Failed to restore session to "
+                    f"{session.get('hostname')}: {e}")
+
+        if restored > 0:
+            self.message_signal.emit(f"Restored {restored} session(s)")
+
+    def _show_restore_dialog(self, sessions):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Restore Sessions")
+        dialog.setMinimumWidth(450)
+        dialog.setStyleSheet("""
+            QDialog { background-color: #2a2a2a; color: #dddddd; }
+            QLabel { color: #dddddd; }
+            QListWidget {
+                background-color: #333333; color: #dddddd;
+                border: 1px solid #555555;
+            }
+            QListWidget::item { padding: 6px; }
+            QListWidget::item:selected { background-color: #4a6fa5; }
+            QPushButton {
+                padding: 6px 16px; border: 1px solid #555555;
+                border-radius: 3px; background-color: #444444;
+                color: #dddddd;
+            }
+            QPushButton:hover { background-color: #555555; }
+        """)
+
+        layout = QVBoxLayout(dialog)
+
+        label = QLabel(
+            f"Found {len(sessions)} saved session(s).\n"
+            f"Select sessions to restore:")
+        layout.addWidget(label)
+
+        list_widget = QListWidget()
+        for s in sessions:
+            host = s.get('hostname', 'Unknown')
+            remote_dir = s.get('current_remote_directory', '')
+            item_text = host
+            if remote_dir:
+                item_text += f"  ({remote_dir})"
+            item = QListWidgetItem(item_text)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            item.setData(Qt.UserRole, s)
+            list_widget.addItem(item)
+        layout.addWidget(list_widget)
+
+        btn_layout = QHBoxLayout()
+        restore_btn = QPushButton("Restore Selected")
+        skip_btn = QPushButton("Skip")
+        btn_layout.addStretch()
+        btn_layout.addWidget(restore_btn)
+        btn_layout.addWidget(skip_btn)
+        layout.addLayout(btn_layout)
+
+        restore_btn.clicked.connect(dialog.accept)
+        skip_btn.clicked.connect(dialog.reject)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return []
+
+        selected = []
+        for i in range(list_widget.count()):
+            item = list_widget.item(i)
+            if item.checkState() == Qt.Checked:
+                selected.append(item.data(Qt.UserRole))
+        return selected
+
+    def _restore_single_session(self, session):
+        hostname = session.get('hostname', '')
+        username = session.get('username', '')
+        password = session.get('password', '')
+        port = session.get('port', 22)
+        key = session.get('key', '') or None
+        remote_dir = session.get('current_remote_directory', '')
+        local_dir = session.get('current_local_directory', '')
+        tab_title = session.get('tab_title', '')
+
+        if remote_dir:
+            self._restore_remote_dir = remote_dir
+        if local_dir:
+            self._restore_local_dir = local_dir
+
+        self.hostname_combo.setCurrentText(hostname)
+        self.username.setText(username)
+        self.password.setText(password)
+        self.port_selector.setText(str(port))
+
+        self.key_combo.setCurrentIndex(0)
+        if key:
+            idx = self.key_combo.findData(key)
+            if idx == -1:
+                self.key_combo.addItem(os.path.basename(key), key)
+                idx = self.key_combo.findData(key)
+            if idx >= 0:
+                self.key_combo.setCurrentIndex(idx)
+
+        session_id = self.connect(
+            hostname=hostname,
+            username=username,
+            password=password,
+            port=str(port),
+            key=key if key else None
+        )
+
+        if session_id is None:
+            return
+
+        if tab_title:
+            idx = self.tab_widget.count() - 1
+            saved_host = self.get_session_title(session_id)
+            if tab_title != saved_host:
+                self.tab_widget.setTabText(idx, tab_title)
+
+    def closeEvent(self, event):
+        """Handle application close with combined transfer/session dialog"""
+        try:
+            if hasattr(self, '_connection_event_loop'):
+                self._connection_event_loop.quit()
+
             prefs = get_preferences()
             if not prefs.get_bool("confirm_exit", True):
                 event.accept()
@@ -1772,25 +2075,120 @@ class MainWindow(QMainWindow):  # Inherits from QMainWindow
                 tw = self.transfer_queue_widget
                 active_count = tw.get_active_transfer_count()
 
-            if active_count > 0:
-                msg = f'There are {active_count} active file transfers.\n\n'
-                msg += 'Unfinished transfers will be saved and resumed on next launch.\n\n'
-                msg += 'What would you like to do?'
-                reply = QMessageBox(self)
-                reply.setWindowTitle("Confirm Exit")
-                reply.setText(msg)
-                save_button = reply.addButton("Exit and Save Transfers", QMessageBox.ButtonRole.ActionRole)
-                discard_button = reply.addButton("Exit and Discard Transfers", QMessageBox.ButtonRole.DestructiveRole)
-                cancel_button = reply.addButton(QMessageBox.StandardButton.Cancel)
-                reply.setDefaultButton(save_button)
-                reply.exec()
-                
-                if reply.clickedButton() == cancel_button:
-                    event.ignore()
-                    return
-                elif reply.clickedButton() == discard_button:
-                    self.transfer_queue_widget.stop_all_transfers()
+            has_transfers = active_count > 0 or queued_count > 0
+            open_sessions = self._get_open_sftp_sessions()
+            has_sessions = len(open_sessions) > 0
+            session_mode = prefs.get("session_restore", "ask")
+
+            if not has_transfers and not has_sessions:
+                event.accept()
+                return
+
+            if session_mode == "always" and has_sessions:
+                self.save_open_sessions(open_sessions)
+                has_sessions = False
+
+            if not has_transfers and not has_sessions:
+                event.accept()
+                return
+
+            if session_mode == "never":
+                has_sessions = False
+
+            if not has_transfers and not has_sessions:
+                event.accept()
+                return
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Confirm Exit")
+            dialog.setStyleSheet("""
+                QDialog { background-color: #2a2a2a; color: #dddddd; }
+                QLabel { color: #dddddd; }
+                QRadioButton { color: #dddddd; }
+                QCheckBox { color: #dddddd; }
+                QGroupBox {
+                    color: #dddddd; border: 1px solid #555555;
+                    border-radius: 4px; margin-top: 8px; padding-top: 12px;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin; left: 10px; padding: 0 4px;
+                }
+                QPushButton {
+                    padding: 6px 16px; border: 1px solid #555555;
+                    border-radius: 3px; background-color: #444444;
+                    color: #dddddd; min-width: 80px;
+                }
+                QPushButton:hover { background-color: #555555; }
+                QPushButton[destructive="true"] { border-color: #aa5555; }
+                QPushButton[destructive="true"]:hover {
+                    background-color: #663333;
+                }
+            """)
+            layout = QVBoxLayout(dialog)
+
+            parts = []
+            if has_transfers:
+                total = active_count + queued_count
+                parts.append(
+                    f"{total} pending transfer(s) "
+                    f"({active_count} active, {queued_count} queued)")
+            if has_sessions:
+                parts.append(
+                    f"{len(open_sessions)} open SFTP session(s)")
+            summary = QLabel(
+                f"You have {' and '.join(parts)}.\n\n"
+                f"What would you like to do?")
+            summary.setWordWrap(True)
+            layout.addWidget(summary)
+
+            save_transfers_radio = None
+            discard_transfers_radio = None
+            restore_sessions_check = None
+
+            if has_transfers:
+                transfer_group = QGroupBox("Transfers")
+                transfer_layout = QVBoxLayout(transfer_group)
+                save_transfers_radio = QRadioButton(
+                    "Save transfers for next launch")
+                discard_transfers_radio = QRadioButton(
+                    "Discard transfers")
+                save_transfers_radio.setChecked(True)
+                transfer_layout.addWidget(save_transfers_radio)
+                transfer_layout.addWidget(discard_transfers_radio)
+                layout.addWidget(transfer_group)
+
+            if has_sessions:
+                session_group = QGroupBox("Sessions")
+                session_layout = QVBoxLayout(session_group)
+                restore_sessions_check = QCheckBox(
+                    "Restore sessions on next launch")
+                restore_sessions_check.setChecked(True)
+                session_layout.addWidget(restore_sessions_check)
+                layout.addWidget(session_group)
+
+            btn_layout = QHBoxLayout()
+            exit_btn = QPushButton("Exit")
+            cancel_btn = QPushButton("Cancel")
+            btn_layout.addStretch()
+            btn_layout.addWidget(exit_btn)
+            btn_layout.addWidget(cancel_btn)
+            layout.addLayout(btn_layout)
+
+            exit_btn.clicked.connect(dialog.accept)
+            cancel_btn.clicked.connect(dialog.reject)
+            dialog.setDefaultButton(exit_btn)
+
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                event.ignore()
+                return
+
+            if has_transfers:
+                if discard_transfers_radio.isChecked():
+                    self.transfer_queue_widget.clear_all_transfers()
                     self.message_signal.emit("Transfers discarded")
+
+            if has_sessions and restore_sessions_check.isChecked():
+                self.save_open_sessions(open_sessions)
 
             event.accept()
         except (OSError, IOError, RuntimeError) as e:
@@ -1833,6 +2231,9 @@ def main():
     main_window.resize(800, 600)
     main_window.show()
 
+    
+    # Restore saved sessions (after UI is ready)
+    QTimer.singleShot(500, main_window.restore_sessions)
     # If command line arguments are provided, initiate the connection
     if args.hostname:
         try:

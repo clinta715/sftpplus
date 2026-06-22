@@ -126,6 +126,14 @@ def get_transfer_queue_path():
     return os.path.join(os.path.expanduser('~'), '.sftp_client_transfer_queue.json')
 
 
+def get_sessions_path():
+    """Get the path to the saved sessions file."""
+    if is_windows():
+        config_dir = get_config_directory()
+        return os.path.join(config_dir, 'sessions.json')
+    return os.path.join(os.path.expanduser('~'), '.sftp_client_sessions.json')
+
+
 def get_history_path():
     """Get the path to the transfer history file."""
     config_dir = get_config_directory()

@@ -28,6 +28,8 @@ DEFAULT_PREFERENCES = {
     "local_tree_visible": False,
     "remote_tree_visible": False,
     "tree_view_position": "above",
+    "local_column_widths": [300, 90, 100, 150],
+    "remote_column_widths": [300, 90, 100, 150],
     "toolbar_buttons": [
         {"id": "refresh", "text": "↻ Refresh", "tooltip": "Refresh current directory", "visible": True},
         {"id": "upload", "text": "↑ Upload", "tooltip": "Upload selected file(s)", "visible": True},
@@ -37,6 +39,7 @@ DEFAULT_PREFERENCES = {
         {"id": "rename", "text": "⇄ Rename", "tooltip": "Rename selected file(s)", "visible": True},
         {"id": "view", "text": "👁 View", "tooltip": "View/Edit selected text file", "visible": True},
     ],
+    "session_restore": "ask",
     "context_menu_items": {
         "file_table": [
             {"id": "rename", "text": "Rename", "visible": True},

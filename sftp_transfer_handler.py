@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QInputDialog, QMessageBox, QApplication
 from PySide6.QtCore import QObject, Signal, QRunnable, QThreadPool, QMutex, QWaitCondition
-from sftp_qt_compat import Qt
+from sftp_qt_compat import Qt, _remote_join
 from sftp_creds import get_credentials, create_random_integer, sanitize_error_message
 from sftp_preferences import get_preferences
 from sftp_connection_pool import get_connection_pool

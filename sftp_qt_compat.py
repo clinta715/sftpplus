@@ -195,6 +195,15 @@ class QtCompat:
     # WindowModality
     WindowModal = QtCore.Qt.WindowModality.WindowModal
 
+def _remote_join(base, name):
+    """Join remote path components using forward slashes (SFTP-safe on all platforms)."""
+    if not base or base == '.':
+        return name
+    base = base.rstrip('/')
+    if not base:
+        return '/' + name
+    return base + '/' + name
+
 # Add QApplication for convenience
 def get_qapplication():
     """Get QApplication instance safely"""

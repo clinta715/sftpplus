@@ -407,19 +407,27 @@ class TransferQueueWidget(QWidget):
             
             self.register_worker(transfer_id, worker)
 
-            group_id = transfer_info.get('group_id')
-            if group_id and group_id in self._transfer_groups:
-                file_size = transfer_info.get('file_size', 0)
-                if file_size <= 0 and not transfer_info['is_source_remote']:
-                    try:
-                        file_size = os.path.getsize(transfer_info['source_path'])
-                    except (OSError, IOError):
-                        pass
-                if file_size > 0:
-                    self._transfer_groups[group_id]["total_bytes"] += file_size
-            
-            worker.signals.progress.connect(
-                lambda bd, bt, sp, et, tid=transfer_id:
+            # Update display with discovered file size if it was unknown
+            file_size = transfer_info.get('file_size', 0)
+            if file_size <= 0 and not transfer_info['is_source_remote']:
+                try:
+                    file_size = os.path.getsize(transfer_info['source_path'])
+                    if file_size > 0:
+                        transfer_info['file_size'] = file_size
+                        if transfer_id in self._transfer_displays:
+                            self._transfer_displays[transfer_id]['bytes_total'] = file_size
+                            # If it's in a group, we might need to update the group total now
+                            # but it's cleaner if it was already accounted for.
+                            # Since we now do it in add_transfer_display, this is mostly a fallback.
+                            group_id = transfer_info.get('group_id')
+                            if group_id and group_id in self._transfer_groups:
+                                # Only add if it wasn't already added (difficult to track without extra state)
+                                # For now, we rely on add_transfer_display having done it.
+                                pass
+                except (OSError, IOError):
+                    pass
+
+            worker.signals.progress.connect(                lambda bd, bt, sp, et, tid=transfer_id:
                     self.update_transfer_progress(tid, bd, bt, sp),
                 type=Qt.QueuedConnection
             )
@@ -1004,21 +1012,25 @@ class TransferQueueWidget(QWidget):
             if observee in self._observees:
                 self._observees.remove(observee)
 
-    def notify_observees(self):
+    def notify_observees(self, is_upload=None):
         """Notify all observers that transfers completed. Thread-safe.
-        Uses debouncing to prevent excessive refreshing during bulk transfers."""
-        # Cancel any pending refresh
+        Uses debouncing to prevent excessive refreshing during bulk transfers.
+        
+        Args:
+            is_upload: True=only refresh remote, False=only refresh local,
+                       None=refresh all (backward compat)
+        """
         if self._refresh_debounce_timer is not None:
             self._refresh_debounce_timer.stop()
         
-        # Schedule a refresh after a short delay to batch multiple rapid updates
         from PySide6.QtCore import QTimer
         self._refresh_debounce_timer = QTimer()
         self._refresh_debounce_timer.setSingleShot(True)
-        self._refresh_debounce_timer.timeout.connect(self._do_notify_observees)
-        self._refresh_debounce_timer.start(500)  # 500ms debounce
+        self._refresh_debounce_timer.timeout.connect(
+            lambda: self._do_notify_observees(is_upload))
+        self._refresh_debounce_timer.start(500)
     
-    def _do_notify_observees(self):
+    def _do_notify_observees(self, is_upload=None):
         """Actually notify observers - called after debounce delay"""
         self._refresh_debounce_timer = None
         
@@ -1028,13 +1040,20 @@ class TransferQueueWidget(QWidget):
         
         for observee in observees_copy:
             try:
-                # Use Qt QueuedConnection to ensure refresh happens on main thread
-                QTimer.singleShot(0, lambda o=observee: self._do_refresh(o))
+                QTimer.singleShot(
+                    0, lambda o=observee, d=is_upload: self._do_refresh(o, d))
             except (AttributeError, RuntimeError):
                 pass
 
-    def _do_refresh(self, observee):
+    def _do_refresh(self, observee, is_upload=None):
         """Actually perform the refresh - called on main thread"""
+        if is_upload is not None:
+            is_remote = (hasattr(observee, 'is_remote_browser')
+                         and observee.is_remote_browser())
+            if is_upload and not is_remote:
+                return
+            if not is_upload and is_remote:
+                return
         try:
             if hasattr(observee, 'model') and hasattr(observee.model, 'get_files'):
                 import inspect
@@ -1067,6 +1086,7 @@ class TransferQueueWidget(QWidget):
         """Update the overall progress bar based on all active transfers."""
         if not hasattr(self, 'overall_progress_widget'):
             return
+
         try:
             if self._discovery_active:
                 self.overall_progress_widget.setVisible(True)
@@ -1079,11 +1099,50 @@ class TransferQueueWidget(QWidget):
                 self.signal_overall_progress.emit(0, 0.0, 0.0, 0, 0)
                 return
 
-            active_count = sum(
-                1 for d in self._transfer_displays.values() if d.get('is_active', False)
-            )
+            total_bytes = 0
+            completed_bytes = 0
+            total_files = 0
+            completed_files = 0
+            total_speed = 0.0
+            active_count = 0
 
-            if active_count == 0:
+            # 1. Process legacy transfers
+            for t in self.transfers:
+                total_files += 1
+                if t.active:
+                    active_count += 1
+                    total_speed += getattr(t, 'speed_bps', 0.0) or 0.0
+                    total_bytes += getattr(t, 'bytes_total', 0) or 0
+                    completed_bytes += getattr(t, 'bytes_done', 0) or 0
+                elif getattr(t, 'status', '') == 'complete':
+                    completed_files += 1
+                    tb = getattr(t, 'bytes_total', 0) or 0
+                    total_bytes += tb
+                    completed_bytes += tb
+                else:
+                    # Queued or failed
+                    total_bytes += getattr(t, 'bytes_total', 0) or 0
+                    completed_bytes += getattr(t, 'bytes_done', 0) or 0
+
+            # 2. Process modern transfer displays
+            for display in self._transfer_displays.values():
+                status = display.get('status')
+                total_files += 1
+                
+                if status == 'complete':
+                    completed_files += 1
+                    tb = display.get('bytes_total', 0) or 0
+                    total_bytes += tb
+                    completed_bytes += tb
+                else:
+                    total_bytes += display.get('bytes_total', 0) or 0
+                    completed_bytes += display.get('bytes_done', 0) or 0
+                    
+                    if display.get('is_active', False) or status == 'transferring':
+                        active_count += 1
+                        total_speed += display.get('speed_bps', 0) or 0
+
+            if total_files == 0 and active_count == 0:
                 self.overall_progress_bar.setRange(0, 100)
                 self.overall_progress_bar.setValue(0)
                 self.overall_progress_label.setText("No active transfers")
@@ -1132,36 +1191,36 @@ class TransferQueueWidget(QWidget):
                 self.signal_overall_progress.emit(overall_percent, total_speed, eta_seconds, completed_bytes, total_bytes)
                 return
 
-            total_bytes_done = 0
-            total_bytes = 0
-            total_speed = 0.0
+            if total_bytes > 0:
+                overall_percent = int((completed_bytes / total_bytes) * 100)
+            elif total_files > 0:
+                overall_percent = int((completed_files / total_files) * 100)
+            else:
+                overall_percent = 0
 
-            for display in self._transfer_displays.values():
-                if display.get('is_active', False):
-                    total_bytes_done += display.get('bytes_done', 0) or 0
-                    total_bytes += display.get('bytes_total', 0) or 0
-                    total_speed += display.get('speed_bps', 0) or 0
-
-            overall_percent = int((total_bytes_done / total_bytes) * 100) if total_bytes > 0 else 0
+            overall_percent = max(0, min(100, overall_percent))
             self.overall_progress_bar.setValue(overall_percent)
-
+            
             speed_str = self._format_speed(total_speed)
-            bytes_str = f"{self.humanize_bytes(total_bytes_done)}/{self.humanize_bytes(total_bytes)}" if total_bytes > 0 else ""
-            eta_seconds = self._calc_eta(total_speed, total_bytes - total_bytes_done if total_bytes > total_bytes_done else 0)
-            eta_str = self._format_eta(eta_seconds)
-
-            parts = [f"Overall: {active_count} active"]
+            bytes_str = f"{self.humanize_bytes(completed_bytes)}/{self.humanize_bytes(total_bytes)}" if total_bytes > 0 else ""
+            
+            parts = [f"Transferring: {completed_files}/{total_files} files"]
             if bytes_str:
                 parts.append(bytes_str)
+            parts.append(f"{overall_percent}%")
             if speed_str:
                 parts.append(speed_str)
+            
+            remaining = max(0, total_bytes - completed_bytes)
+            eta_seconds = self._calc_eta(total_speed, remaining)
+            eta_str = self._format_eta(eta_seconds)
             if eta_str:
                 parts.append(eta_str)
+            
             self.overall_progress_label.setText(" • ".join(parts))
+            self.signal_overall_progress.emit(overall_percent, total_speed, eta_seconds, completed_bytes, total_bytes)
 
-            self.signal_overall_progress.emit(overall_percent, total_speed, eta_seconds, total_bytes_done, total_bytes)
-
-        except (OSError, IOError, RuntimeError):
+        except (OSError, IOError, RuntimeError, ZeroDivisionError):
             pass
 
     def _format_speed(self, speed_bps):
@@ -1224,6 +1283,15 @@ class TransferQueueWidget(QWidget):
                 self._session_waiters[transfer_id] = hostname
             
             # Create transfer info for queue
+            effective_group_id = group_id or self._current_group_id
+            
+            # Discovery file size for local files if not provided
+            if file_size <= 0 and not is_source_remote:
+                try:
+                    file_size = os.path.getsize(source_path)
+                except (OSError, IOError):
+                    pass
+
             transfer_info = {
                 'transfer_id': transfer_id,
                 'hostname': hostname,
@@ -1236,7 +1304,7 @@ class TransferQueueWidget(QWidget):
                 'is_source_remote': is_source_remote,
                 'is_destination_remote': is_destination_remote,
                 'command': command,
-                'group_id': group_id or self._current_group_id,
+                'group_id': effective_group_id,
                 'priority': priority,
                 'status': status,
                 'session_id': session_id,
@@ -1244,6 +1312,11 @@ class TransferQueueWidget(QWidget):
                 'file_size': file_size,
             }
             
+            # Update group total bytes if applicable
+            if effective_group_id and effective_group_id in self._transfer_groups:
+                if file_size > 0:
+                    self._transfer_groups[effective_group_id]["total_bytes"] += file_size
+
             # Insert by priority
             self._insert_pending_by_priority(transfer_info)
             
@@ -1256,6 +1329,8 @@ class TransferQueueWidget(QWidget):
                 if not self._paused:
                     self._check_and_start_queued()
             
+            self.update_overall_progress()
+
         except Exception as e:
             import traceback
             if DEBUG:
@@ -1269,6 +1344,7 @@ class TransferQueueWidget(QWidget):
         source_path = transfer_info['source_path']
         dest_path = transfer_info['dest_path']
         hostname = transfer_info['hostname']
+        file_size = transfer_info.get('file_size', 0)
         
         is_upload = transfer_info['is_source_remote'] and not transfer_info['is_destination_remote']
         
@@ -1400,7 +1476,7 @@ class TransferQueueWidget(QWidget):
             'hostname': hostname,
             'group_id': transfer_info.get('group_id'),
             'bytes_done': 0,
-            'bytes_total': 0,
+            'bytes_total': file_size,
             'speed_bps': 0,
             'transfer_info': dict(transfer_info),
         }
@@ -1609,14 +1685,6 @@ class TransferQueueWidget(QWidget):
         display['bytes_total'] = bytes_total
         display['speed_bps'] = speed_bps
 
-        group_id = display.get('group_id')
-        if group_id and group_id in self._transfer_groups:
-            old_bytes = display.get('_last_group_bytes', 0)
-            delta = bytes_done - old_bytes
-            if delta > 0:
-                self._transfer_groups[group_id]["completed_bytes"] += delta
-            display['_last_group_bytes'] = bytes_done
-
         self.update_overall_progress()
     
     def mark_transfer_complete(self, transfer_id):
@@ -1627,6 +1695,8 @@ class TransferQueueWidget(QWidget):
         display = self._transfer_displays[transfer_id]
         display['is_active'] = False
         display['status'] = 'complete'
+        # Ensure progress is 100% on completion
+        display['bytes_done'] = display.get('bytes_total', 0)
         display['status_label'].setText("Done")
         display['progress_bar'].setValue(100)
         display['progress_bar'].setFormat("100% • Complete")
@@ -1652,6 +1722,8 @@ class TransferQueueWidget(QWidget):
         if prefs.get_bool("clear_completed_on_complete", False):
             QTimer.singleShot(500, self.clear_completed)
         
+        self.notify_observees(
+            is_upload=not display.get('is_source_remote', True))
         self._check_and_start_queued()
 
     def mark_transfer_failed(self, transfer_id, error_message):
@@ -1688,7 +1760,10 @@ class TransferQueueWidget(QWidget):
         if prefs.get_bool("clear_completed_on_complete", False):
             QTimer.singleShot(500, self.clear_completed)
         
+        self.notify_observees(
+            is_upload=not display.get('is_source_remote', True))
         self._check_and_start_queued()
+    
     def remove_transfer_display(self, transfer_id):
         """Remove a transfer display"""
         if transfer_id in self._transfer_displays:
